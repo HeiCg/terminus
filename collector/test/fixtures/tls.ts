@@ -7,7 +7,7 @@ import https from 'node:https';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { Store } from '../../src/store.js';
-import { createIdentity, generateCertificate } from '../../src/security/identity.js';
+import { createIdentity } from '../../src/security/identity.js';
 import { createDeviceServer } from '../../src/deviceServer.js';
 import type { CollectorIdentity } from '../../src/security/types.js';
 
@@ -57,9 +57,13 @@ export async function createTlsFixture(): Promise<TlsFixture> {
   // Paired identity + a second, unrelated identity ("other") to mis-pin.
   const paired = await createIdentity(path.join(dir, 'paired'), { host: 'localhost', ips: ['127.0.0.1', '::1'], generation: 1, keyBits: 2048 }, { ingestPort: 8788, atlantisPort: 10909 });
   const other = await createIdentity(path.join(dir, 'other'), { host: 'localhost', ips: ['127.0.0.1', '::1'], generation: 1, keyBits: 2048 }, { ingestPort: 8788, atlantisPort: 10909 });
-  // An already-expired cert for the expiry path.
-  const expiredPems = await generateCertificate(dir, { host: 'localhost', ips: ['127.0.0.1', '::1'], notBefore: '20200101000000Z', notAfter: '20200102000000Z', keyBits: 2048 });
-  const expired = fakeIdentity(expiredPems.certPem, expiredPems.keyPem, paired.deviceToken);
+  // An already-expired cert for the expiry path. Loaded from a committed fixture
+  // (localhost/127.0.0.1/::1 SANs, notAfter 2020-01-02) rather than generated: OpenSSL
+  // cannot backdate a cert with portable flags, and a static expired PEM lets the real
+  // TLS handshake reject it on the wire (clock injection can't reach Node's TLS layer).
+  const expiredCertPem = await fsp.readFile(new URL('./expired-cert.pem', import.meta.url), 'utf8');
+  const expiredKeyPem = await fsp.readFile(new URL('./expired-key.pem', import.meta.url), 'utf8');
+  const expired = fakeIdentity(expiredCertPem, expiredKeyPem, paired.deviceToken);
 
   const trust: Record<string, string> = { paired: paired.certificatePem, other: other.certificatePem, expired: expired.certificatePem };
 

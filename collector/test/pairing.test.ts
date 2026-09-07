@@ -44,12 +44,15 @@ describe('collector identity (R1)', () => {
   it('refuses to silently replace an expired identity', async () => {
     const d = await tmp();
     await fsp.mkdir(d, { recursive: true, mode: 0o700 });
-    const { certPem, keyPem } = await generateCertificate(d, { host: 'localhost', ips: ['127.0.0.1'], notBefore: '20200101000000Z', notAfter: '20200102000000Z', keyBits: 2048 });
+    // A normal short-lived cert (portable: no backdating flags), aged out by injecting
+    // a clock far past its notAfter rather than generating an already-expired cert.
+    const { certPem, keyPem } = await generateCertificate(d, { host: 'localhost', ips: ['127.0.0.1'], days: 1, keyBits: 2048 });
     await fsp.writeFile(path.join(d, 'cert.pem'), certPem);
     await fsp.writeFile(path.join(d, 'key.pem'), keyPem);
     await fsp.writeFile(path.join(d, 'device-token'), 'x');
     await fsp.writeFile(path.join(d, 'identity.json'), JSON.stringify({ collectorId: '00000000-0000-4000-8000-000000000000', host: 'localhost', generation: 1 }));
-    await expect(loadOrCreateIdentity(d, { host: 'localhost', keyBits: 2048 })).rejects.toThrow(/expired/i);
+    const tenYears = () => Date.now() + 10 * 365 * 24 * 60 * 60 * 1000;
+    await expect(loadOrCreateIdentity(d, { host: 'localhost', keyBits: 2048, now: tenYears })).rejects.toThrow(/expired/i);
   });
 
   it('refuses a mismatched key/cert pair with an actionable error (IMPORTANT 5)', async () => {

@@ -6,6 +6,10 @@ playwright-report/
 # Collector identity material must never be committed (default state dir is
 # outside the repo; this guards an in-repo TERMINUS_STATE_DIR override).
 *.pem
+# Committed test fixtures are the exception: a static, already-expired self-signed
+# cert + throwaway key used to exercise the TLS expiry path portably.
+!test/fixtures/expired-cert.pem
+!test/fixtures/expired-key.pem
 device-token
 identity.json
 state.lock

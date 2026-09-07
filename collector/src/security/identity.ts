@@ -170,8 +170,6 @@ export type GenerateOpts = {
   host?: string;
   ips?: string[];
   days?: number;
-  notBefore?: string; // ASN.1 GeneralizedTime, e.g. 20200101000000Z (fixtures only)
-  notAfter?: string;
   keyBits?: number;   // fixtures may drop to 2048 for speed; production is 3072
 };
 
@@ -192,12 +190,7 @@ export async function generateCertificate(dir: string, opts: GenerateOpts = {}):
     '-addext', 'extendedKeyUsage=serverAuth',
     '-addext', 'keyUsage=digitalSignature,keyEncipherment',
   ];
-  if (opts.notBefore || opts.notAfter) {
-    args.push('-not_before', opts.notBefore ?? '20200101000000Z');
-    args.push('-not_after', opts.notAfter ?? '20200201000000Z');
-  } else {
-    args.push('-days', String(opts.days ?? 365));
-  }
+  args.push('-days', String(opts.days ?? 365));
   try {
     await exec('openssl', args, { maxBuffer: 8 * 1024 * 1024 });
     const certPem = await fsp.readFile(certOut, 'utf8');
@@ -240,6 +233,7 @@ export type LoadOpts = {
   ingestPort?: number;
   atlantisPort?: number;
   keyBits?: number;
+  now?: () => number; // clock source for the expiry check; defaults to Date.now (tests inject a future clock)
 };
 
 // Load the persisted identity, or create one on first run. An unreadable or
@@ -264,7 +258,8 @@ export async function loadOrCreateIdentity(stateDir = defaultStateDir(), opts: L
       throw new Error(`collector identity at ${stateDir} is unreadable (${String(e)}). Fix permissions or run \`npm run identity:rotate\` to reissue.`);
     }
     const cert = new X509Certificate(certPem);
-    if (Date.parse(cert.validTo) < Date.now()) {
+    const now = opts.now ?? Date.now;
+    if (Date.parse(cert.validTo) < now()) {
       throw new Error(`collector certificate expired on ${cert.validTo}. Run \`npm run identity:rotate -- --host <hostname>\` to reissue and re-pair devices.`);
     }
     // A rotation interrupted between the key and cert renames can leave a mismatched
