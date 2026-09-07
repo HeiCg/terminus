@@ -1,0 +1,10 @@
+[
+  { "type": "hello", "deviceId": "d1", "platform": "android", "appVersion": "1.36.0", "buildProfile": "preview", "dropped": 0, "ts": 1700000000000 },
+  { "type": "request", "id": "d1-1", "ts": 1700000000100, "method": "GET", "url": "https://api.example.io/api/v1/me", "headers": { "accept": "application/json", "authorization": "Bearer secret" }, "body": null, "bodySize": 0, "source": "xhr" },
+  { "type": "response", "id": "d1-1", "ts": 1700000000260, "status": 200, "statusText": "OK", "headers": { "content-type": "application/json" }, "body": "{\"id\":42}", "bodySize": 8, "durationMs": 160 },
+  { "type": "request", "id": "d1-2", "ts": 1700000000300, "method": "POST", "url": "https://api.example.io/api/v1/login?access_token=tok", "headers": { "content-type": "application/json" }, "body": "{\"user\":\"a\"}", "bodySize": 12, "source": "xhr" },
+  { "type": "response", "id": "d1-2", "ts": 1700000000420, "status": 201, "statusText": "Created", "headers": { "content-type": "application/json" }, "body": "{\"ok\":true}", "bodySize": 11, "durationMs": 120 },
+  { "type": "ws_open", "wsId": "w1", "ts": 1700000000500, "url": "wss://test.example.io/cable", "protocols": [] },
+  { "type": "ws_frame", "wsId": "w1", "ts": 1700000000600, "direction": "in", "data": "welcome", "size": 7, "binary": false },
+  { "type": "ws_close", "wsId": "w1", "ts": 1700000000700, "code": 1000, "reason": "" }
+]

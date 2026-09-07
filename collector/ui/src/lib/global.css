@@ -1,0 +1,59 @@
+@import './tokens.css';
+
+/* Single source of the mandated 16% tint surface, shared by every tinted
+   pill/badge/banner (Chip, StatusPill, KindBadge, Banner, Button danger).
+   Declared on `*` — NOT :root — because var() inside a custom property is
+   substituted using the value of --tint on the element that DECLARES it. On
+   :root, --tint is undefined, so the whole value would compute to guaranteed-
+   invalid and inherit down as invalid (no tint anywhere). Re-declaring on every
+   element makes each --tint-surface resolve against that element's own --tint.
+   Each consumer sets `--tint: var(--<token>)` on the same element that reads
+   `background: var(--tint-surface)`. */
+* {
+  --tint-surface: color-mix(in srgb, var(--tint) 16%, transparent);
+}
+
+/* Variable woff2 served from /fonts (ui/public/fonts). Weight axis 100 900 so a
+   single file covers every weight the UI uses; font-display: swap keeps first
+   paint from blocking on the font. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/Inter-Variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/JetBrainsMono-Variable.woff2') format('woff2');
+}
+
+/* The surface card shared by the Devices view (DeviceCard / PairingCard /
+   RetentionCard). Common frame only — each card sets its own `gap` in its scoped
+   style. Global (not a component) so the section/div roots keep their own markup
+   and attachments. Named `.surface-card`, NOT `.card`, so it never leaks its border
+   onto OmittedCard's own scoped `.card`. */
+.surface-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg-base);
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+#app { height: 100%; }

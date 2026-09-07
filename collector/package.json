@@ -1,0 +1,63 @@
+{
+  "name": "terminus",
+  "version": "0.1.0",
+  "description": "Local Mac collector that captures HTTP/WebSocket traffic from LAN devices over TLS, shows it in a loopback web UI, and exports HAR 1.2.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeiCg/terminus.git",
+    "directory": "collector"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "dist-ui",
+    "README.md"
+  ],
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build -c ui/vite.config.ts",
+    "ui:build": "vite build -c ui/vite.config.ts",
+    "ui:watch": "vite build -c ui/vite.config.ts --watch",
+    "start": "npm run build && node dist/main.js",
+    "start:built": "node scripts/start-built.mjs",
+    "dev": "node scripts/dev.mjs",
+    "test": "vitest run && vitest run -c ui/vite.config.ts",
+    "test:server": "vitest run",
+    "test:ui": "vitest run -c ui/vite.config.ts",
+    "test:browser": "npm run ui:build && playwright test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:ui": "svelte-check --tsconfig ui/tsconfig.json",
+    "lint:ui": "eslint -c ui/eslint.config.js ui/src",
+    "identity:rotate": "tsx src/security/identityCli.ts",
+    "bench": "tsx bench/run.ts"
+  },
+  "dependencies": {
+    "bonjour-service": "^1.2.1",
+    "mockttp": "4.6.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@testing-library/jest-dom": "^6.4.0",
+    "@testing-library/svelte": "^5.2.0",
+    "@testing-library/user-event": "^14.5.0",
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "eslint": "^9.0.0",
+    "eslint-plugin-svelte": "^3.0.0",
+    "jsdom": "^25.0.0",
+    "svelte": "^5.29.0",
+    "svelte-check": "^4.0.0",
+    "svelte-eslint-parser": "^1.8.1",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.0.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
+  }
+}

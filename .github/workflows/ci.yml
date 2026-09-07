@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Svelte check
+        run: npm run check:ui
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build CLI
+        run: npm run build -w @terminus/cli
+
+      - name: Install Playwright Chromium
+        working-directory: collector
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser tests
+        working-directory: collector
+        run: npm run test:browser

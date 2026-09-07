@@ -1,0 +1,26 @@
+node_modules/
+dist/
+dist-ui/
+*.log
+.DS_Store
+collector/node_modules/
+collector/dist/
+collector/dist-ui/
+
+# Agent / tooling scratch (kept out of the public repo)
+.claude/
+.codex/
+.superpowers/
+.mcp.json
+
+# Test output
+test-results/
+playwright-report/
+
+# Captured-traffic HAR exports, but keep the committed HAR test fixtures
+*.har
+!collector/test/fixtures/har/*.har
+
+# Bench output
+collector/bench/out/*
+!collector/bench/out/.gitkeep

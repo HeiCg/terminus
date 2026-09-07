@@ -1,0 +1,217 @@
+import { describe, it, expect } from 'vitest';
+import { Store, MAX_ENTRIES } from '../src/store.js';
+import { toHar } from '../src/har.js';
+const req = (id: string) => ({ type: 'request' as const, id, ts: 1000, method: 'GET', url: 'https://api.example.io/x', headers: {}, body: null, bodySize: 0, source: 'xhr' as const });
+const res = (id: string) => ({ type: 'response' as const, id, ts: 1200, status: 200, statusText: 'OK', headers: { 'content-type': 'application/json' }, body: '{}', bodySize: 2, durationMs: 200 });
+describe('Store', () => {
+  it('correlates request and response by id', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', req('d1-1'));
+    expect(s.entries('d1')[0].status).toBeNull();
+    s.applyDeviceMessage('d1', res('d1-1'));
+    const e = s.entries('d1')[0];
+    expect(e.status).toBe(200); expect(e.durationMs).toBe(200); expect(e.responseBody).toBe('{}');
+  });
+  it('ignores response without request', () => {
+    const s = new Store(); s.applyDeviceMessage('d1', res('ghost')); expect(s.entries()).toHaveLength(0);
+  });
+  it('caps entries per device', () => {
+    const s = new Store();
+    for (let i = 0; i < MAX_ENTRIES + 10; i++) s.applyDeviceMessage('d1', req(`d1-${i}`));
+    expect(s.entries('d1')).toHaveLength(MAX_ENTRIES);
+    expect(s.entries('d1')[0].id).toBe('d1-10');
+  });
+  it('emits entry on request and on response', () => {
+    const s = new Store(); const seen: string[] = [];
+    s.on('entry', (e) => seen.push(`${e.id}:${e.status}`));
+    s.applyDeviceMessage('d1', req('a')); s.applyDeviceMessage('d1', res('a'));
+    expect(seen).toEqual(['a:null', 'a:200']);
+  });
+  it('tracks devices from hello', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { type: 'hello', deviceId: 'd1', platform: 'android', appVersion: '1.0', buildProfile: 'preview', dropped: 3, ts: 1 });
+    expect(s.devices()[0]).toMatchObject({ deviceId: 'd1', dropped: 3 });
+  });
+  it('clear(deviceId) keeps other devices correlatable (B3)', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', req('d1-1'));
+    s.applyDeviceMessage('d2', req('d2-1'));
+    s.clear('d1');
+    expect(s.entries('d1')).toHaveLength(0);
+    s.applyDeviceMessage('d2', res('d2-1'));
+    expect(s.entries('d2')[0].status).toBe(200);
+  });
+  it('clear(deviceId) drops that device ws sessions only (B3)', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 1, url: 'wss://x', protocols: [] });
+    s.applyDeviceMessage('d2', { type: 'ws_open', wsId: 'w2', ts: 1, url: 'wss://y', protocols: [] });
+    s.clear('d1');
+    s.applyDeviceMessage('d2', { type: 'ws_frame', wsId: 'w2', ts: 2, direction: 'in', data: 'hi', size: 2, binary: false });
+    expect(s.wsSessions('d2')[0].frames).toHaveLength(1);
+  });
+  it('addEntry upserts by id (I6)', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', req('dup'));
+    s.applyDeviceMessage('d1', req('dup'));
+    expect(s.entries('d1')).toHaveLength(1);
+  });
+  it('entries() without device sorts globally by startedAt (N8)', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { ...req('d1-1'), ts: 300 });
+    s.applyDeviceMessage('d2', { ...req('d2-1'), ts: 100 });
+    s.applyDeviceMessage('d1', { ...req('d1-2'), ts: 200 });
+    expect(s.entries().map((e) => e.startedAt)).toEqual([100, 200, 300]);
+  });
+  it('emits an incremental ws_frame SUMMARY (no payload) instead of a full session (I7/T09)', () => {
+    const s = new Store();
+    const frames: { wsId: string; deviceId: string; frame: Record<string, unknown> }[] = [];
+    let sessions = 0;
+    s.on('wsframe', (p) => frames.push(p as never)); s.on('ws', () => sessions++);
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 1, url: 'wss://x', protocols: [] });
+    s.applyDeviceMessage('d1', { type: 'ws_frame', wsId: 'w1', ts: 2, direction: 'in', data: 'hi', size: 2, binary: false });
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ wsId: 'w1', deviceId: 'd1' });
+    const f = frames[0].frame;
+    // FrameSummary: sequence + metadata + BodyRef; the payload is NOT on the wire.
+    expect(f).toMatchObject({ sequence: 0, ts: 2, direction: 'in', binary: false });
+    expect(f.data).toBeUndefined();
+    expect((f.body as { state: string; size: number }).state).toBe('captured');
+    expect((f.body as { size: number }).size).toBe(2);
+    expect(sessions).toBe(1); // only the open, not the frame
+  });
+
+  it('emits POST-eviction retention counts on each ws_frame delta (T09 r2)', () => {
+    const s = new Store({ limits: { wsMessagesPerSession: 3 } });
+    const counts: { r: number; t: number; d: number }[] = [];
+    s.on('wsframe', (p) => { const e = p as { retainedFrames: number; totalFrames: number; droppedFrames: number }; counts.push({ r: e.retainedFrames, t: e.totalFrames, d: e.droppedFrames }); });
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 0, url: 'wss://x', protocols: [] });
+    for (let i = 0; i < 5; i++) s.applyDeviceMessage('d1', { type: 'ws_frame', wsId: 'w1', ts: i, direction: 'in', data: `f${i}`, size: 2, binary: false });
+    // Cap of 3: the 4th and 5th appends evict the oldest, and every delta reflects
+    // the count AFTER that eviction — never a pre-eviction over-count. This pins
+    // the store side of the "no upward drift" invariant the client relies on.
+    expect(counts).toEqual([
+      { r: 1, t: 1, d: 0 },
+      { r: 2, t: 2, d: 0 },
+      { r: 3, t: 3, d: 0 },
+      { r: 3, t: 4, d: 1 },
+      { r: 3, t: 5, d: 2 },
+    ]);
+    // The store's retained count never exceeds the cap.
+    expect(s.wsSessions('d1')[0].frames).toHaveLength(3);
+  });
+  it('flags and emits when a device hits MAX_ENTRIES (D2)', () => {
+    const s = new Store(); let flagged = false;
+    s.on('atmax', () => { flagged = true; });
+    expect(s.atMax()).toBe(false);
+    for (let i = 0; i < MAX_ENTRIES + 1; i++) s.applyDeviceMessage('d1', req(`d1-${i}`));
+    expect(s.atMax()).toBe(true);
+    expect(flagged).toBe(true);
+  });
+  it('groups ws frames by wsId', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 1, url: 'wss://x', protocols: [] });
+    s.applyDeviceMessage('d1', { type: 'ws_frame', wsId: 'w1', ts: 2, direction: 'in', data: 'hi', size: 2, binary: false });
+    s.applyDeviceMessage('d1', { type: 'ws_close', wsId: 'w1', ts: 3, code: 1000, reason: '' });
+    const w = s.wsSessions('d1')[0];
+    expect(w.frames).toHaveLength(1); expect(w.closeCode).toBe(1000);
+  });
+});
+
+// The WSS/JS (device-message) ingest path must apply the SAME collector-side
+// redaction the Atlantis and proxy paths do, BEFORE the bytes are hashed and
+// stored — so a token in a URL query, a sensitive header, or a secret in a body
+// never lands in the BodyStore or in a HAR export in the clear.
+describe('WSS/JS ingest path redaction (uniform posture, IMPORTANT)', () => {
+  it('redacts request/response url, headers and body — in the store AND the HAR export', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', {
+      type: 'request', id: 'r1', ts: 1000, method: 'POST',
+      url: 'https://api.example.io/x?access_token=SEKRIT&keep=1',
+      headers: { authorization: 'Bearer abc', 'x-safe': 'ok' },
+      body: '{"access_token":"SEKRIT","user":"neo"}', bodySize: 38, source: 'xhr',
+    });
+    s.applyDeviceMessage('d1', {
+      type: 'response', id: 'r1', ts: 1200, status: 200, statusText: 'OK',
+      headers: { 'set-cookie': 'sid=xyz', 'content-type': 'application/json' },
+      body: '{"uid":"neo@example.com","ok":true}', bodySize: 35, durationMs: 200,
+    });
+
+    const e = s.entries('d1')[0];
+    // URL query, headers and body are redacted at the store boundary.
+    expect(e.url).toBe('https://api.example.io/x?access_token=***&keep=1');
+    expect(e.requestHeaders.authorization).toBe('***');
+    expect(e.requestHeaders['x-safe']).toBe('ok');
+    expect(e.requestBody).toContain('"access_token":"***"');
+    expect(e.requestBody).toContain('"user":"neo"');
+    expect(e.responseHeaders['set-cookie']).toBe('***');
+    expect(e.responseBody).toContain('"uid":"***"');
+    // No secret survives anywhere in the stored bodies.
+    expect(e.requestBody).not.toContain('SEKRIT');
+    expect(e.responseBody).not.toContain('neo@example.com');
+
+    // The HAR export carries the SAME redacted bytes (the BodyStore hash is of the
+    // redacted body, so the export can only reproduce the redacted text).
+    const h = toHar(s.entries('d1')).log.entries[0];
+    expect(h.request.url).toBe('https://api.example.io/x?access_token=***&keep=1');
+    expect(h.request.headers.find((x) => x.name === 'authorization')?.value).toBe('***');
+    expect(h.request.postData?.text).toContain('"access_token":"***"');
+    expect(h.request.postData?.text).not.toContain('SEKRIT');
+    expect(h.response.content.text).toContain('"uid":"***"');
+    expect(h.response.content.text).not.toContain('neo@example.com');
+  });
+
+  it('redacts ws_open url and ws_frame text before the frame is stored', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', {
+      type: 'ws_open', wsId: 'w1', ts: 1,
+      url: 'wss://api.example.io/cable?access_token=SEK', protocols: [],
+    });
+    s.applyDeviceMessage('d1', {
+      type: 'ws_frame', wsId: 'w1', ts: 2, direction: 'out',
+      data: '{"access_token":"SEK","cmd":"subscribe"}', size: 40, binary: false,
+    });
+    const w = s.wsSessions('d1')[0];
+    expect(w.url).toBe('wss://api.example.io/cable?access_token=***');
+    expect(w.frames[0].data).toContain('"access_token":"***"');
+    expect(w.frames[0].data).toContain('"cmd":"subscribe"');
+    expect(w.frames[0].data).not.toContain('"SEK"');
+    // Frame metadata size matches the redacted bytes (as the proxy/Atlantis paths do).
+    const stored = s.frameBody('d1', 'w1', 0)!;
+    expect(stored.state).toBe('captured');
+    expect(Buffer.from(stored.bytes!).toString('utf8')).not.toContain('"SEK"');
+  });
+
+  it('does not double-redact: a body with no secrets is stored verbatim', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', {
+      type: 'request', id: 'clean', ts: 1, method: 'GET',
+      url: 'https://api.example.io/x?keep=1', headers: { 'x-safe': 'ok' },
+      body: '{"user":"neo","count":3}', bodySize: 24, source: 'xhr',
+    });
+    const e = s.entries('d1')[0];
+    expect(e.url).toBe('https://api.example.io/x?keep=1');
+    expect(e.requestHeaders['x-safe']).toBe('ok');
+    expect(e.requestBody).toBe('{"user":"neo","count":3}');
+  });
+});
+
+// Item 2: an over-cap binary WS frame loses its bytes at decode (bytes==null) but
+// must report the SIZE omission reason, not fall back to 'binary'. A normal binary
+// frame (bytes present, under cap) still reports its binary nature.
+describe('over-cap binary WS frame reports the size-omission reason', () => {
+  it('marks an over-256-KiB binary frame omitted:size, a normal binary frame captured', () => {
+    const s = new Store(); // default spec caps: 256 KiB per WS message
+    s.addWsSession({ wsId: 'w1', deviceId: 'd1', source: 'atlantis', url: 'wss://x', openedAt: 1 });
+    // Normal binary frame: bytes present, under cap -> captured (recoverable) binary.
+    s.appendWsFrame('w1', { ts: 1, direction: 'in', data: null, size: 4, binary: true }, new Uint8Array([0, 1, 2, 0xff]), 'd1');
+    // Over-cap binary frame: decode dropped the bytes (null) but size is over cap.
+    s.appendWsFrame('w1', { ts: 2, direction: 'out', data: null, size: 256 * 1024 + 1, binary: true }, null, 'd1');
+
+    const normal = s.frameBody('d1', 'w1', 0)!;
+    expect(normal.state).toBe('captured');
+    const over = s.frameBody('d1', 'w1', 1)!;
+    expect(over.state).toBe('omitted');
+    expect(over.omitted).toBe('size');
+    expect(over.size).toBe(256 * 1024 + 1);
+  });
+});

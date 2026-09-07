@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-ui/
+test-results/
+playwright-report/
+# Collector identity material must never be committed (default state dir is
+# outside the repo; this guards an in-repo TERMINUS_STATE_DIR override).
+*.pem
+device-token
+identity.json
+state.lock

@@ -1,0 +1,17 @@
+:root {
+  --bg-base:#0B0C0F; --bg-surface:#13151A; --bg-elevated:#1A1D24;
+  --border-subtle:#252932; --border-strong:#333845;
+  --fg-primary:#E6E8EE; --fg-secondary:#8B919E; --fg-muted:#5C6270;
+  /* Text/glyph colour on accent (and other saturated) surfaces — e.g. a primary
+     button's label sits on --accent, where --fg-primary would lack contrast. */
+  --fg-on-accent:#FFFFFF;
+  --accent:#6E7CFF; --accent-soft:rgba(110,124,255,.16);
+  --status-2xx:#3DD68C; --status-3xx:#4FA3FF; --status-4xx:#F5A524; --status-5xx:#F04E4E;
+  --status-error:#F04E4E; --status-pending:#8B919E;
+  --kind-ws:#B98CFF; --kind-sse:#2ED3C6;
+  --source-xhr:#6E7CFF; --source-atlantis:#2ED3C6; --source-proxy:#F5A524;
+  --radius:8px; --radius-sm:6px;
+  --row-h:32px; --sidebar-w:56px; --topbar-h:48px; --filter-h:40px;
+  --font-ui:'Inter',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+}
