@@ -1,6 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
+import { WebSocket } from 'ws';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import fsp from 'node:fs/promises';
 import { ByteBudget, IngestScheduler } from '../src/ingestScheduler.js';
 import { FrameAccumulator, MAX_FRAME_V2, OverloadError } from '../src/atlantis/frames.js';
+import { createDeviceServer, createIngestShared } from '../src/deviceServer.js';
+import { createIdentity } from '../src/security/identity.js';
+import { Store } from '../src/store.js';
 
 const frame = (p: Buffer) => { const h = Buffer.alloc(8); h.writeBigUInt64LE(BigInt(p.length)); return Buffer.concat([h, p]); };
 const waitFor = (fn: () => boolean, ms = 2000) => new Promise<void>((res, rej) => {
@@ -214,4 +222,100 @@ describe('IngestScheduler (O01)', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(fired).toBe(false);
   });
+});
+
+// End-to-end WSS back-pressure: a real device connection over TLS whose burst
+// exceeds the ingest pending caps must be paused, not dropped (the trial finding).
+describe('WSS ingest back-pressure (deviceServer)', () => {
+  const cleanups: Array<() => Promise<void> | void> = [];
+  afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
+
+  // Bring up a device server on an ephemeral port with a fresh temp state dir. Never
+  // binds the live collector's 8787/8788/8789/10909.
+  const bootDeviceServer = async (shared = createIngestShared(), opts: { pauseMaxMs?: number } = {}) => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'nc-bp-'));
+    const identity = await createIdentity(dir, { host: 'localhost', ips: ['127.0.0.1', '::1'], generation: 1, keyBits: 2048 }, { ingestPort: 8788, atlantisPort: 10909 });
+    const store = new Store();
+    const device = createDeviceServer(store, identity, shared, opts);
+    await new Promise<void>((r) => device.server.listen(0, '127.0.0.1', () => r()));
+    const port = (device.server.address() as net.AddressInfo).port;
+    cleanups.push(async () => { device.close(); await fsp.rm(dir, { recursive: true, force: true }); });
+    return { store, identity, device, port, shared };
+  };
+
+  const connect = (port: number, identity: Awaited<ReturnType<typeof createIdentity>>) => {
+    const ws = new WebSocket(`wss://127.0.0.1:${port}/ingest`, {
+      ca: [identity.certificatePem], servername: 'localhost', rejectUnauthorized: true,
+      headers: { authorization: `Bearer ${identity.deviceToken}` },
+    });
+    const closes: number[] = [];
+    ws.on('close', (code) => closes.push(code));
+    ws.on('error', () => {}); // a 1013 close surfaces as an error on some node builds
+    return { ws, closes };
+  };
+
+  const hello = (deviceId: string) => JSON.stringify({ type: 'hello', deviceId, platform: 'android', appVersion: '1.0.0', buildProfile: 'preview', dropped: 0, ts: Date.now() });
+  const request = (id: string, i: number) => JSON.stringify({ type: 'request', id, ts: 1_700_000_000_000 + i, method: 'GET', url: `https://api.example.io/n/${i}`, headers: {}, body: null, bodySize: 0, source: 'xhr' });
+
+  it('keeps the connection and ingests a 64+ frame burst in order, with zero closes', async () => {
+    const { store, identity, port, shared } = await bootDeviceServer();
+    const { ws, closes } = connect(port, identity);
+    await new Promise((r) => ws.on('open', r));
+
+    const N = 80; // well past the per-connection (8) and global (64) pending caps
+    ws.send(hello('burst'));
+    const ids: string[] = [];
+    for (let i = 0; i < N; i++) { const id = `r-${i}`; ids.push(id); ws.send(request(id, i)); }
+
+    // All frames land, in per-connection order.
+    await waitFor(() => store.entries('burst').length === N, 8000);
+    expect(store.entries('burst').map((e) => e.id)).toEqual(ids);
+
+    // The connection is still open and was never closed (the trial finding was 25
+    // closes in ~10s); back-pressure engaged at least once instead.
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    expect(closes).toEqual([]); // zero closes — the whole point
+    expect(shared.scheduler.stats().pauses).toBeGreaterThanOrEqual(1);
+    // Back to rest once drained.
+    await waitFor(() => shared.scheduler.stats().paused === 0, 2000);
+    ws.close();
+  }, 15000);
+
+  it('closes with 1013 (counted as overload) when a paused connection never drains within the deadline', async () => {
+    const shared = createIngestShared();
+    // Occupy both global decode slots with two connections whose decode never resolves
+    // (one hung frame per connection, since a single connection serializes its decode),
+    // so the burst below can never drain and stays parked past the deadline.
+    shared.scheduler.registerHandler('blocker1', () => new Promise<{ ok: true }>(() => {}));
+    shared.scheduler.registerHandler('blocker2', () => new Promise<{ ok: true }>(() => {}));
+    shared.scheduler.submit('blocker1', Buffer.from('a'));
+    shared.scheduler.submit('blocker2', Buffer.from('b'));
+    await waitFor(() => shared.scheduler.stats().activeDecodes === 2, 2000);
+
+    const { identity, port } = await bootDeviceServer(shared, { pauseMaxMs: 200 });
+    const { ws, closes } = connect(port, identity);
+    await new Promise((r) => ws.on('open', r));
+
+    ws.send(hello('stuck'));
+    for (let i = 0; i < 20; i++) ws.send(request(`s-${i}`, i)); // fills the pending cap, then parks
+
+    await waitFor(() => closes.includes(1013), 5000);
+    expect(closes).toContain(1013);
+    expect(shared.scheduler.stats().overload).toBeGreaterThanOrEqual(1);
+  }, 15000);
+
+  it('closes immediately (no pause) on a budget overload — a different failure', async () => {
+    const shared = createIngestShared(1000); // 1 KiB shared byte budget
+    const { identity, port } = await bootDeviceServer(shared);
+    const { ws, closes } = connect(port, identity);
+    await new Promise((r) => ws.on('open', r));
+
+    // A single frame larger than the whole budget: reserve() fails before the scheduler
+    // is ever consulted, so this closes at once rather than back-pressuring.
+    ws.send(Buffer.alloc(2000, 0x20));
+
+    await waitFor(() => closes.includes(1013), 4000);
+    expect(closes).toContain(1013);
+    expect(shared.scheduler.stats().pauses).toBe(0); // never entered back-pressure
+  }, 15000);
 });
