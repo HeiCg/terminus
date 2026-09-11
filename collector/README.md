@@ -269,6 +269,15 @@ Two collector-side aids make the split visible and harmless meanwhile:
   channels. The alias lives in memory only; if the SDK key already names a
   distinct device that has captured traffic, both are kept and a warning is logged.
 
+  For the alias to take effect, **start the ingest channel first**: send the
+  `hello` (with `atlantisDeviceKey`) before starting the Atlantis SDK, so the alias
+  is already known when SDK traffic arrives. If the SDK connects first, its traffic
+  is keyed under its own id and a separate, entry-less device record may linger
+  until the next UI snapshot (reconnect or resync) reconciles the view. Identity
+  metadata is placeholder-safe regardless of order: a real `buildProfile` from the
+  hello is never overwritten by the channel placeholders (`unknown`, `atlantis`),
+  and an empty SDK `appVersion` never clears a known one.
+
 ## Proxy source (additive, QA-only, opt-in)
 
 An optional MITM proxy (built on [mockttp](https://github.com/httptoolkit/mockttp),

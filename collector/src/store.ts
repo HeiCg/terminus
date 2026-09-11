@@ -69,6 +69,16 @@ export const STORE_DEFAULT_LIMITS: RetentionLimits = {
 
 const keyOf = (deviceId: string, id: string): string => JSON.stringify([deviceId, id]);
 
+// `buildProfile` values that are channel PLACEHOLDERS, not a real build profile:
+// 'unknown' is the JS ingest hello's default, 'atlantis' the SDK channel's marker.
+// A placeholder only fills a slot the other channel has not populated with a real
+// value; a real value always replaces a placeholder, whatever the arrival order.
+const PLACEHOLDER_PROFILES = new Set(['unknown', 'atlantis']);
+function pickBuildProfile(incoming: string, existing: string): string {
+  if (!PLACEHOLDER_PROFILES.has(incoming)) return incoming;      // real incoming wins
+  return PLACEHOLDER_PROFILES.has(existing) ? incoming : existing; // else keep a real existing
+}
+
 // Cumulative retention counters, emitted as a `retention` event whenever the
 // store drops something. RSS is deliberately not here: retained bytes are what
 // the store holds, not what the process's heap has released back to the OS.
@@ -378,13 +388,22 @@ export class Store extends EventEmitter {
   // before, so a phone heard on both channels carries both; `lastSeen` stays the
   // MAX across the incoming touch and the prior record so the liveness dot never
   // regresses when the quieter channel checks in.
+  //
+  // Identity metadata is merged so a channel PLACEHOLDER never clobbers a real
+  // value the other channel supplied: `buildProfile` 'unknown' (the JS hello
+  // default) and 'atlantis' (the SDK channel marker) are placeholders that only
+  // fill an empty/placeholder slot, while any real value always wins; an empty
+  // `appVersion` likewise never overwrites a known one. So a hello carrying the
+  // build profile survives a later Atlantis connection, whatever the order.
   touchDevice(d: Device, channel?: 'ingest' | 'atlantis'): void {
     const id = this.resolveDeviceKey(d.deviceId);
     const existing = this.devs.get(id);
     const channels: DeviceChannels = { ...(existing?.channels ?? {}), ...(d.channels ?? {}) };
     if (channel) channels[channel] = { lastSeenAt: d.lastSeen };
     const lastSeen = existing ? Math.max(d.lastSeen, existing.lastSeen) : d.lastSeen;
-    const merged: Device = { ...d, deviceId: id, lastSeen, channels };
+    const buildProfile = existing ? pickBuildProfile(d.buildProfile, existing.buildProfile) : d.buildProfile;
+    const appVersion = existing && d.appVersion === '' ? existing.appVersion : d.appVersion;
+    const merged: Device = { ...d, deviceId: id, appVersion, buildProfile, lastSeen, channels };
     this.metadataBytes -= this.deviceMeta.get(id) ?? 0;
     this.devs.set(id, merged);
     const mb = serializedBytes(merged);

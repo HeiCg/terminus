@@ -54,6 +54,30 @@ describe('Store', () => {
     expect(d.channels?.ingest?.lastSeenAt).toBe(180);
     expect(d.lastSeen).toBe(250);
   });
+  it('keeps a real buildProfile over channel placeholders, whatever the order', () => {
+    const helloUnknown = { type: 'hello' as const, deviceId: 'd1', platform: 'android', appVersion: '3.4.1', buildProfile: 'unknown', dropped: 0, ts: 100 };
+    const helloPreview = { ...helloUnknown, buildProfile: 'preview', ts: 300 };
+    const atlantis = { deviceId: 'd1', platform: 'android', appVersion: '', buildProfile: 'atlantis', dropped: 0, lastSeen: 200 };
+
+    // hello(unknown) -> atlantis -> hello(preview): ends on the real 'preview'.
+    const a = new Store();
+    a.applyDeviceMessage('d1', helloUnknown);
+    a.touchDevice(atlantis, 'atlantis');
+    a.applyDeviceMessage('d1', helloPreview);
+    expect(a.devices()[0].buildProfile).toBe('preview');
+    // The empty atlantis appVersion never overwrote the hello's real one.
+    expect(a.devices()[0].appVersion).toBe('3.4.1');
+
+    // atlantis-first -> hello(preview): still ends on 'preview'.
+    const b = new Store();
+    b.touchDevice(atlantis, 'atlantis');
+    b.applyDeviceMessage('d1', helloPreview);
+    expect(b.devices()[0].buildProfile).toBe('preview');
+
+    // A later placeholder touch does NOT clobber the real value.
+    b.touchDevice(atlantis, 'atlantis');
+    expect(b.devices()[0].buildProfile).toBe('preview');
+  });
   it('touchDevice without a channel preserves existing channels', () => {
     const s = new Store();
     s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 100 }, 'ingest');
