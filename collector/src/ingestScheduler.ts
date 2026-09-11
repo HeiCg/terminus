@@ -33,6 +33,11 @@ export type WorkStats = {
   overload: number;
   closedForErrors: number;
   budgetUsed: number;
+  // Back-pressure (WSS ingest): connections currently read-paused, and the total
+  // number of pause episodes since boot. Driven by the transport via
+  // notePause()/noteResume(); the scheduler only tallies.
+  paused: number;
+  pauses: number;
 };
 
 type QueueItem = { frame: Buffer; bytes: number };
@@ -48,6 +53,12 @@ type Conn = {
 
 const MAX_PENDING_PER_CONN = 8;
 const MAX_PENDING_GLOBAL = 64;
+// Back-pressure low-water marks: a drain callback fires once the connection's
+// pending queue has fallen to (or below) the per-connection mark AND the global
+// pending count is at (or below) its own mark, so a paused device only resumes
+// when there is real headroom, not the instant a single frame clears.
+const PENDING_LOW_WATER_PER_CONN = 4;
+const PENDING_LOW_WATER_GLOBAL = 48;
 const DECODE_SLOTS_GLOBAL = 2;
 const ERROR_LOG_INTERVAL_MS = 5_000;
 const INVALID_WINDOW_MS = 10_000;
@@ -77,6 +88,7 @@ export class IngestScheduler {
   private conns = new Map<string, Conn>();
   private handlers = new Map<string, FrameProcessor>();
   private closers = new Map<string, () => void>();
+  private drains = new Map<string, () => void>(); // one pending drain callback per connection
   private runnable: string[] = [];
   private activeDecodes = 0;
   private queued = 0;
@@ -84,6 +96,8 @@ export class IngestScheduler {
   private invalid = 0;
   private overload = 0;
   private closedForErrors = 0;
+  private pausedNow = 0;   // connections the transport currently holds read-paused
+  private pausesTotal = 0; // pause episodes since boot (monotonic)
   private readonly budget: Budget;
   private readonly now: () => number;
   private readonly logw: { warn: (...a: unknown[]) => void };
@@ -111,12 +125,14 @@ export class IngestScheduler {
   }
 
   // Enqueue an owned frame. Returns 'overload' when the per-connection (8) or global
-  // (64) pending cap is hit; the caller then releases the frame's bytes and closes
-  // the connection. On 'accepted' the scheduler owns the bytes and releases them
-  // once the frame is processed.
-  submit(connectionId: string, frame: Buffer): 'accepted' | 'overload' {
+  // (64) pending cap is hit — a soft, recoverable limit: the caller may back-pressure
+  // (pause + park + onDrain) rather than close. Returns 'closed' when the connection
+  // is already gone (a different, terminal condition). On 'accepted' the scheduler owns
+  // the bytes and releases them once the frame is processed; on either rejection the
+  // caller still owns the frame's reserved bytes.
+  submit(connectionId: string, frame: Buffer): 'accepted' | 'overload' | 'closed' {
     const c = this.conn(connectionId);
-    if (c.closed) { this.overload++; return 'overload'; }
+    if (c.closed) return 'closed';
     if (c.queue.length >= MAX_PENDING_PER_CONN || this.queued >= MAX_PENDING_GLOBAL) {
       this.overload++; return 'overload';
     }
@@ -139,12 +155,43 @@ export class IngestScheduler {
     this.runnable = this.runnable.filter((id) => id !== connectionId);
     this.handlers.delete(connectionId);
     this.closers.delete(connectionId);
+    this.drains.delete(connectionId); // a closed connection never drains-then-resumes
     if (!c.decoding) this.conns.delete(connectionId);
   }
 
   // Record an overload the transport handled itself (e.g. a connection closed for
-  // parking too long above the budget line), so it shows in the counter.
+  // parking too long above the budget/pause line), so it shows in the counter.
   noteOverload(): void { this.overload++; }
+
+  // Back-pressure bookkeeping, owned by the transport: notePause() when it read-pauses
+  // a connection (WSS pause on a full pending cap), noteResume() when it lets it read
+  // again. `pauses` is monotonic; `paused` is the current count and never goes negative.
+  notePause(): void { this.pausedNow++; this.pausesTotal++; }
+  noteResume(): void { if (this.pausedNow > 0) this.pausedNow--; }
+
+  // Register a one-shot drain callback for a back-pressured connection. It fires once
+  // this connection's pending count has fallen to <= PENDING_LOW_WATER_PER_CONN and the
+  // global pending count is <= PENDING_LOW_WATER_GLOBAL — i.e. there is room to admit
+  // the parked frames. Fires at most once per registration (re-register to arm again);
+  // never fires for a closed connection. Checked as the queues drain and once now, in
+  // case the connection already sits below the mark when the callback is registered.
+  onDrain(connectionId: string, cb: () => void): void {
+    this.drains.set(connectionId, cb);
+    setImmediate(() => this.maybeDrain());
+  }
+
+  private maybeDrain(): void {
+    if (this.drains.size === 0) return;
+    if (this.queued > PENDING_LOW_WATER_GLOBAL) return;
+    for (const [id, cb] of [...this.drains]) {
+      const c = this.conns.get(id);
+      if (!c || c.closed) { this.drains.delete(id); continue; }
+      if (c.queue.length <= PENDING_LOW_WATER_PER_CONN) {
+        this.drains.delete(id); // clear before firing so a re-register inside cb re-arms
+        cb();
+      }
+    }
+  }
 
   stats(): WorkStats {
     return {
@@ -156,6 +203,8 @@ export class IngestScheduler {
       overload: this.overload,
       closedForErrors: this.closedForErrors,
       budgetUsed: (this.budget as ByteBudget).used?.() ?? 0,
+      paused: this.pausedNow,
+      pauses: this.pausesTotal,
     };
   }
 
@@ -175,6 +224,8 @@ export class IngestScheduler {
       this.activeDecodes++;
       void this.run(c, item);
     }
+    // Draining a turn may have dropped a paused connection below its low-water mark.
+    this.maybeDrain();
   }
 
   private async run(c: Conn, item: QueueItem): Promise<void> {

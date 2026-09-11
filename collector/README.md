@@ -59,7 +59,9 @@ Environment overrides: `PORT` (UI, default `8787`), `INGEST_PORT` (WSS capture,
 default `8788`), `ATLANTIS_PORT` (Atlantis TLS, default `10909`),
 `TERMINUS_STATE_DIR` (identity storage, default
 `~/Library/Application Support/Terminus`), `TERMINUS_PAIRING_HOST` (the host the
-pairing blob/QR advertise — see [Device identity and pairing](#device-identity-and-pairing)).
+pairing blob/QR advertise — see [Device identity and pairing](#device-identity-and-pairing)),
+`TERMINUS_INGEST_PAUSE_MAX_MS` (back-pressure deadline, default `30000` — see
+[Ingest limits and back-pressure](#ingest-limits-and-back-pressure)).
 The deprecated `NETCAPTURE_STATE_DIR` is still read as a fallback with a one-time
 warning.
 
@@ -277,6 +279,34 @@ Two collector-side aids make the split visible and harmless meanwhile:
   metadata is placeholder-safe regardless of order: a real `buildProfile` from the
   hello is never overwritten by the channel placeholders (`unknown`, `atlantis`),
   and an empty SDK `appVersion` never clears a known one.
+
+## Ingest limits and back-pressure
+
+Both capture ingests (WSS and Atlantis TLS) share one bounded scheduler: a
+per-connection pending cap of 8 frames, a global cap of 64, two decode slots, and
+a shared byte budget (128 MiB) covering framing buffers and queued frames.
+
+When a device's burst outruns those caps, the collector **stops reading that
+connection instead of dropping it**. On the WSS ingest a pending-cap overload
+pauses the socket (`ws.pause()`) and parks the frames whose bytes are already
+reserved — in order, so nothing is lost or reordered — and resumes reading once
+the connection drains back below its low-water mark. This is the correct response
+to a legitimate reconnect flush (e.g. an app replaying its queue after a collector
+restart): the single connection is kept and every frame is ingested in order,
+rather than closed with `1013` and made to replay the same burst.
+
+A connection that stays paused too long is the backstop: after
+**`TERMINUS_INGEST_PAUSE_MAX_MS`** (default `30000`) a still-stuck connection is
+closed with `1013` and counted as an overload, so a peer that keeps its socket
+buffer full but never lets the collector catch up cannot pin resources forever. A
+**byte-budget** overload (a frame that will not fit the shared cap) is a different
+failure and still closes immediately, as does a frame on an already-closed
+connection.
+
+The scheduler's stats expose `paused` (connections currently read-paused) and
+`pauses` (total pause episodes since boot) alongside the existing `overload`
+counter; each pause episode is logged once at info
+(`ingest wss: back-pressure on <connId> …` / `… resumed on <connId> after <ms> ms`).
 
 ## Proxy source (additive, QA-only, opt-in)
 
