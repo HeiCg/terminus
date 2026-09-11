@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { Store } from './store.js';
 import { createHttpServer } from './http.js';
 import { createUiAuth } from './security/uiAuth.js';
-import { loadOrCreateIdentity, toPairingImport, defaultStateDir, migrateLegacyStateDir, acquireStateLock, lanAddresses } from './security/identity.js';
+import { loadOrCreateIdentity, toPairingImport, defaultStateDir, migrateLegacyStateDir, acquireStateLock, lanAddresses, pairingHost, pairingHostWarning, logPairingHostDrift } from './security/identity.js';
 import { writeAdminTokenFile, removeAdminTokenFile } from './security/adminToken.js';
 import { createCertServer } from './security/certServer.js';
 import { createDeviceServer, createIngestShared } from './deviceServer.js';
@@ -99,12 +99,23 @@ async function boot() {
   try {
     const identity = await loadOrCreateIdentity(stateDir, { host, ingestPort: INGEST_PORT, atlantisPort: ATLANTIS_PORT });
     log.info(`collector identity ${identity.collectorId} (generation ${identity.generation}), cert sha256 ${identity.certificateSha256}`);
+    // Boot drift check: if no current LAN IPv4 is in the cert SAN, devices that dial
+    // the advertised host will fail the SAN check. Warn once (never auto-rotate —
+    // rotation invalidates every existing pairing); the same guard covers the
+    // per-request pairingHost fallback so this logs a single time.
+    logPairingHostDrift(identity, env);
+    log.info(`advertising pairing host ${pairingHost(identity, env)}`);
 
     const store = new Store();
     const uiAuth = createUiAuth({ adminToken });
     // certPort is echoed additively on GET /api/pairing so the UI can mint the QR's
     // QrPairing; it is the LAN cert listener's port, where the app fetches the DER.
-    httpHandle = createHttpServer(store, uiDir, { uiAuth, getPairing: () => toPairingImport(identity), certPort: CERT_PORT });
+    httpHandle = createHttpServer(store, uiDir, {
+      uiAuth,
+      getPairing: () => toPairingImport(identity, pairingHost(identity, env)),
+      getPairingWarning: () => pairingHostWarning(identity, env),
+      certPort: CERT_PORT,
+    });
     httpHandle.server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE') log.error(`port ${HTTP_PORT} already in use; set PORT to another value`);
       else log.error('http server error', e);
@@ -135,10 +146,9 @@ async function boot() {
       else log.error('cert server error', e);
     });
     certServer.listen(() => {
-      // The listener binds 0.0.0.0, so advertise the LAN IPv4 addresses a device can
-      // actually dial (drop loopback and IPv6); if there are none, show the bind form.
-      const ipv4 = lanAddresses().filter((ip) => ip.includes('.') && !ip.includes(':') && ip !== '127.0.0.1');
-      for (const ip of ipv4.length ? ipv4 : ['0.0.0.0']) log.info(`cert endpoint http://${ip}:${CERT_PORT}/api/cert`);
+      // The listener binds 0.0.0.0; advertise the same host the QR/pairing carries so
+      // the device fetches /api/cert from an address its SAN check will accept.
+      log.info(`cert endpoint http://${pairingHost(identity, env)}:${CERT_PORT}/api/cert`);
     });
 
     if (env('ALLOW_LEGACY_LOOPBACK') === '1') {

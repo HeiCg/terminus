@@ -56,9 +56,9 @@ function originState(origin: string | undefined, port: string | null): OriginSta
 export function createHttpServer(
   store: Store,
   uiDir: string,
-  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; certPort?: number },
+  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number },
 ) {
-  const { uiAuth, getPairing, certPort } = opts;
+  const { uiAuth, getPairing, getPairingWarning, certPort } = opts;
   // One broadcaster per server owns the /ui sockets: it fans out deltas with a
   // shared serialization and byte budget, and lets logout close a session's
   // sockets by id.
@@ -108,10 +108,16 @@ export function createHttpServer(
           const pairing = getPairing?.() ?? null;
           if (!pairing) { res.writeHead(503); return res.end('pairing unavailable'); }
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-          // Additive: certPort lets the UI build the QR's QrPairing (the app fetches
-          // the DER from the LAN cert listener's /api/cert on that port). Older UI
-          // clients ignore it.
-          return res.end(JSON.stringify(certPort != null ? { ...pairing, certPort } : pairing));
+          // Additive fields; older clients ignore them. `certPort` lets the UI build
+          // the QR's QrPairing (the app fetches the DER from the LAN cert listener's
+          // /api/cert on that port). `pairingHostWarning` is the boot drift warning
+          // (null when the SAN covers a current LAN IPv4) so `terminus pair` can print
+          // it. `pairing.host` is already the advertised LAN IPv4 (resolved by the
+          // caller's pairingHost), not the meta hostname.
+          const body: Record<string, unknown> = { ...pairing };
+          if (certPort != null) body.certPort = certPort;
+          body.pairingHostWarning = getPairingWarning?.() ?? null;
+          return res.end(JSON.stringify(body));
         }
         // Parsed path segments for the parametric metadata/body routes below.
         // e.g. /api/entries/d1/r1/body -> ['api','entries','d1','r1','body'].
