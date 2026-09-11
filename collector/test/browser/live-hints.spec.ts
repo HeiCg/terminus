@@ -57,3 +57,44 @@ test('item 1: a pill counts arrivals on other devices and "Show all" reveals the
   await expect(page.getByTestId('entry-row-b1')).toBeVisible();
   await expect(page.getByTestId('other-device-pill')).toHaveCount(0);
 });
+
+test('item 2: a non-time sort still raises a "Jump to newest" pill on arrivals', async ({ page }) => {
+  await page.goto(`${h.url}/#token=${h.adminToken}`);
+  await expect(page.getByTestId('capture-connection')).toHaveText('Conectado');
+
+  // A couple of rows so the table is populated, then sort by Host (a non-time
+  // sort → no arrival edge → the old build showed no pill and looked frozen).
+  h.store.addEntry(makeEntry('h0', 'd1', { url: 'https://alpha.test/0', startedAt: 1 }));
+  h.store.addEntry(makeEntry('h1', 'd1', { url: 'https://beta.test/1', startedAt: 2 }));
+  await expect(page.getByTestId('entry-row-h1')).toBeVisible();
+
+  await page.getByRole('button', { name: /Host/i }).click(); // sort by host asc
+
+  // A live arrival under the non-time sort: the pill appears (no edge to stick to).
+  h.store.addEntry(makeEntry('h2', 'd1', { url: 'https://gamma.test/2', startedAt: 3 }));
+  const pill = page.getByTestId('jump-newest');
+  await expect(pill).toContainText('1 new · Jump to newest');
+
+  // Clicking jumps back to time desc; the newest row sits at the top and the pill
+  // clears (the scroller re-mounted at the newest edge).
+  await pill.click();
+  await expect(page.getByTestId('jump-newest')).toHaveCount(0);
+  await expect(page.getByTestId('entry-row-h2')).toBeVisible();
+});
+
+test('item 2b: scrolled away under time desc, arrivals raise the "N new" pill', async ({ page }) => {
+  await page.goto(`${h.url}/#token=${h.adminToken}`);
+  await expect(page.getByTestId('capture-connection')).toHaveText('Conectado');
+
+  // Enough rows to scroll the virtualized list well away from the top edge.
+  for (let i = 0; i < 80; i++) h.store.addEntry(makeEntry(`s${i}`, 'd1', { startedAt: i + 1 }));
+  await expect(page.getByTestId('entry-row-s79')).toBeVisible(); // newest at top under time desc
+
+  const scroll = page.getByTestId('request-scroll');
+  await scroll.evaluate((el) => { el.scrollTop = 600; });
+
+  // A fresh arrival while scrolled away: the "↑ N new" pill appears rather than
+  // yanking the scroll position.
+  h.store.addEntry(makeEntry('s-new', 'd1', { startedAt: 999 }));
+  await expect(page.getByRole('button', { name: /↑ 1 new/ })).toBeVisible();
+});
