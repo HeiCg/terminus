@@ -170,3 +170,28 @@ describe('pair --json', () => {
     } finally { await h.close(); }
   });
 });
+
+describe('pair advertised host + drift warning', () => {
+  it('shows the advertised host and prints no drift warning when the SAN is healthy', async () => {
+    const h = await createCollectorHarness({ getPairing: () => fixturePairing(), certPort: F.certPort });
+    try {
+      const r = await runCli(['pair'], { harness: h });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`${F.host}:${F.ingestPort}`);
+      expect(r.stderr).not.toContain('certificate SAN');
+    } finally { await h.close(); }
+  });
+
+  it('prints the pairing-host drift warning to stderr, keeping stdout clean in --json', async () => {
+    const warning = 'no current LAN IPv4 is in the certificate SAN (cert has 127.0.0.1); devices may fail to connect; run `npm run identity:rotate` to regenerate';
+    const h = await createCollectorHarness({ getPairing: () => fixturePairing(), certPort: F.certPort, getPairingWarning: () => warning });
+    try {
+      const r = await runCli(['pair', '--json'], { harness: h });
+      expect(r.code).toBe(0);
+      expect(r.stderr).toContain('certificate SAN');
+      expect(r.stderr).toContain('identity:rotate');
+      // stdout stays a parseable QrPairing blob.
+      expect(() => JSON.parse(r.stdout)).not.toThrow();
+    } finally { await h.close(); }
+  });
+});
