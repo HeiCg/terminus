@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type {
   DeviceMessage, Entry, EntryInput, StoredEntry, StoredFrame, WsSession, WsSessionInput,
-  Device, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot,
+  Device, DeviceChannels, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot,
 } from './types.js';
 import { createBodyStore, type BodyStore } from './bodyStore.js';
 import { createSessionAdmission, type SessionAdmission, type AdmissionOutcome } from './sessionAdmission.js';
@@ -120,6 +120,12 @@ export class Store extends EventEmitter {
 
   private devs = new Map<string, Device>();
   private deviceMeta = new Map<string, number>();
+
+  // Device-identity aliases (in memory only): a key an Atlantis channel presents
+  // under -> the primary deviceId the app's ingest hello declared. Traffic, ws
+  // sessions and channel touches arriving under an alias key are attributed to the
+  // primary so one phone that shows up on two channels is a single device.
+  private aliases = new Map<string, string>();
 
   private metadataBytes = 0;
   private capped = false;
@@ -340,14 +346,29 @@ export class Store extends EventEmitter {
     this.flushRetention();
   }
 
-  touchDevice(d: Device): void {
-    this.metadataBytes -= this.deviceMeta.get(d.deviceId) ?? 0;
-    this.devs.set(d.deviceId, d);
-    const mb = serializedBytes(d);
-    this.deviceMeta.set(d.deviceId, mb);
+  // Resolve a device key through the alias map (identity, when unaliased).
+  resolveDeviceKey(deviceId: string): string { return this.aliases.get(deviceId) ?? deviceId; }
+
+  // Record (or refresh) a device. `channel` names which capture channel this touch
+  // arrived on: an `ingest` hello or an `atlantis` connection. The channel's
+  // `lastSeenAt` is stamped and the record's `channels` merged with what was seen
+  // before, so a phone heard on both channels carries both; `lastSeen` stays the
+  // MAX across the incoming touch and the prior record so the liveness dot never
+  // regresses when the quieter channel checks in.
+  touchDevice(d: Device, channel?: 'ingest' | 'atlantis'): void {
+    const id = this.resolveDeviceKey(d.deviceId);
+    const existing = this.devs.get(id);
+    const channels: DeviceChannels = { ...(existing?.channels ?? {}), ...(d.channels ?? {}) };
+    if (channel) channels[channel] = { lastSeenAt: d.lastSeen };
+    const lastSeen = existing ? Math.max(d.lastSeen, existing.lastSeen) : d.lastSeen;
+    const merged: Device = { ...d, deviceId: id, lastSeen, channels };
+    this.metadataBytes -= this.deviceMeta.get(id) ?? 0;
+    this.devs.set(id, merged);
+    const mb = serializedBytes(merged);
+    this.deviceMeta.set(id, mb);
     this.metadataBytes += mb;
     this.evictMetadata();
-    this.emit('device', d);
+    this.emit('device', merged);
     this.flushRetention();
   }
 
@@ -362,7 +383,7 @@ export class Store extends EventEmitter {
     // BodyStore only ever hashes redacted bytes. Binary frame payloads are not
     // redacted as text (redactText only touches text).
     switch (m.type) {
-      case 'hello': return this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts });
+      case 'hello': return this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts }, 'ingest');
       case 'request': return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url),
         requestHeaders: redactHeaders(m.headers), requestBody: redactText(m.body), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
         status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null });

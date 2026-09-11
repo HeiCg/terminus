@@ -99,8 +99,18 @@ export type WsSession = {
 export type WsSessionInput = Omit<WsSession, 'kind' | 'httpEntryKey' | 'frames' | 'closedAt' | 'closeCode' | 'closeReason'> &
   Partial<Pick<WsSession, 'kind' | 'httpEntryKey' | 'closedAt' | 'closeCode' | 'closeReason'>> & { frames?: WsSession['frames'] };
 
+// The two device-side capture channels a single phone can present on: `ingest` is
+// the JS/WSS hello+messages channel (deviceServer), `atlantis` the Atlantis SDK
+// TLS channel (atlantis/server connection+traffic). Each records when it was last
+// heard from; `Device.lastSeen` stays the max across both.
+export type DeviceChannel = { lastSeenAt: number };
+export type DeviceChannels = { ingest?: DeviceChannel; atlantis?: DeviceChannel };
+
 export type Device = { deviceId: string; platform: string; appVersion: string;
-  buildProfile: string; dropped: number; lastSeen: number };
+  buildProfile: string; dropped: number; lastSeen: number;
+  // Additive (protocol v3): present once a channel has been observed; absent on
+  // legacy records so pre-channels snapshots and fixtures still type-check.
+  channels?: DeviceChannels };
 
 // ---- Export snapshot (R5) -----------------------------------------------
 // An export names what to include: a whole device (or all devices when

@@ -37,7 +37,7 @@ export function encodeControlFrame(collectorId: string, control: { type: 'ready'
 export function applyAtlantisEvent(store: Store, ev: AtlantisEvent, generation: string): 'overload' | void {
   if (ev.kind === 'connection') {
     const platform = platformOf(ev.device?.model);
-    store.touchDevice({ deviceId: ev.deviceKey, platform, appVersion: ev.appVersion ?? ev.project?.name ?? '', buildProfile: 'atlantis', dropped: 0, lastSeen: Date.now() });
+    store.touchDevice({ deviceId: ev.deviceKey, platform, appVersion: ev.appVersion ?? ev.project?.name ?? '', buildProfile: 'atlantis', dropped: 0, lastSeen: Date.now() }, 'atlantis');
     return;
   }
   if (ev.kind === 'traffic') {

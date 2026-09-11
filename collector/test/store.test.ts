@@ -32,6 +32,34 @@ describe('Store', () => {
     s.applyDeviceMessage('d1', { type: 'hello', deviceId: 'd1', platform: 'android', appVersion: '1.0', buildProfile: 'preview', dropped: 3, ts: 1 });
     expect(s.devices()[0]).toMatchObject({ deviceId: 'd1', dropped: 3 });
   });
+  it('records the ingest channel on a hello', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { type: 'hello', deviceId: 'd1', platform: 'android', appVersion: '1.0', buildProfile: 'unknown', dropped: 0, ts: 100 });
+    const d = s.devices()[0];
+    expect(d.channels?.ingest?.lastSeenAt).toBe(100);
+    expect(d.channels?.atlantis).toBeUndefined();
+    expect(d.lastSeen).toBe(100);
+  });
+  it('merges ingest and atlantis channels on one device; lastSeen is the max', () => {
+    const s = new Store();
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 100 }, 'ingest');
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'atlantis', dropped: 0, lastSeen: 250 }, 'atlantis');
+    let d = s.devices()[0];
+    expect(d.channels?.ingest?.lastSeenAt).toBe(100);
+    expect(d.channels?.atlantis?.lastSeenAt).toBe(250);
+    expect(d.lastSeen).toBe(250);
+    // A later ingest touch with an OLDER timestamp keeps lastSeen at the max.
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 180 }, 'ingest');
+    d = s.devices()[0];
+    expect(d.channels?.ingest?.lastSeenAt).toBe(180);
+    expect(d.lastSeen).toBe(250);
+  });
+  it('touchDevice without a channel preserves existing channels', () => {
+    const s = new Store();
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 100 }, 'ingest');
+    s.touchDevice({ deviceId: 'd1', platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: 200 });
+    expect(s.devices()[0].channels?.ingest?.lastSeenAt).toBe(100);
+  });
   it('clear(deviceId) keeps other devices correlatable (B3)', () => {
     const s = new Store();
     s.applyDeviceMessage('d1', req('d1-1'));
