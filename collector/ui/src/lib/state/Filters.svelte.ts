@@ -29,7 +29,15 @@ const ERROR_BUCKETS = new Set(['4xx', '5xx', 'error']);
 // `$derived.by` here recomputes when a batch lands or a filter field changes —
 // no effect required. The class owns nothing the Store owns; it only projects.
 export class Filters {
-  device = $state<string | 'all'>('all');
+  // Backing state for `device`; the accessor pair below rebaselines the
+  // "other-device arrivals" counter whenever the selection changes (a plain field
+  // assignment cannot, and reactive effects are banned). Reads stay reactive.
+  #device = $state<string | 'all'>('all');
+  get device(): string | 'all' { return this.#device; }
+  set device(v: string | 'all') {
+    this.#device = v;
+    this.#rebaseline();
+  }
   search = $state('');
   type = $state<TypeFilter>('all');
   statuses = new SvelteSet<'2xx' | '3xx' | '4xx' | '5xx'>();
@@ -39,6 +47,13 @@ export class Filters {
   sort = $state<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'time', dir: 'desc' });
 
   #store: Store;
+
+  // Baseline for `otherDeviceNew`, captured whenever `device` changes: the total
+  // arrival count and the count of arrivals NOT on the selected device, both taken
+  // at selection time. Plain fields — the derived reacts to `#device` changing (a
+  // $state) and to the Store's reactive counters, never to these.
+  #baseTotal = 0;
+  #baseOther = 0;
 
   // Memoized url split (host/path) per entityKey, so `new URL()` runs once per
   // entry, not once per entry per store batch. Keyed by entityKey and pinned to
@@ -50,6 +65,31 @@ export class Filters {
   constructor(store: Store) {
     this.#store = store;
   }
+
+  // Re-anchor the other-device counter to the store's current arrival totals, so
+  // only arrivals AFTER this selection count. Called from the `device` setter.
+  #rebaseline(): void {
+    const total = this.#store.arrivals;
+    const onSel = this.#device === 'all' ? total : this.#store.arrivalsByDevice.get(this.#device) ?? 0;
+    this.#baseTotal = total;
+    this.#baseOther = total - onSel;
+  }
+
+  // Arrivals that landed under a device OTHER than the selected one since the
+  // selection (or the last snapshot resync). Zero when 'all' is selected — nothing
+  // is then "elsewhere". Drives the Capture view's "N new on other devices" pill:
+  // the trial's frozen-looking case where traffic streams in under an unselected
+  // deviceId. When the store's counters reset below the baseline (a snapshot /
+  // global clear), the baseline is treated as zero so the count starts fresh.
+  otherDeviceNew = $derived.by((): number => {
+    const d = this.#device;
+    if (d === 'all') return 0;
+    const total = this.#store.arrivals;
+    const other = total - (this.#store.arrivalsByDevice.get(d) ?? 0);
+    const base = total < this.#baseTotal ? 0 : this.#baseOther;
+    const n = other - base;
+    return n > 0 ? n : 0;
+  });
 
   // Split an entry's url, reusing the memoized result unless the url for this key
   // changed (an entry's url is stable, so this is effectively parse-once).

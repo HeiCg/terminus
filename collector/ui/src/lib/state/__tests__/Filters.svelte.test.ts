@@ -234,6 +234,55 @@ describe('Filters', () => {
     expect(spy.mock.calls.length).toBe(2);
   });
 
+  it('otherDeviceNew counts arrivals under other devices while a device is selected', () => {
+    const store = new Store();
+    const filters = new Filters(store);
+    // 'all' selected: nothing is "on another device".
+    store.apply([{ type: 'entry', entry: entry({ id: 'a', deviceId: 'd1' }) }]);
+    expect(filters.otherDeviceNew).toBe(0);
+
+    // Select d1. Arrivals under d1 do not count; arrivals under d2 do.
+    filters.device = 'd1';
+    store.apply([{ type: 'entry', entry: entry({ id: 'b', deviceId: 'd1' }) }]);
+    expect(filters.otherDeviceNew).toBe(0);
+    store.apply([
+      { type: 'entry', entry: entry({ id: 'c', deviceId: 'd2' }) },
+      { type: 'entry', entry: entry({ id: 'd', deviceId: 'd3' }) },
+    ]);
+    expect(filters.otherDeviceNew).toBe(2);
+  });
+
+  it('otherDeviceNew resets when the selected device changes', () => {
+    const store = new Store();
+    const filters = new Filters(store);
+    filters.device = 'd1';
+    store.apply([{ type: 'entry', entry: entry({ id: 'c', deviceId: 'd2' }) }]);
+    expect(filters.otherDeviceNew).toBe(2 - 1); // 1
+
+    // Switching device (including back to 'all' on "Show all") rebaselines to 0.
+    filters.device = 'all';
+    expect(filters.otherDeviceNew).toBe(0);
+    filters.device = 'd2';
+    expect(filters.otherDeviceNew).toBe(0);
+    // Now arrivals under d1 are "other".
+    store.apply([{ type: 'entry', entry: entry({ id: 'e', deviceId: 'd1' }) }]);
+    expect(filters.otherDeviceNew).toBe(1);
+  });
+
+  it('otherDeviceNew rebaselines to zero after a snapshot resync', () => {
+    const store = new Store();
+    const filters = new Filters(store);
+    filters.device = 'd1';
+    store.apply([{ type: 'entry', entry: entry({ id: 'c', deviceId: 'd2' }) }]);
+    expect(filters.otherDeviceNew).toBe(1);
+    // A reconnect snapshot zeroes the store counters; the pill must not show a
+    // stale backlog. New other-device arrivals after the resync count from zero.
+    store.apply([{ type: 'snapshot', devices: [], entries: { items: [], nextCursor: null }, ws: { items: [], nextCursor: null }, retention: null, atMax: false, truncated: false, paused: false }]);
+    expect(filters.otherDeviceNew).toBe(0);
+    store.apply([{ type: 'entry', entry: entry({ id: 'f', deviceId: 'd2' }) }]);
+    expect(filters.otherDeviceNew).toBe(1);
+  });
+
   it('clear resets everything but device', () => {
     const { filters } = seeded();
     filters.device = 'd2';

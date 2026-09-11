@@ -183,6 +183,41 @@ describe('BodyPane binary bodies', () => {
     }
   });
 
+  it('renders an "Empty body (0 bytes)" state for a captured zero-length body', () => {
+    const cache = new BodyCache();
+    cache.putRaw('empty-hash', ''); // a captured body whose bytes are empty
+    const sel = makeSelection(cache);
+    sel.current = row({ method: 'POST' });
+    sel.detail = detailWith('application/json');
+    sel.bodies = {
+      request: { kind: 'absent' } as BodyState,
+      response: { kind: 'ok', hash: 'empty-hash', size: 0, encoding: 'utf8' } as BodyState,
+    };
+    const { container } = renderPane(sel, cache);
+
+    // The empty state — not a blank JSON pane — with the method/content-type hint.
+    expect(screen.getByText(/Empty body \(0 bytes\)/)).toBeInTheDocument();
+    expect(screen.getByText(/application\/json/)).toBeInTheDocument();
+    expect(screen.getByText(/POST/)).toBeInTheDocument();
+    // No JSON body container is emitted for an empty body.
+    expect(container.querySelector('pre.json')).toBeNull();
+    // The card still carries the side testid the browser spec reads.
+    expect(container.querySelector('[data-testid="body-response"]')).not.toBeNull();
+  });
+
+  it('renders "No request body" for an absent request body (e.g. a GET)', () => {
+    const cache = new BodyCache();
+    const sel = makeSelection(cache);
+    sel.current = row({ method: 'GET' });
+    sel.detail = detailWith('application/json');
+    sel.bodies = {
+      request: { kind: 'absent' } as BodyState,
+      response: { kind: 'absent' } as BodyState,
+    };
+    renderPane(sel, cache, 'request');
+    expect(screen.getByText('No request body')).toBeInTheDocument();
+  });
+
   it('still renders a textual JSON body as text', () => {
     const cache = new BodyCache();
     cache.putRaw('json-hash', '{"ok":true}');

@@ -27,7 +27,9 @@
   const OVERSCAN = 8;
 
   // Where the newest rows land under the current sort. Only a time sort has a
-  // meaningful arrival edge; any other sort disables the pill entirely.
+  // meaningful arrival edge; any other sort has none, so autoscroll counts every
+  // arrival as pending and the pill offers a jump back to time desc instead of a
+  // stick-to-edge.
   const edge = $derived<'top' | 'bottom' | null>(
     sort.key === 'time' ? (sort.dir === 'desc' ? 'top' : 'bottom') : null,
   );
@@ -58,6 +60,14 @@
   function scrollToEdge(): void {
     pendingNew = 0;
     scroller?.scrollTo({ top: edge === 'bottom' ? scroller.scrollHeight : 0 });
+  }
+
+  // The non-time-sort pill: jump back to time desc. setSort('time') from any other
+  // column yields { time, desc } (its default dir), which changes resetKey and
+  // re-mounts the scroller — autoscroll's first-mount onAttached then zeroes the
+  // pill and the fresh scroller lands at the top (newest) edge.
+  function jumpToNewest(): void {
+    onsort('time');
   }
 
   // Scroll the row for `key` into view with `block: 'nearest'` semantics: the row
@@ -106,7 +116,7 @@
       data-testid="request-scroll"
       bind:this={scroller}
       {@attach virtualList({ rowHeight: ROW_HEIGHT, overscan: OVERSCAN, count: rows.length, onRange: (r) => (range = r) })}
-      {@attach edge ? autoscroll({ edge, version, onDetached: (n) => (pendingNew = n), onAttached: () => (pendingNew = 0) }) : false}
+      {@attach autoscroll({ edge, version, onDetached: (n) => (pendingNew = n), onAttached: () => (pendingNew = 0) })}
     >
       {#if rows.length === 0}
         <p class="no-results">No requests match the filters.</p>
@@ -120,10 +130,18 @@
     </div>
   {/key}
 
-  {#if edge && pendingNew > 0}
-    <button type="button" class="new-pill" class:top={edge === 'top'} onclick={scrollToEdge}>
-      {edge === 'top' ? '↑' : '↓'} {pendingNew} new
-    </button>
+  {#if pendingNew > 0}
+    {#if edge}
+      <button type="button" class="new-pill" class:top={edge === 'top'} onclick={scrollToEdge}>
+        {edge === 'top' ? '↑' : '↓'} {pendingNew} new
+      </button>
+    {:else}
+      <!-- Non-time sort: no arrival edge to snap to, so offer a jump to newest
+           (time desc) instead. -->
+      <button type="button" class="new-pill top" data-testid="jump-newest" onclick={jumpToNewest}>
+        {pendingNew} new · Jump to newest
+      </button>
+    {/if}
   {/if}
 </div>
 

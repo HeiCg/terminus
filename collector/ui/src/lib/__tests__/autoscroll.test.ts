@@ -14,7 +14,7 @@ function fakeEl(opts: { clientHeight: number; scrollHeight: number; scrollTop: n
 
 // Re-attach with a new version, mirroring how Svelte re-runs the attachment when
 // `version` changes (the accumulator persists on the element across re-runs).
-function bump(el: HTMLElement, version: number, edge: 'top' | 'bottom', cbs: { onDetached: (n: number) => void; onAttached: () => void }): void {
+function bump(el: HTMLElement, version: number, edge: 'top' | 'bottom' | null, cbs: { onDetached: (n: number) => void; onAttached: () => void }): void {
   autoscroll({ edge, version, ...cbs })(el);
 }
 
@@ -70,6 +70,32 @@ describe('autoscroll', () => {
     bump(away, 1, 'top', { onDetached: onDetachedA, onAttached: onAttachedA });
     expect(onDetachedA).toHaveBeenCalledWith(1);
     expect(away.scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('(e) null edge (non-time sort): every arrival accrues, position ignored', () => {
+    // Parked AT the top, which under a time sort would stick; with no edge there
+    // is nothing to stick to, so each arrival still counts toward the pill.
+    const el = fakeEl({ clientHeight: 100, scrollHeight: 200, scrollTop: 0 });
+    const onDetached = vi.fn();
+    const onAttached = vi.fn();
+    bump(el, 0, null, { onDetached, onAttached }); // mount → onAttached, pending 0
+    bump(el, 1, null, { onDetached, onAttached });
+    bump(el, 3, null, { onDetached, onAttached }); // +2
+    expect(onDetached.mock.calls.map((c) => c[0])).toEqual([1, 3]);
+    expect(el.scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('(f) null edge: a scroll to the edge does NOT clear the backlog', () => {
+    const el = fakeEl({ clientHeight: 100, scrollHeight: 200, scrollTop: 100 });
+    const onDetached = vi.fn();
+    const onAttached = vi.fn();
+    bump(el, 0, null, { onDetached, onAttached });
+    bump(el, 2, null, { onDetached, onAttached });
+    expect(onDetached).toHaveBeenLastCalledWith(2);
+    onAttached.mockClear();
+    (el as unknown as { scrollTop: number }).scrollTop = 0;
+    el.dispatchEvent(new Event('scroll')); // no listener registered under null edge
+    expect(onAttached).not.toHaveBeenCalled();
   });
 
   it('a manual scroll back to the edge clears the pending count', () => {

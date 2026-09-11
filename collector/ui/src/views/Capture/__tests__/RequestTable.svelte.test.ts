@@ -78,13 +78,20 @@ describe('RequestTable', () => {
     expect(screen.getByText(/No requests match/)).toBeInTheDocument();
   });
 
-  it('hides the "N new" pill under a non-time sort', async () => {
+  it('shows a "Jump to newest" pill under a non-time sort when arrivals land', async () => {
     const hostSort = { key: 'host', dir: 'asc' } as const;
-    const { rerender } = render(RequestTable, { props: props({ sort: hostSort, version: 1 }) });
+    const onsort = vi.fn();
+    const { rerender } = render(RequestTable, { props: props({ sort: hostSort, version: 1, onsort }) });
     await layout(320);
-    await rerender(props({ sort: hostSort, version: 2 })); // an "arrival" — must not raise a pill
+    // Parked at the top; under a non-time sort there is no arrival edge, so the
+    // arrival still raises the pill regardless of scroll position.
+    await rerender(props({ sort: hostSort, version: 2, onsort })); // an arrival
     await tick();
-    expect(screen.queryByText(/new/)).toBeNull();
+    const pill = screen.getByTestId('jump-newest');
+    expect(pill).toHaveTextContent('1 new · Jump to newest');
+    // Clicking jumps back to time desc via setSort('time').
+    await fireEvent.click(pill);
+    expect(onsort).toHaveBeenCalledWith('time');
   });
 
   it('shows "↑ N new" under time desc when scrolled away from the top edge', async () => {

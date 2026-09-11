@@ -35,8 +35,14 @@ const stick = (el: HTMLElement, edge: Edge): void => {
 //   clears the pill.
 // A manual scroll back to the edge also clears the pending count. The caller
 // scrolls to the edge on the pill click via `element.scrollTo`.
+//
+// `edge` may be null under a non-time sort, where new rows have no predictable
+// arrival edge: then EVERY arrival accrues to the pending count (there is no edge
+// to be "near", so nothing sticks or auto-clears on scroll). The caller shows a
+// "Jump to newest" pill that switches back to time desc, which re-mounts the
+// scroller and resets the count via first-mount `onAttached`.
 export function autoscroll(opts: {
-  edge: Edge;
+  edge: Edge | null;
   version: number;
   onDetached: (pendingNew: number) => void;
   onAttached: () => void;
@@ -45,24 +51,28 @@ export function autoscroll(opts: {
     const el = element as Anchored;
     const prev = el.__asVersion;
     el.__asVersion = opts.version;
+    const edge = opts.edge;
 
     if (prev === undefined || opts.version < prev) {
       el.__asPending = 0;
       opts.onAttached();
     } else if (opts.version > prev) {
       const delta = opts.version - prev;
-      if (nearEdge(el, opts.edge)) {
+      if (edge !== null && nearEdge(el, edge)) {
         el.__asPending = 0;
-        stick(el, opts.edge);
+        stick(el, edge);
         opts.onAttached();
       } else {
+        // No edge (non-time sort) OR scrolled away: accrue the delta as pending.
         el.__asPending = (el.__asPending ?? 0) + delta;
         opts.onDetached(el.__asPending);
       }
     }
 
+    if (edge === null) return; // no edge to snap to, so no scroll listener
+
     const onScroll = (): void => {
-      if (nearEdge(el, opts.edge) && (el.__asPending ?? 0) > 0) {
+      if (nearEdge(el, edge) && (el.__asPending ?? 0) > 0) {
         el.__asPending = 0;
         opts.onAttached();
       }

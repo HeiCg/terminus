@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { describe, it, expect } from 'vitest';
 import CaptureView from '../CaptureView.svelte';
 import { Store } from '../../../lib/state/Store.svelte.js';
@@ -68,5 +69,51 @@ describe('CaptureView empty states', () => {
     const filters = new Filters(store);
     render(CaptureView, { context: harness(store, filters) });
     expect(screen.getByText('Aguardando device…')).toBeInTheDocument();
+  });
+});
+
+describe('CaptureView other-device pill', () => {
+  // Selection needs the shape CaptureView + RequestTable read when a device with
+  // rows is showing: a null current and a settable scrollToKey hook.
+  function selectionStub() {
+    return { current: null, scrollToKey: null as unknown, select() {} } as unknown;
+  }
+  function harnessWithSel(store: Store, filters: Filters, selection: unknown) {
+    return new Map<symbol, unknown>([
+      [CTX.store, store], [CTX.nav, new Nav()], [CTX.filters, filters], [CTX.selection, selection],
+    ]);
+  }
+
+  it('shows "N new on other devices" only after live arrivals land elsewhere', async () => {
+    const store = new Store();
+    // Snapshot seeds rows on the selected device AND another; the resync zeroes
+    // the arrival counters, so the pill starts hidden.
+    store.apply([snapshot([entry('d1', 'a'), entry('d2', 'b')])]);
+    const filters = new Filters(store);
+    filters.device = 'd1';
+
+    render(CaptureView, { context: harnessWithSel(store, filters, selectionStub()) });
+    expect(screen.queryByTestId('other-device-pill')).toBeNull();
+
+    // A live delta under d2 while d1 is selected: the pill appears with the count.
+    store.apply([{ type: 'entry', entry: entry('d2', 'c') }]);
+    await tick();
+    const pill = screen.getByTestId('other-device-pill');
+    expect(pill).toHaveTextContent('1 new on other devices');
+  });
+
+  it('"Show all" clears the pill and switches the device filter to all', async () => {
+    const store = new Store();
+    store.apply([snapshot([entry('d1', 'a')])]);
+    const filters = new Filters(store);
+    filters.device = 'd1';
+    render(CaptureView, { context: harnessWithSel(store, filters, selectionStub()) });
+
+    store.apply([{ type: 'entry', entry: entry('d2', 'c') }]);
+    await tick();
+    await fireEvent.click(screen.getByTestId('other-device-pill'));
+    expect(filters.device).toBe('all');
+    await tick();
+    expect(screen.queryByTestId('other-device-pill')).toBeNull();
   });
 });
