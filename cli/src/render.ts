@@ -64,20 +64,29 @@ export function frameLine(
 // A device row for `terminus devices`. The collector's device DTO carries no
 // friendly name or per-device entry count, so the columns are the fields it does
 // expose: id, platform, app version, build profile, last-seen time, dropped count.
-const DW = { id: 22, platform: 10, appVersion: 14, build: 12, seen: 8 } as const;
+const DW = { id: 22, platform: 10, appVersion: 14, build: 12, channels: 16, seen: 8 } as const;
+
+// The capture channels a device has been heard on, as `ingest,atlantis` (in that
+// fixed order); a dash when none has been observed yet.
+export function deviceChannels(d: UiDevice): string {
+  const parts: string[] = [];
+  if (d.channels?.ingest) parts.push('ingest');
+  if (d.channels?.atlantis) parts.push('atlantis');
+  return parts.length ? parts.join(',') : '-';
+}
 
 export function deviceHeader(colors: Colors): string {
   return colors.dim([
     cell('DEVICE', DW.id), cell('PLATFORM', DW.platform), cell('APP', DW.appVersion),
-    cell('BUILD', DW.build), cell('LAST SEEN', DW.seen), 'DROPPED',
+    cell('BUILD', DW.build), cell('CHANNELS', DW.channels), cell('LAST SEEN', DW.seen), 'DROPPED',
   ].join(GAP));
 }
 
 export function deviceRow(d: UiDevice, colors: Colors): string {
   return [
     cell(d.deviceId, DW.id), cell(d.platform ?? '', DW.platform), cell(d.appVersion ?? '', DW.appVersion),
-    cell(d.buildProfile ?? '', DW.build), colors.dim(cell(clock(d.lastSeen), DW.seen)),
-    String(d.dropped ?? 0),
+    cell(d.buildProfile ?? '', DW.build), cell(deviceChannels(d), DW.channels),
+    colors.dim(cell(clock(d.lastSeen), DW.seen)), String(d.dropped ?? 0),
   ].join(GAP);
 }
 
