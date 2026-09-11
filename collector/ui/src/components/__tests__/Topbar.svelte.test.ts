@@ -94,6 +94,27 @@ describe('Topbar', () => {
     expect(screen.queryByRole('button', { name: 'Export JSON' })).toBeNull(); // outside: closed
   });
 
+  it('shows a connection dot that mirrors the socket state', async () => {
+    const { store, session, clock, filters } = harness();
+    session.status = 'ready';
+    session.connection = 'open';
+    render(Topbar, { props: { filters, session, store, clock } });
+    const dot = screen.getByTestId('conn-dot');
+    expect(dot).toHaveAttribute('data-state', 'live');
+    expect(dot).toHaveAttribute('title', expect.stringMatching(/live/i));
+
+    session.connection = 'reconnecting';
+    await tick();
+    expect(dot).toHaveAttribute('data-state', 'reconnecting');
+
+    // Paused takes precedence over the socket state in the dot.
+    session.connection = 'open';
+    session.paused = true;
+    await tick();
+    expect(dot).toHaveAttribute('data-state', 'paused');
+    expect(dot).toHaveAttribute('title', expect.stringMatching(/paused/i));
+  });
+
   it('trigger pointerdown then click toggles the menu closed (no reopen)', async () => {
     const { store, session, clock, filters } = harness();
     render(Topbar, { props: { filters, session, store, clock } });

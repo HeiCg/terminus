@@ -27,6 +27,29 @@
     `${store.entries.length} / ${MAX_ENTRIES} · ${fmtBytes(store.retention?.retainedBodyBytes)}`,
   );
 
+  // A compact, always-visible connection indicator: the dashboard must never look
+  // dead when it is merely paused or reconnecting. Paused wins over the socket
+  // state (a paused live socket still is not delivering). Mirrors the sidebar's
+  // `capture-connection`, condensed to the three states the topbar surfaces.
+  const connState = $derived<'live' | 'reconnecting' | 'paused' | 'offline'>(
+    session.paused
+      ? 'paused'
+      : session.connection === 'open'
+        ? 'live'
+        : session.connection === 'reconnecting' || session.connection === 'connecting'
+          ? 'reconnecting'
+          : 'offline',
+  );
+  const connTitle = $derived(
+    connState === 'live'
+      ? 'Live'
+      : connState === 'reconnecting'
+        ? 'Reconnecting…'
+        : connState === 'paused'
+          ? 'Paused'
+          : 'Offline',
+  );
+
   async function togglePause(): Promise<void> {
     const next = !session.paused;
     try {
@@ -95,6 +118,14 @@
   />
 
   <div class="spacer"></div>
+
+  <span
+    class="conn-dot {connState}"
+    data-testid="conn-dot"
+    data-state={connState}
+    title={connTitle}
+    aria-label="Connection: {connTitle}"
+  ></span>
 
   {#if pauseError}<span class="err" style="--tint: var(--status-5xx)">{pauseError}</span>{/if}
   {#if clearError}<span class="err" style="--tint: var(--status-5xx)">{clearError}</span>{/if}
@@ -186,6 +217,17 @@
     border-radius: var(--radius-sm);
     white-space: nowrap;
   }
+  .conn-dot {
+    width: 9px;
+    height: 9px;
+    flex: 0 0 9px;
+    border-radius: 50%;
+    background: var(--status-pending);
+  }
+  .conn-dot.live { background: var(--status-2xx); }
+  .conn-dot.reconnecting,
+  .conn-dot.paused { background: var(--status-4xx); }
+  .conn-dot.offline { background: var(--status-5xx); }
   .paused-pill {
     font-size: 11px;
     font-weight: 600;

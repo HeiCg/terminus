@@ -98,3 +98,16 @@ test('item 2b: scrolled away under time desc, arrivals raise the "N new" pill', 
   h.store.addEntry(makeEntry('s-new', 'd1', { startedAt: 999 }));
   await expect(page.getByRole('button', { name: /↑ 1 new/ })).toBeVisible();
 });
+
+test('item 3: the topbar connection dot reflects live then paused', async ({ page }) => {
+  await page.goto(`${h.url}/#token=${h.adminToken}`);
+  await expect(page.getByTestId('capture-connection')).toHaveText('Conectado');
+
+  const dot = page.getByTestId('conn-dot');
+  await expect(dot).toHaveAttribute('data-state', 'live');
+
+  // Pausing the broadcaster flips the dot to paused (over the real POST /api/pause).
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await expect(page.getByTestId('paused-pill')).toBeVisible();
+  await expect(dot).toHaveAttribute('data-state', 'paused');
+});
