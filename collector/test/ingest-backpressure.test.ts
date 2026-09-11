@@ -153,4 +153,65 @@ describe('IngestScheduler (O01)', () => {
     expect(closed).toContain('bad');
     expect(sched.stats().closedForErrors).toBeGreaterThanOrEqual(1);
   });
+
+  it('reports a submit to an already-closed (still-draining) connection as closed, not overload', async () => {
+    // A hanging processor keeps the first frame in-flight so close() cannot forget the
+    // connection immediately — it lingers with closed=true while its decode drains.
+    const sched = new IngestScheduler({ budget: bigBudget(), process: () => new Promise<{ ok: true }>(() => {}) });
+    sched.submit('Z', Buffer.from('a'));
+    await waitFor(() => sched.stats().activeDecodes === 1);
+    sched.close('Z');
+    expect(sched.submit('Z', Buffer.from('b'))).toBe('closed');
+    expect(sched.stats().overload).toBe(0); // a closed connection is not an overload
+  });
+
+  it('exposes paused/pauses counters driven by notePause/noteResume', () => {
+    const sched = new IngestScheduler({ budget: bigBudget(), process: async () => ({ ok: true }) });
+    expect(sched.stats().paused).toBe(0);
+    expect(sched.stats().pauses).toBe(0);
+    sched.notePause();
+    sched.notePause();
+    expect(sched.stats().paused).toBe(2);
+    expect(sched.stats().pauses).toBe(2);
+    sched.noteResume();
+    expect(sched.stats().paused).toBe(1);
+    expect(sched.stats().pauses).toBe(2); // total is monotonic
+    sched.noteResume();
+    sched.noteResume(); // never goes negative
+    expect(sched.stats().paused).toBe(0);
+  });
+
+  it('fires onDrain once, after the pending queue drains below the low-water mark', async () => {
+    const sched = new IngestScheduler({ budget: bigBudget(), process: async () => ({ ok: true }) });
+    for (let i = 0; i < 8; i++) expect(sched.submit('P', Buffer.from(String(i)))).toBe('accepted');
+    // 9th does not fit: the per-connection pending cap of 8 is full.
+    expect(sched.submit('P', Buffer.from('8'))).toBe('overload');
+
+    let drained = 0;
+    sched.onDrain('P', () => { drained++; }); // registered while the queue is still full
+    await waitFor(() => drained === 1);
+    // The fast processor keeps draining past the mark, but the callback fires at most
+    // once per registration.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(drained).toBe(1);
+  });
+
+  it('does not fire onDrain while the pending queue stays full', async () => {
+    const sched = new IngestScheduler({ budget: bigBudget(), process: () => new Promise<{ ok: true }>(() => {}) });
+    for (let i = 0; i < 8; i++) sched.submit('R', Buffer.from(String(i)));
+    let fired = false;
+    sched.onDrain('R', () => { fired = true; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fired).toBe(false); // one frame is stuck decoding; the queue never falls to <= 4
+  });
+
+  it('does not fire onDrain for a connection closed before it drains', async () => {
+    const sched = new IngestScheduler({ budget: bigBudget(), process: () => new Promise<{ ok: true }>(() => {}) });
+    for (let i = 0; i < 8; i++) sched.submit('Q', Buffer.from(String(i)));
+    let fired = false;
+    sched.onDrain('Q', () => { fired = true; });
+    sched.close('Q');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fired).toBe(false);
+  });
 });
