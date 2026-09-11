@@ -1,3 +1,4 @@
+import { SvelteMap } from 'svelte/reactivity';
 import { applyUiMessages } from '../eventBuffer.js';
 import { emptyUiState, type UiState } from '../state.js';
 import { entityKey, type UiMessage } from '../protocol.js';
@@ -28,6 +29,13 @@ export class Store {
   // a global clear/reset.
   arrivals = $state(0);
 
+  // The same monotone arrival count, split by deviceId. The Capture view's
+  // "N new on other devices" pill reads it: with a device selected, arrivals that
+  // land under a DIFFERENT deviceId are what the pill counts. Reactive (SvelteMap)
+  // so a `$derived` reading a device's count recomputes when a batch bumps it.
+  // Zeroed together with `arrivals` on a snapshot resync / global clear / reset.
+  arrivalsByDevice = new SvelteMap<string, number>();
+
   apply(batch: UiMessage[]): void {
     if (batch.length === 0) return;
     const folded: UiMessage[] = [];
@@ -37,27 +45,41 @@ export class Store {
     // (addEntry, then patchEntryResponse), so count a key only the first time it
     // is seen — new to the store at batch start AND not yet counted in this batch.
     let next = this.arrivals;
+    // Per-device increments accrued this batch, applied to arrivalsByDevice only
+    // after the fold (a snapshot/global-clear barrier below discards them).
+    const perDevice = new Map<string, number>();
+    let resetPerDevice = false;
     const seen = new Set<string>();
     for (const m of batch) {
       if (m.type === 'paused') { this.onPaused?.(m.paused); continue; }
       if (m.type === 'entry') {
         const k = entityKey(m.entry.deviceId, m.entry.id);
-        if (!this.state.entries.has(k) && !seen.has(k)) { seen.add(k); next += 1; }
+        if (!this.state.entries.has(k) && !seen.has(k)) {
+          seen.add(k);
+          next += 1;
+          perDevice.set(m.entry.deviceId, (perDevice.get(m.entry.deviceId) ?? 0) + 1);
+        }
       } else if (m.type === 'snapshot') {
         // A snapshot is a resync, not an arrival: reset the pill baseline to zero
         // so autoscroll's decrease branch clears the backlog and re-attaches.
         next = 0;
+        resetPerDevice = true;
+        perDevice.clear();
       } else if (m.type === 'clear' && m.deviceId == null) {
         next = 0; // only a GLOBAL clear zeroes; a device-scoped clear leaves a (cosmetic) stale count
+        resetPerDevice = true;
+        perDevice.clear();
       }
       folded.push(m);
     }
     if (folded.length) this.state = applyUiMessages(this.state, folded);
     if (next !== this.arrivals) this.arrivals = next;
+    if (resetPerDevice) this.arrivalsByDevice.clear();
+    for (const [dev, n] of perDevice) this.arrivalsByDevice.set(dev, (this.arrivalsByDevice.get(dev) ?? 0) + n);
     for (const cb of this.listeners) cb(batch);
   }
 
-  reset(): void { this.state = emptyUiState(); this.arrivals = 0; }
+  reset(): void { this.state = emptyUiState(); this.arrivals = 0; this.arrivalsByDevice.clear(); }
 
   onApplied(cb: (batch: UiMessage[]) => void): () => void {
     this.listeners.add(cb);

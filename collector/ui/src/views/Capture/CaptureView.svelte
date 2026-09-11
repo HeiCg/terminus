@@ -39,6 +39,15 @@
   <FilterBar {filters} />
   <div class="content">
     <div class="list">
+      {#if filters.device !== 'all' && filters.otherDeviceNew > 0}
+        <!-- Live traffic is landing under a device other than the selected one —
+             the trial's "looks frozen" case. Surfacing the count (and a one-click
+             escape to All devices, which scrolls the table back to the newest
+             edge via the resetKey remount) keeps the view from reading as dead. -->
+        <button type="button" class="other-pill" data-testid="other-device-pill" onclick={() => (filters.device = 'all')}>
+          {filters.otherDeviceNew} new on other devices · Show all
+        </button>
+      {/if}
       {#if store.entries.length === 0}
         <EmptyState
           title="Aguardando device…"
@@ -91,7 +100,24 @@
     min-height: 0;
   }
   .list {
+    position: relative;
     flex: 1 1 auto;
     min-width: 0;
+  }
+  .other-pill {
+    position: absolute;
+    left: 50%;
+    top: 40px;
+    transform: translateX(-50%);
+    z-index: 6;
+    padding: 4px 12px;
+    font-family: var(--font-ui);
+    font-size: 12px;
+    color: var(--fg-on-accent);
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    cursor: pointer;
+    white-space: nowrap;
   }
 </style>

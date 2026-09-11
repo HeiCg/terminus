@@ -97,4 +97,48 @@ describe('Store', () => {
     expect(store.arrivals).toBe(2100);
     expect(store.entries).toHaveLength(2000);
   });
+
+  it('arrivalsByDevice counts new arrivals per device (dup/update are +0)', () => {
+    const store = new Store();
+    store.apply([
+      { type: 'entry', entry: summary({ id: 'a', deviceId: 'd1' }) },
+      { type: 'entry', entry: summary({ id: 'a', deviceId: 'd1', status: 200 }) }, // dup in batch
+      { type: 'entry', entry: summary({ id: 'b', deviceId: 'd2' }) },
+    ]);
+    expect(store.arrivalsByDevice.get('d1')).toBe(1);
+    expect(store.arrivalsByDevice.get('d2')).toBe(1);
+    // A later update to an existing key does not bump its device.
+    store.apply([{ type: 'entry', entry: summary({ id: 'a', deviceId: 'd1', status: 404 }) }]);
+    expect(store.arrivalsByDevice.get('d1')).toBe(1);
+    // A fresh key on d2 bumps only d2.
+    store.apply([{ type: 'entry', entry: summary({ id: 'c', deviceId: 'd2' }) }]);
+    expect(store.arrivalsByDevice.get('d2')).toBe(2);
+    expect(store.arrivalsByDevice.get('d1')).toBe(1);
+  });
+
+  it('arrivalsByDevice clears on a snapshot resync, a global clear, and reset', () => {
+    const store = new Store();
+    const seed = () => store.apply([
+      { type: 'entry', entry: summary({ id: 'a', deviceId: 'd1' }) },
+      { type: 'entry', entry: summary({ id: 'b', deviceId: 'd2' }) },
+    ]);
+    seed();
+    expect(store.arrivalsByDevice.get('d2')).toBe(1);
+    // Snapshot resync zeroes the per-device backlog alongside the total.
+    store.apply([snapshot()]);
+    expect(store.arrivalsByDevice.get('d1')).toBeUndefined();
+    expect(store.arrivalsByDevice.get('d2')).toBeUndefined();
+    // A device-scoped clear leaves the (cosmetic) per-device count, matching `arrivals`.
+    seed();
+    store.apply([{ type: 'clear', deviceId: 'd1' }]);
+    expect(store.arrivalsByDevice.get('d2')).toBe(1);
+    // A global clear zeroes it.
+    store.apply([{ type: 'clear', deviceId: null }]);
+    expect(store.arrivalsByDevice.get('d1')).toBeUndefined();
+    expect(store.arrivalsByDevice.get('d2')).toBeUndefined();
+    // reset() clears it too.
+    seed();
+    store.reset();
+    expect(store.arrivalsByDevice.size).toBe(0);
+  });
 });
