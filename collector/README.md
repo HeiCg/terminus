@@ -243,6 +243,32 @@ Atlantis app build must declare the **same** service in its `NSBonjourServices`:
 The collector applies header/query redaction to Atlantis traffic (the in-app
 protocol is already redacted at the source). Redaction is never undone.
 
+### Device channels and identity
+
+A single phone can reach the collector on **two channels**: the in-app WSS
+`ingest` channel (which sends `hello { deviceId, … }`) and the Atlantis SDK
+`atlantis` channel over TLS (which presents its own envelope id). The collector
+keys devices by those ids, so if the two channels use **different** ids the same
+phone shows up as two devices and selecting one shows no traffic.
+
+The fix is for the app to **start the Atlantis SDK with the app's own
+`deviceId`**, so both channels key on the same id. Do that and the device is one
+record from the start.
+
+Two collector-side aids make the split visible and harmless meanwhile:
+
+- **Channels on the record.** Each device DTO (`/api/devices`, the socket
+  snapshot's `devices[]`) carries `channels: { ingest?: { lastSeenAt },
+  atlantis?: { lastSeenAt } }`; `lastSeen` stays the max across them. The Devices
+  view and `terminus devices` show which channels a device has been heard on, and
+  the Capture view points you at *All devices* when a selected device is empty.
+- **Alias from the hello.** When the app knows the key the SDK will use but cannot
+  yet start it with the app's id, the `hello` may carry
+  `atlantisDeviceKey: "<the SDK's key>"`. The collector then attributes Atlantis
+  traffic arriving under that key to the hello's `deviceId` — one device, both
+  channels. The alias lives in memory only; if the SDK key already names a
+  distinct device that has captured traffic, both are kept and a warning is logged.
+
 ## Proxy source (additive, QA-only, opt-in)
 
 An optional MITM proxy (built on [mockttp](https://github.com/httptoolkit/mockttp),
