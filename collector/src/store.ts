@@ -12,6 +12,7 @@ import {
 } from './captureDto.js';
 import type { UiDevice, EntrySummary, EntryDetail, WsSummary, FrameSummary, Page } from './uiProtocol.js';
 import { redactUrl, redactHeaders, redactText } from './redactor.js';
+import { log } from './log.js';
 
 // Metadata-page ceilings shared by the summary endpoints (SPEC): a page carries
 // at most 200 records and 1 MiB serialized, whichever is hit first.
@@ -150,6 +151,8 @@ export class Store extends EventEmitter {
 
   // Byte entry point (Atlantis decode): bytes are preserved and hashed.
   addEntryInput(input: EntryInput): void {
+    const deviceId = this.resolveDeviceKey(input.deviceId);
+    if (deviceId !== input.deviceId) input = { ...input, deviceId };
     const key = keyOf(input.deviceId, input.id);
     const existing = this.entriesByKey.get(key);
 
@@ -220,6 +223,7 @@ export class Store extends EventEmitter {
     responseBody: string | null; responseBodySize: number; responseBodyOmitted: BodyOmitted;
     durationMs: number | null; error: string | null;
   }): void {
+    deviceId = this.resolveDeviceKey(deviceId);
     const key = keyOf(deviceId, id);
     const existing = this.entriesByKey.get(key);
     if (!existing) return;
@@ -254,6 +258,8 @@ export class Store extends EventEmitter {
   // which yields a partial session when the id was never handshaked). Returns the
   // admission outcome so the transport can close a connection on `overload`.
   addWsSession(w: WsSessionInput & { generation?: string; via?: 'open' | 'frame' }): AdmissionOutcome {
+    const deviceId = this.resolveDeviceKey(w.deviceId);
+    if (deviceId !== w.deviceId) w = { ...w, deviceId };
     const gen = w.generation ?? `legacy:${w.deviceId}`;
     const key = keyOf(w.deviceId, w.wsId);
     const outcome = this.admission.observe({ deviceId: w.deviceId, wsId: w.wsId }, gen, w.via ?? 'open');
@@ -292,6 +298,7 @@ export class Store extends EventEmitter {
   // `data`. A frame for a session that no longer exists (its open was dropped or it
   // was evicted/cleared) is counted as a dropped frame rather than silently ignored.
   appendWsFrame(wsId: string, f: { ts: number; direction: 'in' | 'out'; data: string | null; size: number; binary: boolean }, bytes?: Uint8Array | null, deviceId?: string): void {
+    if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
     const key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
     const ss = key ? this.sessionsByKey.get(key) : undefined;
     if (!key || !ss) { this.counters.droppedFrames++; this.retentionDirty = true; this.flushRetention(); return; }
@@ -335,6 +342,7 @@ export class Store extends EventEmitter {
   }
 
   closeWs(wsId: string, ts: number, code: number, reason: string, deviceId?: string): void {
+    if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
     const key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
     const ss = key ? this.sessionsByKey.get(key) : undefined;
     if (!ss) return;
@@ -348,6 +356,21 @@ export class Store extends EventEmitter {
 
   // Resolve a device key through the alias map (identity, when unaliased).
   resolveDeviceKey(deviceId: string): string { return this.aliases.get(deviceId) ?? deviceId; }
+
+  // Record an alias `aliasKey -> primaryId` so Atlantis traffic arriving under
+  // `aliasKey` is attributed to `primaryId` (the app's ingest deviceId). In memory
+  // only. Conflict: if `aliasKey` is already a primary device that has captured
+  // entries, keep both devices and log a warning rather than silently rehoming a
+  // live device's traffic onto another.
+  recordAlias(aliasKey: string, primaryId: string): void {
+    if (!aliasKey || aliasKey === primaryId) return;
+    if (this.aliases.get(aliasKey) === primaryId) return;
+    if ((this.entryDevice.get(aliasKey)?.size ?? 0) > 0) {
+      log.warn(`device alias conflict: ${aliasKey} already has entries; keeping both, not aliasing to ${primaryId}`);
+      return;
+    }
+    this.aliases.set(aliasKey, primaryId);
+  }
 
   // Record (or refresh) a device. `channel` names which capture channel this touch
   // arrived on: an `ingest` hello or an `atlantis` connection. The channel's
@@ -383,7 +406,11 @@ export class Store extends EventEmitter {
     // BodyStore only ever hashes redacted bytes. Binary frame payloads are not
     // redacted as text (redactText only touches text).
     switch (m.type) {
-      case 'hello': return this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts }, 'ingest');
+      case 'hello': {
+        this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts }, 'ingest');
+        if (m.atlantisDeviceKey) this.recordAlias(m.atlantisDeviceKey, m.deviceId);
+        return;
+      }
       case 'request': return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url),
         requestHeaders: redactHeaders(m.headers), requestBody: redactText(m.body), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
         status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null });
