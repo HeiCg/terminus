@@ -447,6 +447,19 @@ its own plain-HTTP LAN listener (`8789`), also not on this loopback server.
   pin its own certificate, or use QUIC. It never disables Atlantis/WSS.
 - In-memory store: data is lost on restart, and old entries are dropped past the
   5 000-per-device cap.
+- **Resumed WebSocket sessions.** A socket the device holds open across a
+  collector restart sends frames whose `ws_open` the new collector never saw. The
+  store **synthesizes** a session for the first such frame (rather than dropping
+  it): the session is marked `resumed`, its `url` is `null`, and `openedAt` is the
+  first frame's timestamp — everything before the restart is lost, so the prefix
+  is missing by definition. When the device later replays its `ws_open` (with a
+  `resumed` flag), the collector fills in the `url` **in place** and clears the
+  `resumed` mark; it never opens a duplicate session or resets the captured
+  frames. The Sockets view shows a **resumed** chip and `URL unknown (opened
+  before the collector started)` until the url is back-filled; the CLI prints
+  `ws:? (resumed)` for a frame whose session has no url yet. An orphan frame that
+  carries no device id (so no session can be attributed) is still dropped and
+  logged once per socket at `warn`.
 
 ## Development
 
