@@ -9,7 +9,7 @@ import { randomUUID, randomBytes, createHash, X509Certificate } from 'node:crypt
 import type { CollectorIdentity, PublicPairing, PairingImport } from './types.js';
 import { isHostname, isIp } from './types.js';
 import { log } from '../log.js';
-import { env } from '../env.js';
+import { env, envName } from '../env.js';
 
 const exec = promisify(execFile);
 
@@ -110,9 +110,19 @@ export function validateSanTargets(host: string, ips: string[]): void {
   for (const ip of ips) if (!isIp(ip)) throw new Error(`invalid ip: ${JSON.stringify(ip)}`);
 }
 
-function sanArg(host: string, ips: string[]): string {
-  const dns = new Set<string>([host, 'localhost']);
-  const parts = [...dns].map((d) => `DNS:${d}`).concat(ips.map((ip) => `IP:${ip}`));
+// Build the openssl subjectAltName argument, classifying each target: an IP host
+// goes as `IP:` and a name host as `DNS:` (before this, `--host <ip>` produced a
+// bogus `DNS:<ip>` entry no client verifies against). `localhost` is always a DNS
+// name; the caller's `ips` are already IPs. An IP host duplicated in `ips` is emitted
+// once. IPv6 loopback/link-local exclusion is unchanged — it is governed by what
+// `lanAddresses()` collects, not by this classifier.
+export function sanArg(host: string, ips: string[]): string {
+  const names: string[] = [];
+  const ipList: string[] = [...ips];
+  if (isIp(host)) { if (!ipList.includes(host)) ipList.unshift(host); }
+  else names.push(host);
+  if (!names.includes('localhost')) names.push('localhost');
+  const parts = names.map((d) => `DNS:${d}`).concat(ipList.map((ip) => `IP:${ip}`));
   return `subjectAltName=${parts.join(',')}`;
 }
 
@@ -223,8 +233,88 @@ function buildIdentity(
   };
 }
 
-export function toPairingImport(id: CollectorIdentity): PairingImport {
-  return { ...id.publicPairing, deviceToken: id.deviceToken };
+// The `IP Address:` entries of the cert's subjectAltName. The connecting device's
+// SAN check passes when it dials one of these, so these are the addresses safe to
+// advertise. DNS names in the SAN are ignored here — phones cannot resolve the
+// Mac's hostname (no mDNS in Android fetch), which is the whole reason the advertised
+// host must be an IP.
+export function certSanIps(certPem: string): string[] {
+  if (!certPem) return [];
+  let san: string | undefined;
+  try { san = new X509Certificate(certPem).subjectAltName ?? undefined; } catch { return []; }
+  if (!san) return [];
+  const ips: string[] = [];
+  for (const part of san.split(',')) {
+    const m = /^\s*IP Address:(.+?)\s*$/.exec(part);
+    if (m) ips.push(m[1]);
+  }
+  return ips;
+}
+
+// LAN IPv4s a device could actually dial: drop loopback and every IPv6 form.
+function lanIpv4(lan: () => string[]): string[] {
+  return lan().filter((ip) => ip.includes('.') && !ip.includes(':') && ip !== '127.0.0.1');
+}
+
+// A validated TERMINUS_PAIRING_HOST override (hostname or IP), or null. An invalid
+// value is ignored — with a single warning — so a typo falls through to LAN
+// detection rather than advertising something no device can reach.
+let invalidOverrideWarned = false;
+function pairingHostOverride(e: typeof env): string | null {
+  const raw = e('PAIRING_HOST');
+  if (raw == null || raw.trim() === '') return null;
+  const h = raw.trim();
+  if (isHostname(h) || isIp(h)) return h;
+  if (!invalidOverrideWarned) {
+    invalidOverrideWarned = true;
+    log.warn(`ignoring ${envName('PAIRING_HOST')}=${JSON.stringify(h)}: not a valid hostname or IP; falling back to the LAN IPv4`);
+  }
+  return null;
+}
+
+// The host to advertise for pairing (the QR, /api/pairing, `terminus pair`, the cert
+// endpoint log). Resolved at runtime, not from identity meta:
+//   1. TERMINUS_PAIRING_HOST when set and valid;
+//   2. else the first current LAN IPv4 that is in the cert SAN (so the device's SAN
+//      check passes when it dials it);
+//   3. else identity meta.host, warning once about the drift.
+// `e`/`lan` are injectable so tests do not depend on the machine's real interfaces.
+export function pairingHost(id: CollectorIdentity, e: typeof env = env, lan: () => string[] = lanAddresses): string {
+  const override = pairingHostOverride(e);
+  if (override) return override;
+  const sanIps = new Set(certSanIps(id.certificatePem));
+  const match = lanIpv4(lan).find((ip) => sanIps.has(ip));
+  if (match) return match;
+  logPairingHostDrift(id, e, lan);
+  return id.host;
+}
+
+// The drift warning string, or null when a LAN IPv4 is covered (or an override pins
+// the host). Pure — no logging — so /api/pairing can surface it to the CLI.
+export function pairingHostWarning(id: CollectorIdentity, e: typeof env = env, lan: () => string[] = lanAddresses): string | null {
+  if (pairingHostOverride(e)) return null;
+  const sanIps = new Set(certSanIps(id.certificatePem));
+  if (lanIpv4(lan).some((ip) => sanIps.has(ip))) return null;
+  const has = sanIps.size ? [...sanIps].join(', ') : 'no IP entries';
+  return `no current LAN IPv4 is in the certificate SAN (cert has ${has}); devices may fail to connect; run \`npm run identity:rotate\` to regenerate`;
+}
+
+// Log the drift warning at most once per certificate (keyed by digest), so the boot
+// check and the per-request pairingHost fallback together warn a single time. Never
+// auto-rotates: rotation invalidates every existing pairing.
+const driftWarned = new Set<string>();
+export function logPairingHostDrift(id: CollectorIdentity, e: typeof env = env, lan: () => string[] = lanAddresses): string | null {
+  const w = pairingHostWarning(id, e, lan);
+  if (!w) return null;
+  if (!driftWarned.has(id.certificateSha256)) { driftWarned.add(id.certificateSha256); log.warn(w); }
+  return w;
+}
+
+// Project a persisted identity to the device pairing blob. `host` overrides the
+// advertised host — main passes `pairingHost(id, env)` so /api/pairing (and the QR
+// and CLI built from it) carry the LAN IPv4, not the unresolvable meta hostname.
+export function toPairingImport(id: CollectorIdentity, host: string = id.publicPairing.host): PairingImport {
+  return { ...id.publicPairing, host, deviceToken: id.deviceToken };
 }
 
 export type LoadOpts = {

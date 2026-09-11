@@ -58,8 +58,10 @@ stale file left by a crash authenticates nothing. See
 Environment overrides: `PORT` (UI, default `8787`), `INGEST_PORT` (WSS capture,
 default `8788`), `ATLANTIS_PORT` (Atlantis TLS, default `10909`),
 `TERMINUS_STATE_DIR` (identity storage, default
-`~/Library/Application Support/Terminus`). The deprecated `NETCAPTURE_STATE_DIR` is
-still read as a fallback with a one-time warning.
+`~/Library/Application Support/Terminus`), `TERMINUS_PAIRING_HOST` (the host the
+pairing blob/QR advertise — see [Device identity and pairing](#device-identity-and-pairing)).
+The deprecated `NETCAPTURE_STATE_DIR` is still read as a fallback with a one-time
+warning.
 
 `TERMINUS_PASSCODE` (and the legacy `NETCAPTURE_PASSCODE`) is **no longer used** — the
 old plaintext passcode was sent in
@@ -106,6 +108,33 @@ authenticated UI from `GET /api/pairing` (`Cache-Control: no-store`) and pasted 
 the QA screen. The response also carries `certPort` (the LAN cert listener's port),
 so the UI can render the QR below. The terminal only ever prints the admin token,
 never the device token.
+
+### The advertised pairing host is the Mac's LAN IP
+
+The `host` in the pairing blob and QR is **the Mac's LAN IPv4** (e.g. `192.168.1.10`),
+resolved at runtime — not the machine hostname. Phones have no way to resolve the
+Mac's hostname on the LAN (there is no DNS for it, and Android's `fetch` does not do
+mDNS), so a hostname-based pairing fails immediately with a fetch error. The IP is
+chosen as the first current LAN IPv4 that is also in the certificate's SAN, so the
+device's TLS SAN check passes when it dials it.
+
+Because the address is a **DHCP lease**, it can change. When it does, the old cert no
+longer covers the new IP: rotate the identity (which regenerates the cert SAN and the
+pairing) and re-pair every device:
+
+```bash
+npm run identity:rotate
+```
+
+`terminus pair` prints the host it advertises. If no current LAN IPv4 is in the cert
+SAN (e.g. after a lease change), the collector logs a warning at boot, `GET
+/api/pairing` returns it as `pairingHostWarning`, and `terminus pair` prints it —
+pointing you at `identity:rotate`. Rotation is never automatic: it invalidates every
+existing pairing.
+
+To pin the advertised host yourself, set **`TERMINUS_PAIRING_HOST`** to a LAN IP (or a
+name the devices can actually resolve). It must be an IP the certificate SAN already
+covers for the device's SAN check to pass; if it is not, rotate with `--ip <lan-ip>`.
 
 ### QR pairing
 

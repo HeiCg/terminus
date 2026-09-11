@@ -36,13 +36,13 @@ export interface CollectorHarness {
 // is bound to 127.0.0.1 and torn down by close(); callers must await close() in a
 // finally/afterEach so no socket leaks between tests.
 export async function createCollectorHarness(
-  opts: { adminToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null } = {},
+  opts: { adminToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null } = {},
 ): Promise<CollectorHarness> {
   const adminToken = opts.adminToken ?? randomBytes(32).toString('base64url');
   const uiDir = opts.uiDir ?? '/nonexistent-ui';
   const store = new Store();
   const uiAuth = createUiAuth({ adminToken, now: opts.now });
-  const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, certPort: opts.certPort });
+  const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort });
 
   await new Promise<void>((r) => handle.server.listen(0, '127.0.0.1', () => r()));
   const port = (handle.server.address() as net.AddressInfo).port;

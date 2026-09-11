@@ -10,6 +10,9 @@ import { flagBool } from '../args.js';
 export type PairingResponse = {
   version: 2; collectorId: string; host: string; ingestPort: number; atlantisPort: number;
   certificateDerBase64: string; certificateSha256: string; deviceToken: string; certPort?: number;
+  // Set by the collector when no current LAN IPv4 is in the cert SAN, so a device
+  // dialling the advertised host would fail the SAN check. Null/absent otherwise.
+  pairingHostWarning?: string | null;
 };
 
 // Default LAN cert-listener port, mirroring the UI's fallback when an older collector
@@ -51,6 +54,11 @@ export async function runPair(ctx: Ctx): Promise<number> {
   // The deviceToken warning always goes to stderr so stdout carries only the payload
   // (the blob to paste, or the QR), safe to pipe or redirect.
   const tokenWarning = 'WARNING: this contains the device token — anyone who has it can capture this device. Do not share.';
+
+  // Pairing-host drift warning (from the collector's boot check): the advertised host
+  // is not covered by the cert SAN, so devices may fail to connect. To stderr in every
+  // mode so it never pollutes the pipeable stdout payload.
+  if (p.pairingHostWarning) errline(ctx, c.yellow(p.pairingHostWarning));
 
   if (flagBool(ctx.flags, 'json')) {
     jsonLine(ctx, buildQrPairing(p));
