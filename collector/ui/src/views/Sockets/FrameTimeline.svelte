@@ -62,7 +62,14 @@
     <header class="head">
       <div class="summary">
         <KindBadge kind={s.kind === 'sse' ? 'sse' : 'ws'} />
-        <span class="url">{s.url}</span>
+        {#if s.url == null}
+          <span class="url unknown">URL unknown (opened before the collector started)</span>
+        {:else}
+          <span class="url">{s.url}</span>
+        {/if}
+        {#if s.resumed}
+          <span class="resumed" title="resumed: this socket was open before the collector started">resumed</span>
+        {/if}
         <StatePill closedAt={s.closedAt} closeCode={s.closeCode} />
       </div>
       <p class="meta">{meta}</p>
@@ -202,6 +209,25 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .url.unknown {
+    font-style: italic;
+    color: var(--fg-muted);
+  }
+  .resumed {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    height: 16px;
+    padding: 0 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    color: var(--status-4xx);
+    background: var(--tint-surface);
+    border-radius: 999px;
   }
   .meta {
     margin: 6px 0 0;

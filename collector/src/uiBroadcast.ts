@@ -230,7 +230,7 @@ export function createUiBroadcast(store: Store, opts: UiBroadcastOptions = {}) {
           closedAt: s.closedAt === null ? null : mnum(s.closedAt),
           closeCode: s.closeCode === null ? null : mnum(s.closeCode), closeReason: '',
           retainedFrames: mnum(s.retainedFrames), totalFrames: mnum(s.totalFrames), droppedFrames: mnum(s.droppedFrames),
-          partial: s.partial === true, identityClipped: true } };
+          partial: s.partial === true, resumed: s.resumed === true, identityClipped: true } };
       }
       case 'ws_frame':
         return { type: 'ws_frame', wsId: mclip(m.wsId), deviceId: mclip(m.deviceId),

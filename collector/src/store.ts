@@ -678,7 +678,7 @@ export class Store extends EventEmitter {
 
   private toWsSummary(ss: StoredSession): WsSummary {
     return {
-      ...ss.session, partial: ss.session.partial === true,
+      ...ss.session, partial: ss.session.partial === true, resumed: ss.session.resumed === true,
       retainedFrames: ss.frames.length, totalFrames: ss.nextSeq, droppedFrames: ss.droppedLocal,
     };
   }

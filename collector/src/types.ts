@@ -11,7 +11,12 @@ export type ResponseEvent = { type: 'response'; id: string; ts: number; status: 
   statusText: string; headers: Record<string, string>; body: string | null;
   bodyOmitted?: 'size' | 'binary'; bodySize: number; durationMs: number;
   error?: 'network' | 'timeout' | 'abort' };
-export type WsOpen = { type: 'ws_open'; wsId: string; ts: number; url: string; protocols: string[] };
+export type WsOpen = { type: 'ws_open'; wsId: string; ts: number; url: string; protocols: string[];
+  // Set by the device app when it replays a ws_open for a socket still open across
+  // an ingest generation (a reconnect after the collector restarted). The collector
+  // treats a resumed ws_open for a known session as a back-fill/no-op, never a
+  // duplicate open or a new session. Optional and additive: older apps omit it.
+  resumed?: boolean };
 export type WsFrame = { type: 'ws_frame'; wsId: string; ts: number; direction: 'in' | 'out';
   data: string | null; size: number; binary: boolean };
 export type WsClose = { type: 'ws_close'; wsId: string; ts: number; code: number; reason: string };
@@ -88,11 +93,19 @@ export type StoredEntry = Omit<Entry, 'requestBody' | 'responseBody' |
 // tunnelled over the same machinery; `httpEntryKey` links an SSE stream back to
 // the HTTP exchange that carries it (null for a plain socket).
 export type WsSession = {
-  wsId: string; deviceId: string; source: Source; url: string; openedAt: number;
+  wsId: string; deviceId: string; source: Source;
+  // `null` when the session was SYNTHESIZED from a frame whose `ws_open` predates
+  // this collector (a socket held open across a restart): the handshake url is
+  // unknown until a later `ws_open` back-fills it.
+  url: string | null; openedAt: number;
   kind: 'websocket' | 'sse'; httpEntryKey: EntryKey | null;
   // `partial` marks a session the admission authority opened from an orphan frame
   // or reopened after a gap (a removal), so the UI can flag the missing prefix.
   partial?: boolean;
+  // `resumed` marks a session the store synthesized because its first frame arrived
+  // with no prior `ws_open` (the open predates this collector's start). `url` is
+  // null until a late `ws_open` back-fills it and clears this flag.
+  resumed?: boolean;
   frames: { ts: number; direction: 'in' | 'out'; data: string | null; size: number; binary: boolean }[];
   closedAt: number | null; closeCode: number | null; closeReason: string;
 };
@@ -155,7 +168,8 @@ export function isDeviceMessage(x: unknown): x is DeviceMessage {
       && (m.atlantisDeviceKey === undefined || typeof m.atlantisDeviceKey === 'string');
     case 'request': return str('id') && num('ts') && str('method') && str('url') && num('bodySize');
     case 'response': return str('id') && num('ts') && num('status') && num('bodySize') && num('durationMs');
-    case 'ws_open': return str('wsId') && num('ts') && str('url');
+    case 'ws_open': return str('wsId') && num('ts') && str('url')
+      && (m.resumed === undefined || typeof m.resumed === 'boolean');
     case 'ws_frame': return str('wsId') && num('ts') && (m.direction === 'in' || m.direction === 'out') && num('size');
     case 'ws_close': return str('wsId') && num('ts') && num('code');
     default: return false;

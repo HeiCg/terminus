@@ -12,7 +12,7 @@ function ws(over: Partial<WsSummary> = {}): WsSummary {
   return {
     wsId: 'w1', deviceId: 'd1', source: 'xhr', url: 'wss://example.test/ws', openedAt: 1,
     kind: 'websocket', httpEntryKey: null, closedAt: null, closeCode: null, closeReason: '',
-    retainedFrames: 0, totalFrames: 0, droppedFrames: 0, partial: false, ...over,
+    retainedFrames: 0, totalFrames: 0, droppedFrames: 0, partial: false, resumed: false, ...over,
   };
 }
 

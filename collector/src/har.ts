@@ -168,7 +168,7 @@ function harFromSession(ss: ExportSession, snap: ExportSnapshot): HarEntry {
   const isSse = ss.kind === 'sse';
   const har: HarEntry = {
     startedDateTime: new Date(ss.openedAt).toISOString(), time: -1,
-    request: { method: 'GET', url: ss.url, httpVersion: 'HTTP/1.1', cookies: [], headers: [], queryString: query(ss.url), headersSize: -1, bodySize: 0 },
+    request: { method: 'GET', url: ss.url ?? '', httpVersion: 'HTTP/1.1', cookies: [], headers: [], queryString: query(ss.url ?? ''), headersSize: -1, bodySize: 0 },
     response: { status: 0, statusText: '', httpVersion: 'HTTP/1.1', cookies: [], headers: [],
       content: { size: 0, mimeType: isSse ? 'text/event-stream' : 'application/x-websocket' }, redirectURL: '', headersSize: -1, bodySize: -1 },
     cache: {}, timings: { send: -1, wait: -1, receive: -1 },
