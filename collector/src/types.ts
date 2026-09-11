@@ -1,5 +1,9 @@
 export type Hello = { type: 'hello'; deviceId: string; platform: 'android' | 'ios';
-  appVersion: string; buildProfile: string; dropped: number; ts: number };
+  appVersion: string; buildProfile: string; dropped: number; ts: number;
+  // Optional: the key the Atlantis SDK will present under, when the app knows it.
+  // Lets the collector alias Atlantis traffic onto this hello's deviceId even when
+  // the SDK is too old to be started with the app's own id.
+  atlantisDeviceKey?: string };
 export type RequestEvent = { type: 'request'; id: string; ts: number; method: string;
   url: string; headers: Record<string, string>; body: string | null;
   bodyOmitted?: 'size' | 'binary'; bodySize: number; source: 'xhr' };
@@ -99,8 +103,18 @@ export type WsSession = {
 export type WsSessionInput = Omit<WsSession, 'kind' | 'httpEntryKey' | 'frames' | 'closedAt' | 'closeCode' | 'closeReason'> &
   Partial<Pick<WsSession, 'kind' | 'httpEntryKey' | 'closedAt' | 'closeCode' | 'closeReason'>> & { frames?: WsSession['frames'] };
 
+// The two device-side capture channels a single phone can present on: `ingest` is
+// the JS/WSS hello+messages channel (deviceServer), `atlantis` the Atlantis SDK
+// TLS channel (atlantis/server connection+traffic). Each records when it was last
+// heard from; `Device.lastSeen` stays the max across both.
+export type DeviceChannel = { lastSeenAt: number };
+export type DeviceChannels = { ingest?: DeviceChannel; atlantis?: DeviceChannel };
+
 export type Device = { deviceId: string; platform: string; appVersion: string;
-  buildProfile: string; dropped: number; lastSeen: number };
+  buildProfile: string; dropped: number; lastSeen: number;
+  // Additive (protocol v3): present once a channel has been observed; absent on
+  // legacy records so pre-channels snapshots and fixtures still type-check.
+  channels?: DeviceChannels };
 
 // ---- Export snapshot (R5) -----------------------------------------------
 // An export names what to include: a whole device (or all devices when
@@ -137,7 +151,8 @@ export function isDeviceMessage(x: unknown): x is DeviceMessage {
   const str = (k: string) => typeof m[k] === 'string';
   const num = (k: string) => typeof m[k] === 'number' && Number.isFinite(m[k]);
   switch (m.type) {
-    case 'hello': return str('deviceId') && str('platform') && str('appVersion') && str('buildProfile') && num('dropped') && num('ts');
+    case 'hello': return str('deviceId') && str('platform') && str('appVersion') && str('buildProfile') && num('dropped') && num('ts')
+      && (m.atlantisDeviceKey === undefined || typeof m.atlantisDeviceKey === 'string');
     case 'request': return str('id') && num('ts') && str('method') && str('url') && num('bodySize');
     case 'response': return str('id') && num('ts') && num('status') && num('bodySize') && num('durationMs');
     case 'ws_open': return str('wsId') && num('ts') && str('url');

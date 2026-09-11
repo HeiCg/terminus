@@ -12,6 +12,15 @@
   const short = (id: string) => id.slice(0, 6);
   const isApple = (platform: string) => /ios|apple|iphone|ipad|mac/i.test(platform);
 
+  // The channel chips as compact text for a native <option> (which can hold no
+  // markup): "ingest,atlantis". Empty when no channel has been observed yet.
+  const channels = (d: UiDevice): string => {
+    const parts: string[] = [];
+    if (d.channels?.ingest) parts.push('ingest');
+    if (d.channels?.atlantis) parts.push('atlantis');
+    return parts.join(',');
+  };
+
   const selected = $derived(value === 'all' ? null : (devices.find((d) => d.deviceId === value) ?? null));
   const live = $derived(selected ? now - selected.lastSeen < 30_000 : false);
 </script>
@@ -48,7 +57,7 @@
   >
     <option value="all">All devices</option>
     {#each devices as d (d.deviceId)}
-      <option value={d.deviceId}>{short(d.deviceId)} · {d.platform}</option>
+      <option value={d.deviceId}>{short(d.deviceId)} · {d.platform}{channels(d) ? ` · ${channels(d)}` : ''}</option>
     {/each}
   </select>
 </div>

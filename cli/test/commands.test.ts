@@ -148,11 +148,24 @@ describe('devices', () => {
   it('lists paired devices', async () => {
     const h = await createCollectorHarness();
     try {
-      h.store.touchDevice({ deviceId: 'd1', platform: 'ios', appVersion: '1.2.3', buildProfile: 'debug', dropped: 0, lastSeen: Date.now() });
+      h.store.touchDevice({ deviceId: 'd1', platform: 'ios', appVersion: '1.2.3', buildProfile: 'debug', dropped: 0, lastSeen: Date.now() }, 'ingest');
       const r = await runCli(['devices'], { harness: h });
       expect(r.code).toBe(0);
       expect(r.stdout).toContain('d1');
       expect(r.stdout).toContain('ios');
+    } finally { await h.close(); }
+  });
+
+  it('prints a CHANNELS column listing the observed channels', async () => {
+    const h = await createCollectorHarness();
+    try {
+      // A phone heard on both channels shows both, in the fixed ingest,atlantis order.
+      h.store.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: Date.now() }, 'ingest');
+      h.store.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'atlantis', dropped: 0, lastSeen: Date.now() }, 'atlantis');
+      const r = await runCli(['devices'], { harness: h });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('CHANNELS');
+      expect(r.stdout).toContain('ingest,atlantis');
     } finally { await h.close(); }
   });
 });

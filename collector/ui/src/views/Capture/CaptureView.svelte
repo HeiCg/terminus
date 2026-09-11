@@ -45,6 +45,12 @@
           hint="Pareie um device em Devices ou inicie o app em modo QA."
           action={waiting}
         />
+      {:else if filters.device !== 'all' && filters.counts.all === 0}
+        <EmptyState
+          title="No requests on this device yet."
+          hint="Traffic from this phone may be arriving under another device id — switch to All devices."
+          action={switchToAll}
+        />
       {:else}
         <RequestTable
           rows={filters.rows}
@@ -66,6 +72,10 @@
 
 {#snippet waiting()}
   <Button variant="secondary" onclick={() => nav.go('devices')}>Ir para Devices</Button>
+{/snippet}
+
+{#snippet switchToAll()}
+  <Button variant="secondary" onclick={() => (filters.device = 'all')}>All devices</Button>
 {/snippet}
 
 <style>

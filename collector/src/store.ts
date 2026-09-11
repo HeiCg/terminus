@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type {
   DeviceMessage, Entry, EntryInput, StoredEntry, StoredFrame, WsSession, WsSessionInput,
-  Device, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot,
+  Device, DeviceChannels, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot,
 } from './types.js';
 import { createBodyStore, type BodyStore } from './bodyStore.js';
 import { createSessionAdmission, type SessionAdmission, type AdmissionOutcome } from './sessionAdmission.js';
@@ -12,6 +12,7 @@ import {
 } from './captureDto.js';
 import type { UiDevice, EntrySummary, EntryDetail, WsSummary, FrameSummary, Page } from './uiProtocol.js';
 import { redactUrl, redactHeaders, redactText } from './redactor.js';
+import { log } from './log.js';
 
 // Metadata-page ceilings shared by the summary endpoints (SPEC): a page carries
 // at most 200 records and 1 MiB serialized, whichever is hit first.
@@ -68,6 +69,16 @@ export const STORE_DEFAULT_LIMITS: RetentionLimits = {
 
 const keyOf = (deviceId: string, id: string): string => JSON.stringify([deviceId, id]);
 
+// `buildProfile` values that are channel PLACEHOLDERS, not a real build profile:
+// 'unknown' is the JS ingest hello's default, 'atlantis' the SDK channel's marker.
+// A placeholder only fills a slot the other channel has not populated with a real
+// value; a real value always replaces a placeholder, whatever the arrival order.
+const PLACEHOLDER_PROFILES = new Set(['unknown', 'atlantis']);
+function pickBuildProfile(incoming: string, existing: string): string {
+  if (!PLACEHOLDER_PROFILES.has(incoming)) return incoming;      // real incoming wins
+  return PLACEHOLDER_PROFILES.has(existing) ? incoming : existing; // else keep a real existing
+}
+
 // Cumulative retention counters, emitted as a `retention` event whenever the
 // store drops something. RSS is deliberately not here: retained bytes are what
 // the store holds, not what the process's heap has released back to the OS.
@@ -121,6 +132,12 @@ export class Store extends EventEmitter {
   private devs = new Map<string, Device>();
   private deviceMeta = new Map<string, number>();
 
+  // Device-identity aliases (in memory only): a key an Atlantis channel presents
+  // under -> the primary deviceId the app's ingest hello declared. Traffic, ws
+  // sessions and channel touches arriving under an alias key are attributed to the
+  // primary so one phone that shows up on two channels is a single device.
+  private aliases = new Map<string, string>();
+
   private metadataBytes = 0;
   private capped = false;
   private retentionDirty = false; // a drop/omission happened this op -> emit retention
@@ -144,6 +161,8 @@ export class Store extends EventEmitter {
 
   // Byte entry point (Atlantis decode): bytes are preserved and hashed.
   addEntryInput(input: EntryInput): void {
+    const deviceId = this.resolveDeviceKey(input.deviceId);
+    if (deviceId !== input.deviceId) input = { ...input, deviceId };
     const key = keyOf(input.deviceId, input.id);
     const existing = this.entriesByKey.get(key);
 
@@ -214,6 +233,7 @@ export class Store extends EventEmitter {
     responseBody: string | null; responseBodySize: number; responseBodyOmitted: BodyOmitted;
     durationMs: number | null; error: string | null;
   }): void {
+    deviceId = this.resolveDeviceKey(deviceId);
     const key = keyOf(deviceId, id);
     const existing = this.entriesByKey.get(key);
     if (!existing) return;
@@ -248,6 +268,8 @@ export class Store extends EventEmitter {
   // which yields a partial session when the id was never handshaked). Returns the
   // admission outcome so the transport can close a connection on `overload`.
   addWsSession(w: WsSessionInput & { generation?: string; via?: 'open' | 'frame' }): AdmissionOutcome {
+    const deviceId = this.resolveDeviceKey(w.deviceId);
+    if (deviceId !== w.deviceId) w = { ...w, deviceId };
     const gen = w.generation ?? `legacy:${w.deviceId}`;
     const key = keyOf(w.deviceId, w.wsId);
     const outcome = this.admission.observe({ deviceId: w.deviceId, wsId: w.wsId }, gen, w.via ?? 'open');
@@ -286,6 +308,7 @@ export class Store extends EventEmitter {
   // `data`. A frame for a session that no longer exists (its open was dropped or it
   // was evicted/cleared) is counted as a dropped frame rather than silently ignored.
   appendWsFrame(wsId: string, f: { ts: number; direction: 'in' | 'out'; data: string | null; size: number; binary: boolean }, bytes?: Uint8Array | null, deviceId?: string): void {
+    if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
     const key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
     const ss = key ? this.sessionsByKey.get(key) : undefined;
     if (!key || !ss) { this.counters.droppedFrames++; this.retentionDirty = true; this.flushRetention(); return; }
@@ -329,6 +352,7 @@ export class Store extends EventEmitter {
   }
 
   closeWs(wsId: string, ts: number, code: number, reason: string, deviceId?: string): void {
+    if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
     const key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
     const ss = key ? this.sessionsByKey.get(key) : undefined;
     if (!ss) return;
@@ -340,14 +364,53 @@ export class Store extends EventEmitter {
     this.flushRetention();
   }
 
-  touchDevice(d: Device): void {
-    this.metadataBytes -= this.deviceMeta.get(d.deviceId) ?? 0;
-    this.devs.set(d.deviceId, d);
-    const mb = serializedBytes(d);
-    this.deviceMeta.set(d.deviceId, mb);
+  // Resolve a device key through the alias map (identity, when unaliased).
+  resolveDeviceKey(deviceId: string): string { return this.aliases.get(deviceId) ?? deviceId; }
+
+  // Record an alias `aliasKey -> primaryId` so Atlantis traffic arriving under
+  // `aliasKey` is attributed to `primaryId` (the app's ingest deviceId). In memory
+  // only. Conflict: if `aliasKey` is already a primary device that has captured
+  // entries, keep both devices and log a warning rather than silently rehoming a
+  // live device's traffic onto another.
+  recordAlias(aliasKey: string, primaryId: string): void {
+    if (!aliasKey || aliasKey === primaryId) return;
+    if (this.aliases.get(aliasKey) === primaryId) return;
+    if ((this.entryDevice.get(aliasKey)?.size ?? 0) > 0) {
+      log.warn(`device alias conflict: ${aliasKey} already has entries; keeping both, not aliasing to ${primaryId}`);
+      return;
+    }
+    this.aliases.set(aliasKey, primaryId);
+  }
+
+  // Record (or refresh) a device. `channel` names which capture channel this touch
+  // arrived on: an `ingest` hello or an `atlantis` connection. The channel's
+  // `lastSeenAt` is stamped and the record's `channels` merged with what was seen
+  // before, so a phone heard on both channels carries both; `lastSeen` stays the
+  // MAX across the incoming touch and the prior record so the liveness dot never
+  // regresses when the quieter channel checks in.
+  //
+  // Identity metadata is merged so a channel PLACEHOLDER never clobbers a real
+  // value the other channel supplied: `buildProfile` 'unknown' (the JS hello
+  // default) and 'atlantis' (the SDK channel marker) are placeholders that only
+  // fill an empty/placeholder slot, while any real value always wins; an empty
+  // `appVersion` likewise never overwrites a known one. So a hello carrying the
+  // build profile survives a later Atlantis connection, whatever the order.
+  touchDevice(d: Device, channel?: 'ingest' | 'atlantis'): void {
+    const id = this.resolveDeviceKey(d.deviceId);
+    const existing = this.devs.get(id);
+    const channels: DeviceChannels = { ...(existing?.channels ?? {}), ...(d.channels ?? {}) };
+    if (channel) channels[channel] = { lastSeenAt: d.lastSeen };
+    const lastSeen = existing ? Math.max(d.lastSeen, existing.lastSeen) : d.lastSeen;
+    const buildProfile = existing ? pickBuildProfile(d.buildProfile, existing.buildProfile) : d.buildProfile;
+    const appVersion = existing && d.appVersion === '' ? existing.appVersion : d.appVersion;
+    const merged: Device = { ...d, deviceId: id, appVersion, buildProfile, lastSeen, channels };
+    this.metadataBytes -= this.deviceMeta.get(id) ?? 0;
+    this.devs.set(id, merged);
+    const mb = serializedBytes(merged);
+    this.deviceMeta.set(id, mb);
     this.metadataBytes += mb;
     this.evictMetadata();
-    this.emit('device', d);
+    this.emit('device', merged);
     this.flushRetention();
   }
 
@@ -362,7 +425,11 @@ export class Store extends EventEmitter {
     // BodyStore only ever hashes redacted bytes. Binary frame payloads are not
     // redacted as text (redactText only touches text).
     switch (m.type) {
-      case 'hello': return this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts });
+      case 'hello': {
+        this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts }, 'ingest');
+        if (m.atlantisDeviceKey) this.recordAlias(m.atlantisDeviceKey, m.deviceId);
+        return;
+      }
       case 'request': return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url),
         requestHeaders: redactHeaders(m.headers), requestBody: redactText(m.body), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
         status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null });

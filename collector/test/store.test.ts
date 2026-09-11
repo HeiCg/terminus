@@ -32,6 +32,58 @@ describe('Store', () => {
     s.applyDeviceMessage('d1', { type: 'hello', deviceId: 'd1', platform: 'android', appVersion: '1.0', buildProfile: 'preview', dropped: 3, ts: 1 });
     expect(s.devices()[0]).toMatchObject({ deviceId: 'd1', dropped: 3 });
   });
+  it('records the ingest channel on a hello', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { type: 'hello', deviceId: 'd1', platform: 'android', appVersion: '1.0', buildProfile: 'unknown', dropped: 0, ts: 100 });
+    const d = s.devices()[0];
+    expect(d.channels?.ingest?.lastSeenAt).toBe(100);
+    expect(d.channels?.atlantis).toBeUndefined();
+    expect(d.lastSeen).toBe(100);
+  });
+  it('merges ingest and atlantis channels on one device; lastSeen is the max', () => {
+    const s = new Store();
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 100 }, 'ingest');
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'atlantis', dropped: 0, lastSeen: 250 }, 'atlantis');
+    let d = s.devices()[0];
+    expect(d.channels?.ingest?.lastSeenAt).toBe(100);
+    expect(d.channels?.atlantis?.lastSeenAt).toBe(250);
+    expect(d.lastSeen).toBe(250);
+    // A later ingest touch with an OLDER timestamp keeps lastSeen at the max.
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 180 }, 'ingest');
+    d = s.devices()[0];
+    expect(d.channels?.ingest?.lastSeenAt).toBe(180);
+    expect(d.lastSeen).toBe(250);
+  });
+  it('keeps a real buildProfile over channel placeholders, whatever the order', () => {
+    const helloUnknown = { type: 'hello' as const, deviceId: 'd1', platform: 'android', appVersion: '3.4.1', buildProfile: 'unknown', dropped: 0, ts: 100 };
+    const helloPreview = { ...helloUnknown, buildProfile: 'preview', ts: 300 };
+    const atlantis = { deviceId: 'd1', platform: 'android', appVersion: '', buildProfile: 'atlantis', dropped: 0, lastSeen: 200 };
+
+    // hello(unknown) -> atlantis -> hello(preview): ends on the real 'preview'.
+    const a = new Store();
+    a.applyDeviceMessage('d1', helloUnknown);
+    a.touchDevice(atlantis, 'atlantis');
+    a.applyDeviceMessage('d1', helloPreview);
+    expect(a.devices()[0].buildProfile).toBe('preview');
+    // The empty atlantis appVersion never overwrote the hello's real one.
+    expect(a.devices()[0].appVersion).toBe('3.4.1');
+
+    // atlantis-first -> hello(preview): still ends on 'preview'.
+    const b = new Store();
+    b.touchDevice(atlantis, 'atlantis');
+    b.applyDeviceMessage('d1', helloPreview);
+    expect(b.devices()[0].buildProfile).toBe('preview');
+
+    // A later placeholder touch does NOT clobber the real value.
+    b.touchDevice(atlantis, 'atlantis');
+    expect(b.devices()[0].buildProfile).toBe('preview');
+  });
+  it('touchDevice without a channel preserves existing channels', () => {
+    const s = new Store();
+    s.touchDevice({ deviceId: 'd1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, lastSeen: 100 }, 'ingest');
+    s.touchDevice({ deviceId: 'd1', platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: 200 });
+    expect(s.devices()[0].channels?.ingest?.lastSeenAt).toBe(100);
+  });
   it('clear(deviceId) keeps other devices correlatable (B3)', () => {
     const s = new Store();
     s.applyDeviceMessage('d1', req('d1-1'));
@@ -213,5 +265,56 @@ describe('over-cap binary WS frame reports the size-omission reason', () => {
     expect(over.state).toBe('omitted');
     expect(over.omitted).toBe('size');
     expect(over.size).toBe(256 * 1024 + 1);
+  });
+});
+
+describe('Store device aliasing', () => {
+  const entryInput = (deviceId: string, id: string) => ({
+    id, deviceId, source: 'atlantis' as const, startedAt: 1, method: 'GET', url: 'https://x/',
+    requestHeaders: {}, requestBytes: null, requestBodySize: 0, requestBodyOmitted: null,
+    status: 200, statusText: '', responseHeaders: {}, responseBytes: null, responseBodySize: 0,
+    responseBodyOmitted: null, durationMs: 1, error: null,
+  });
+
+  it('attributes atlantis traffic under the alias key to the primary device', () => {
+    const s = new Store();
+    // App hello on ingest declares its deviceId AND the key the SDK will present under.
+    s.applyDeviceMessage('app-1', { type: 'hello', deviceId: 'app-1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, ts: 100, atlantisDeviceKey: 'com.acme_moto g34' });
+    // Atlantis connection + traffic arrive under the SDK's own envelope key.
+    s.touchDevice({ deviceId: 'com.acme_moto g34', platform: 'android', appVersion: '1', buildProfile: 'atlantis', dropped: 0, lastSeen: 200 }, 'atlantis');
+    s.addEntryInput(entryInput('com.acme_moto g34', 't1'));
+    // Traffic landed on the primary device, not under the alias key.
+    expect(s.entries('app-1')).toHaveLength(1);
+    expect(s.entries('com.acme_moto g34')).toHaveLength(0);
+    // Devices list shows one device carrying both channels.
+    expect(s.devices()).toHaveLength(1);
+    const d = s.devices()[0];
+    expect(d.deviceId).toBe('app-1');
+    expect(d.channels?.ingest?.lastSeenAt).toBe(100);
+    expect(d.channels?.atlantis?.lastSeenAt).toBe(200);
+  });
+
+  it('routes atlantis ws sessions and frames under the alias to the primary device', () => {
+    const s = new Store();
+    s.applyDeviceMessage('app-1', { type: 'hello', deviceId: 'app-1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, ts: 100, atlantisDeviceKey: 'sdk-key' });
+    s.addWsSession({ wsId: 'w1', deviceId: 'sdk-key', source: 'atlantis', url: 'wss://x', openedAt: 1, generation: 'g', via: 'open' });
+    s.appendWsFrame('w1', { ts: 2, direction: 'in', data: 'hi', size: 2, binary: false }, null, 'sdk-key');
+    expect(s.wsSessions('app-1')).toHaveLength(1);
+    expect(s.wsSessions('app-1')[0].frames).toHaveLength(1);
+    expect(s.wsSessions('sdk-key')).toHaveLength(0);
+  });
+
+  it('on conflict (alias key already a device with entries) keeps both devices', () => {
+    const s = new Store();
+    // Atlantis connected FIRST under its own key: a real device with captured entries.
+    s.touchDevice({ deviceId: 'sdk-key', platform: 'android', appVersion: '1', buildProfile: 'atlantis', dropped: 0, lastSeen: 50 }, 'atlantis');
+    s.addEntryInput(entryInput('sdk-key', 't0'));
+    // A later hello tries to alias that key -> refused, both devices kept.
+    s.applyDeviceMessage('app-1', { type: 'hello', deviceId: 'app-1', platform: 'android', appVersion: '1', buildProfile: 'unknown', dropped: 0, ts: 100, atlantisDeviceKey: 'sdk-key' });
+    // New atlantis traffic still lands under the SDK key (not rehomed).
+    s.addEntryInput(entryInput('sdk-key', 't1'));
+    expect(s.entries('sdk-key')).toHaveLength(2);
+    expect(s.entries('app-1')).toHaveLength(0);
+    expect(s.devices().map((d) => d.deviceId).sort()).toEqual(['app-1', 'sdk-key']);
   });
 });
