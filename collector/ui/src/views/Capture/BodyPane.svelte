@@ -185,6 +185,14 @@
     { id: 'json', label: 'Pretty' },
     { id: 'raw', label: 'Raw' },
   ];
+
+  // A body the collector DID capture but whose length is zero (e.g. a 204, or a
+  // POST with an empty payload). Rendered as an explicit empty state rather than a
+  // blank pane, so the pane never reads as "still loading" or broken.
+  const isEmptyOk = $derived(bs.kind === 'ok' && bs.size === 0);
+  const emptyHint = $derived(
+    [selection.current?.method, contentType].filter(Boolean).join(' · '),
+  );
 </script>
 
 {#if bs.kind === 'absent'}
@@ -198,6 +206,13 @@
     <p class="err-title">Couldn’t load the {side} body</p>
     <p class="err-hint">The request failed. This is a transport error, not a cleared record.</p>
     <button type="button" class="err-retry" onclick={() => void selection.loadBody(side)}>Retry</button>
+  </div>
+{:else if bs.kind === 'ok' && isEmptyOk}
+  <div class="body" data-testid={testid}>
+    <div class="empty-card">
+      <p class="empty-title">Empty body (0 bytes)</p>
+      {#if emptyHint}<p class="empty-hint">{emptyHint}</p>{/if}
+    </div>
   </div>
 {:else if bs.kind === 'ok' && isBinary}
   <div class="body" data-testid={testid}>
@@ -279,6 +294,28 @@
     gap: 12px;
     background: var(--bg-elevated);
     border-radius: 8px;
+  }
+  .empty-card {
+    margin: 16px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    background: var(--bg-elevated);
+    border-radius: 8px;
+  }
+  .empty-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg-primary);
+  }
+  .empty-hint {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-muted);
   }
   .bin-title {
     margin: 0;

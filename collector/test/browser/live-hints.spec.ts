@@ -111,3 +111,19 @@ test('item 3: the topbar connection dot reflects live then paused', async ({ pag
   await expect(page.getByTestId('paused-pill')).toBeVisible();
   await expect(dot).toHaveAttribute('data-state', 'paused');
 });
+
+test('item 4: a captured zero-length body renders an explicit empty state', async ({ page }) => {
+  await page.goto(`${h.url}/#token=${h.adminToken}`);
+  await expect(page.getByTestId('capture-connection')).toHaveText('Conectado');
+
+  // A POST whose response body was captured but is empty (0 bytes). An empty
+  // string body (not null) is a CAPTURED zero-length body, not an absent one.
+  h.store.addEntry(makeEntry('empty0', 'd1', {
+    method: 'POST', responseBody: '', responseHeaders: { 'content-type': 'application/json' },
+  }));
+  await page.getByTestId('entry-row-empty0').click();
+
+  // Response is the default tab; the pane shows the empty state, not a blank box.
+  await expect(page.getByTestId('body-response')).toContainText('Empty body (0 bytes)');
+  await expect(page.getByTestId('body-response')).toContainText('application/json');
+});
