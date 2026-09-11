@@ -22,6 +22,18 @@
   const live = $derived(now - device.lastSeen < 30_000);
   const shortId = $derived(device.deviceId.slice(0, 6));
   const isQa = $derived(device.buildProfile === 'qa');
+  // An `unknown` build profile (the JS ingest default) reads as "—", not the raw word.
+  const profileLabel = $derived(device.buildProfile === 'unknown' ? '—' : device.buildProfile);
+
+  // The capture channels this phone has been heard on, each with its own last-seen.
+  // A device seen on both the JS ingest and the Atlantis SDK shows two chips.
+  const channels = $derived.by(() => {
+    const c = device.channels;
+    const out: { name: 'ingest' | 'atlantis'; lastSeenAt: number }[] = [];
+    if (c?.ingest) out.push({ name: 'ingest', lastSeenAt: c.ingest.lastSeenAt });
+    if (c?.atlantis) out.push({ name: 'atlantis', lastSeenAt: c.atlantis.lastSeenAt });
+    return out;
+  });
 
   // Coarse platform family for the glyph: apple, android, or a generic phone.
   const platform = $derived.by(() => {
@@ -50,7 +62,7 @@
       {/if}
     </span>
     <span class="dev-id">{shortId}</span>
-    <span class={['profile', { qa: isQa }]}>{device.buildProfile}</span>
+    <span class={['profile', { qa: isQa }]}>{profileLabel}</span>
   </div>
 
   <div class="line version">v{device.appVersion}</div>
@@ -63,6 +75,16 @@
       <span>last seen {fmtRelative(device.lastSeen, now)}</span>
     {/if}
   </div>
+
+  {#if channels.length > 0}
+    <div class="line channels" data-testid="device-channels">
+      {#each channels as ch (ch.name)}
+        <span class={['channel', ch.name]} data-testid={`channel-${ch.name}`}>
+          {ch.name} · {fmtRelative(ch.lastSeenAt, now)}
+        </span>
+      {/each}
+    </div>
+  {/if}
 
   <div class="line counters" data-testid="device-counters">
     <span>entries {entries}</span>
@@ -133,6 +155,27 @@
   }
   .dot.live {
     background: var(--status-2xx);
+  }
+  .channels {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .channel {
+    padding: 1px 8px;
+    font-family: var(--font-ui);
+    font-size: 10px;
+    line-height: 1.6;
+    border-radius: 999px;
+    color: var(--tint, var(--fg-muted));
+    background: var(--tint-surface, var(--bg-elevated));
+    border: 1px solid color-mix(in srgb, var(--tint, var(--border-subtle)) 40%, transparent);
+    white-space: nowrap;
+  }
+  .channel.ingest {
+    --tint: var(--source-xhr);
+  }
+  .channel.atlantis {
+    --tint: var(--source-atlantis);
   }
   .counters {
     gap: 6px;

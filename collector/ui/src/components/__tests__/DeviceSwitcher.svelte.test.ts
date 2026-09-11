@@ -37,6 +37,17 @@ describe('DeviceSwitcher', () => {
     expect(container.querySelector('.id')).toHaveTextContent('abcdef');
   });
 
+  it('shows the observed channels in the device option row', () => {
+    const { container } = render(DeviceSwitcher, {
+      props: {
+        devices: [device({ channels: { ingest: { lastSeenAt: now }, atlantis: { lastSeenAt: now } } })],
+        value: 'all', onchange: () => {}, now,
+      },
+    });
+    const option = [...container.querySelectorAll('option')].find((o) => o.value === 'abcdef123456')!;
+    expect(option.textContent).toContain('ingest,atlantis');
+  });
+
   it('calls onchange when the select changes', async () => {
     const onchange = vi.fn();
     const { container } = render(DeviceSwitcher, {
