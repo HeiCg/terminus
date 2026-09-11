@@ -57,7 +57,11 @@ export function frameLine(
   const kind = cell(ev.frame.binary ? 'bin' : 'text', W.method);
   const seq = cell(`#${ev.frame.sequence}`, W.status + 1 + W.dur, 'right');
   const rest = Math.max(12, columns - (W.time + W.device + W.method + W.status + 1 + W.dur + GAP.length * 4));
-  const where = session ? truncate(hostPath(session.url), rest) : '';
+  // A resumed session (its `ws_open` predated this collector) has no url yet, so
+  // there is no host/path to show — mark it `ws:? (resumed)` instead of blank.
+  const where = session
+    ? (session.url == null ? 'ws:? (resumed)' : truncate(hostPath(session.url), rest))
+    : '';
   return [tag, device, kind, seq, where].join(GAP);
 }
 

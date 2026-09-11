@@ -30,6 +30,9 @@ export async function runTail(ctx: Ctx): Promise<number> {
   const frameAllowed = (deviceId: string, session: WsSummary | undefined): boolean => {
     if (deviceFilter && deviceId !== deviceFilter) return false;
     if ((hostFilter || pathFilter) && session) {
+      // A resumed session has no url yet; there is nothing to match a host/path
+      // filter against, so it is filtered out when either is set.
+      if (session.url == null) return false;
       let host: string; let pathAndQuery: string;
       try { const u = new URL(session.url); host = u.host.toLowerCase(); pathAndQuery = (u.pathname + u.search).toLowerCase(); }
       catch { host = session.url.toLowerCase(); pathAndQuery = session.url.toLowerCase(); }

@@ -35,9 +35,12 @@ export type EntryDetail = EntrySummary & {
 
 // A WebSocket session in a metadata page: the frame ARRAY is replaced by counts
 // (frames are paged via `/frames`), so a long-lived session never balloons the
-// page. `partial` is normalised to a boolean (a resumed/orphaned prefix).
-export type WsSummary = Omit<WsSession, 'frames' | 'partial'> & {
-  retainedFrames: number; totalFrames: number; droppedFrames: number; partial: boolean;
+// page. `partial` is normalised to a boolean (an orphaned prefix); `resumed` is
+// normalised to a boolean too (a session synthesized from a frame whose `ws_open`
+// predates this collector — its `url` is null until a late open back-fills it).
+export type WsSummary = Omit<WsSession, 'frames' | 'partial' | 'resumed'> & {
+  retainedFrames: number; totalFrames: number; droppedFrames: number;
+  partial: boolean; resumed: boolean;
   identityClipped?: true;
 };
 

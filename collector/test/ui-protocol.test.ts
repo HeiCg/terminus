@@ -262,3 +262,39 @@ describe('UI protocol v2 over the real server (R2)', () => {
     } finally { await h.close(); }
   });
 });
+
+describe('resumed sessions reach the UI (spec item 5 broadcaster)', () => {
+  it('a synthesized session appears in a live ws delta and a fresh snapshot', async () => {
+    const h = await createCollectorHarness();
+    try {
+      const cookie = await h.login();
+      const c = new UiClient(h.url, cookie, h.origin);
+      await c.opened();
+      await c.waitFor((m) => m.type === 'snapshot');
+
+      // An orphan frame (no prior ws_open) carrying a known device synthesizes a
+      // resumed session in the store; the broadcaster must fan it out.
+      h.store.appendWsFrame('w1', { ts: 5, direction: 'in', data: 'resumed-frame', size: 13, binary: false }, null, 'd1');
+
+      const wsMsg = (await c.waitFor((m) => m.type === 'ws')) as Extract<UiMessage, { type: 'ws' }>;
+      expect(wsMsg.session).toMatchObject({ wsId: 'w1', deviceId: 'd1', resumed: true });
+      expect(wsMsg.session.url).toBeNull();
+
+      // Folded through the browser reducer the session is present and marked resumed.
+      const state = c.fold();
+      const session = state.ws.get(entityKey('d1', 'w1'));
+      expect(session?.resumed).toBe(true);
+      expect(session?.url).toBeNull();
+
+      // A newly-connecting client sees the synthesized session in its snapshot too.
+      const c2 = new UiClient(h.url, cookie, h.origin);
+      await c2.opened();
+      const snap = (await c2.waitFor((m) => m.type === 'snapshot')) as Extract<UiMessage, { type: 'snapshot' }>;
+      const snapSession = snap.ws.items.find((w) => w.wsId === 'w1');
+      expect(snapSession?.resumed).toBe(true);
+      expect(snapSession?.url).toBeNull();
+
+      c.close(); c2.close();
+    } finally { await h.close(); }
+  });
+});

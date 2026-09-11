@@ -14,7 +14,7 @@ function ws(over: Partial<WsSummary> = {}): WsSummary {
   return {
     wsId: 'w1', deviceId: 'd1', source: 'xhr', url: 'wss://example.test/ws', openedAt: 1,
     kind: 'websocket', httpEntryKey: null, closedAt: null, closeCode: null, closeReason: '',
-    retainedFrames: 0, totalFrames: 0, droppedFrames: 0, partial: false, ...over,
+    retainedFrames: 0, totalFrames: 0, droppedFrames: 0, partial: false, resumed: false, ...over,
   };
 }
 
@@ -115,6 +115,21 @@ describe('FrameTimeline', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Load older' }));
     expect(await screen.findByTestId('ws-frame-3')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Jump to live' })).toBeInTheDocument();
+  });
+
+  it('renders the resumed chip and the "URL unknown" note for a synthesized session', async () => {
+    const api = {
+      fetchFrames: vi.fn(async () => page([frame(0)])),
+      fetchFrameBody: vi.fn(),
+    };
+    const sockets = new Sockets({ store, cache, api });
+    store.apply([{ type: 'ws', session: ws({ wsId: 'w1', url: null, resumed: true }) }]);
+    await sockets.select('w1');
+
+    renderTimeline(sockets);
+
+    expect(screen.getByText('resumed')).toBeInTheDocument();
+    expect(screen.getByText('URL unknown (opened before the collector started)')).toBeInTheDocument();
   });
 
   it('renders the direction toolbar and disables Load older at the first page', async () => {

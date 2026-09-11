@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type {
   DeviceMessage, Entry, EntryInput, StoredEntry, StoredFrame, WsSession, WsSessionInput,
-  Device, DeviceChannels, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot,
+  Device, DeviceChannels, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot, Source,
 } from './types.js';
 import { createBodyStore, type BodyStore } from './bodyStore.js';
 import { createSessionAdmission, type SessionAdmission, type AdmissionOutcome } from './sessionAdmission.js';
@@ -141,6 +141,9 @@ export class Store extends EventEmitter {
   private metadataBytes = 0;
   private capped = false;
   private retentionDirty = false; // a drop/omission happened this op -> emit retention
+  // wsIds already warned about an un-synthesizable orphan frame (unknown session,
+  // no deviceId), so the warning fires once per id rather than once per frame.
+  private warnedOrphanFrames = new Set<string>();
   private counters: RetentionCounters = {
     retainedBodyBytes: 0, retainedMetadataBytes: 0,
     droppedEntries: 0, droppedSessions: 0, droppedFrames: 0, omittedBodies: 0, rejectedRecords: 0, refusedSessions: 0,
@@ -278,12 +281,23 @@ export class Store extends EventEmitter {
       this.counters.refusedSessions++; this.retentionDirty = true; this.flushRetention();
       return outcome;
     }
-    if (this.sessionsByKey.has(key)) return outcome; // already retained (existing)
+    const already = this.sessionsByKey.get(key);
+    if (already) {
+      // Already retained. A ws_open for an existing session is a back-fill/no-op,
+      // never a duplicate open or a new session: if the session was SYNTHESIZED
+      // from an orphan frame (url null, resumed), fill its handshake metadata in
+      // place and clear `resumed`; a real session is left untouched (frames and
+      // url intact). `gen` is recorded on it so frames on the new connection stay
+      // admitted after a resume.
+      if (already.session.resumed === true) this.backfillResumed(already, w, gen);
+      return outcome;
+    }
 
     const shell: Omit<WsSession, 'frames'> = {
       wsId: w.wsId, deviceId: w.deviceId, source: w.source, url: w.url, openedAt: w.openedAt,
       kind: w.kind ?? 'websocket', httpEntryKey: w.httpEntryKey ?? null,
       ...(outcome === 'partial' ? { partial: true } : {}),
+      ...(w.resumed === true ? { resumed: true } : {}),
       closedAt: w.closedAt ?? null, closeCode: w.closeCode ?? null, closeReason: w.closeReason ?? '',
     };
     const metaBytes = serializedBytes(shell);
@@ -307,11 +321,31 @@ export class Store extends EventEmitter {
   // the caller has it (binary frames from Atlantis), otherwise text is encoded from
   // `data`. A frame for a session that no longer exists (its open was dropped or it
   // was evicted/cleared) is counted as a dropped frame rather than silently ignored.
-  appendWsFrame(wsId: string, f: { ts: number; direction: 'in' | 'out'; data: string | null; size: number; binary: boolean }, bytes?: Uint8Array | null, deviceId?: string): void {
+  appendWsFrame(wsId: string, f: { ts: number; direction: 'in' | 'out'; data: string | null; size: number; binary: boolean }, bytes?: Uint8Array | null, deviceId?: string, source: Source = 'xhr'): void {
     if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
-    const key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
-    const ss = key ? this.sessionsByKey.get(key) : undefined;
-    if (!key || !ss) { this.counters.droppedFrames++; this.retentionDirty = true; this.flushRetention(); return; }
+    let key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
+    let ss = key ? this.sessionsByKey.get(key) : undefined;
+    if (!ss) {
+      // Unknown session. When the frame carries a deviceId we can SYNTHESIZE a
+      // resumed session (its ws_open predates this collector — the socket was open
+      // across a restart): open it through the same admission path as a ws_open,
+      // with a null url until a late ws_open back-fills it. Admission may still
+      // refuse (a removed id, or a full registry) — then the frame is dropped as
+      // before. Without a deviceId we cannot synthesize: drop and warn once.
+      if (deviceId != null) {
+        const outcome = this.addWsSession({ wsId, deviceId, source, url: null, openedAt: f.ts, kind: 'websocket', httpEntryKey: null, resumed: true, closedAt: null, closeCode: null, closeReason: '' });
+        if (outcome === 'dropped' || outcome === 'overload') { this.counters.droppedFrames++; this.retentionDirty = true; this.flushRetention(); return; }
+        key = keyOf(deviceId, wsId);
+        ss = this.sessionsByKey.get(key);
+      }
+      if (!key || !ss) {
+        if (!this.warnedOrphanFrames.has(wsId)) {
+          this.warnedOrphanFrames.add(wsId);
+          log.warn(`ws frame for unknown session ${wsId} dropped (open predates this collector?)`);
+        }
+        this.counters.droppedFrames++; this.retentionDirty = true; this.flushRetention(); return;
+      }
+    }
 
     const gen = ss.generation;
     const outcome = this.admission.observe({ deviceId: ss.session.deviceId, wsId }, gen, 'frame');
@@ -338,7 +372,7 @@ export class Store extends EventEmitter {
     this.metadataBytes += frameMeta;
     this.totalFrames++;
 
-    this.evictFrames(key, ss);
+    this.evictFrames(ss);
     this.evictMetadata();
     // Frame delta carries a FrameSummary (sequence + metadata + BodyRef), never
     // the payload bytes; the UI fetches the payload on demand by sequence. The
@@ -360,6 +394,28 @@ export class Store extends EventEmitter {
     ss.session = { ...ss.session, closedAt: ts, closeCode: code, closeReason: reason };
     ss.metaBytes = serializedBytes(ss.session) + ss.frames.reduce((a, fr) => a + serializedBytes(fr), 0);
     this.metadataBytes += ss.metaBytes;
+    this.emit('ws', this.toWsSummary(ss));
+    this.flushRetention();
+  }
+
+  // Fill a SYNTHESIZED (resumed) session's handshake metadata in place from a late
+  // ws_open and clear `resumed`, keeping the same session and its frames. The sort
+  // key (openedAt/deviceId/wsId) is unchanged, so no index update is needed; only
+  // the serialized size shifts (url null -> string, `resumed` gone). A real
+  // connection generation on the open is adopted so frames on the resumed
+  // connection stay admitted and are freed when that connection closes.
+  private backfillResumed(ss: StoredSession, w: WsSessionInput & { generation?: string }, gen: string): void {
+    this.metadataBytes -= ss.metaBytes;
+    const { resumed: _resumed, ...rest } = ss.session;
+    ss.session = {
+      ...rest, url: w.url,
+      kind: w.kind ?? ss.session.kind,
+      httpEntryKey: w.httpEntryKey ?? ss.session.httpEntryKey,
+    };
+    ss.metaBytes = serializedBytes(ss.session) + ss.frames.reduce((a, fr) => a + serializedBytes(fr), 0);
+    this.metadataBytes += ss.metaBytes;
+    if (w.generation != null) ss.generation = gen;
+    this.evictMetadata();
     this.emit('ws', this.toWsSummary(ss));
     this.flushRetention();
   }
@@ -436,7 +492,10 @@ export class Store extends EventEmitter {
       case 'response': return this.patchEntryResponse(deviceId, m.id, { status: m.status, statusText: m.statusText, responseHeaders: redactHeaders(m.headers),
         responseBody: redactText(m.body), responseBodySize: m.bodySize, responseBodyOmitted: m.bodyOmitted ?? null, durationMs: m.durationMs, error: m.error ?? null });
       case 'ws_open': {
-        const r = this.addWsSession({ wsId: m.wsId, deviceId, source: 'xhr', url: redactUrl(m.url), openedAt: m.ts, closedAt: null, closeCode: null, closeReason: '', generation });
+        // A resumed ws_open (the app replays it for a socket still open across a
+        // generation) back-fills a synthesized session or is a no-op for a known
+        // one — addWsSession handles both; `resumed` only tags a brand-new open.
+        const r = this.addWsSession({ wsId: m.wsId, deviceId, source: 'xhr', url: redactUrl(m.url), openedAt: m.ts, closedAt: null, closeCode: null, closeReason: '', generation, resumed: m.resumed === true });
         return r === 'overload' ? 'overload' : undefined;
       }
       case 'ws_frame': {
@@ -678,7 +737,7 @@ export class Store extends EventEmitter {
 
   private toWsSummary(ss: StoredSession): WsSummary {
     return {
-      ...ss.session, partial: ss.session.partial === true,
+      ...ss.session, partial: ss.session.partial === true, resumed: ss.session.resumed === true,
       retainedFrames: ss.frames.length, totalFrames: ss.nextSeq, droppedFrames: ss.droppedLocal,
     };
   }
@@ -816,7 +875,7 @@ export class Store extends EventEmitter {
   }
 
   // Evict oldest frames of a session, then oldest frames globally.
-  private evictFrames(key: string, ss: StoredSession): void {
+  private evictFrames(ss: StoredSession): void {
     while (ss.frames.length > this.limits.wsMessagesPerSession) this.dropOldestFrame(ss);
     while (this.totalFrames > this.limits.wsMessagesGlobal) {
       // Oldest frame across all sessions: the oldest session that still has frames.
@@ -825,7 +884,6 @@ export class Store extends EventEmitter {
       if (!target) break;
       this.dropOldestFrame(target);
     }
-    void key;
   }
 
   private dropOldestFrame(ss: StoredSession): void {
