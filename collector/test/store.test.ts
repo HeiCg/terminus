@@ -318,3 +318,84 @@ describe('Store device aliasing', () => {
     expect(s.devices().map((d) => d.deviceId).sort()).toEqual(['app-1', 'sdk-key']);
   });
 });
+
+// Orphan WS frames after a collector restart: a frame whose ws_open predates this
+// collector arrives with a known deviceId but no session. Rather than silently
+// dropping it (data loss visible only in a counter), the store synthesizes a
+// resumed session with a null url, appends the frame, and back-fills the url when
+// a late ws_open arrives.
+describe('Store resumed WS sessions (orphan frames after a restart)', () => {
+  const frame = (over: Partial<{ ts: number; direction: 'in' | 'out'; data: string | null; size: number; binary: boolean }> = {}) =>
+    ({ ts: 1, direction: 'in' as const, data: 'hi', size: 2, binary: false, ...over });
+
+  it('synthesizes a resumed session from an orphan frame carrying a deviceId', () => {
+    const s = new Store();
+    const events: unknown[] = [];
+    s.on('ws', (w) => events.push(w));
+    s.appendWsFrame('w1', frame({ ts: 10 }), null, 'd1');
+
+    const sessions = s.wsSessions('d1');
+    expect(sessions).toHaveLength(1);
+    const ws = sessions[0];
+    expect(ws.wsId).toBe('w1');
+    expect(ws.url).toBeNull();
+    expect(ws.kind).toBe('websocket');
+    expect(ws.openedAt).toBe(10);
+    expect(ws.resumed).toBe(true);
+    expect(ws.frames).toHaveLength(1);
+    expect(ws.frames[0].data).toBe('hi');
+    // The frame was NOT dropped, and the synthesis emitted a `ws` store event.
+    expect(s.retentionCounters().droppedFrames).toBe(0);
+    expect(events).toHaveLength(1);
+  });
+
+  it('back-fills url/kind and clears resumed when a late ws_open arrives (via applyDeviceMessage)', () => {
+    const s = new Store();
+    s.appendWsFrame('w1', frame({ ts: 10 }), null, 'd1');
+    expect(s.wsSessions('d1')[0].resumed).toBe(true);
+
+    const events: unknown[] = [];
+    s.on('ws', (w) => events.push(w));
+    // The app replays ws_open (resumed) for the still-open socket on a new generation.
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 5, url: 'wss://api.example.io/live', protocols: [], resumed: true }, 'gen-2');
+
+    const sessions = s.wsSessions('d1');
+    expect(sessions).toHaveLength(1); // no new session
+    const ws = sessions[0];
+    expect(ws.url).toBe('wss://api.example.io/live');
+    expect(ws.resumed).toBeUndefined();
+    expect(ws.frames).toHaveLength(1); // frames preserved
+    expect(events).toHaveLength(1); // back-fill emits a ws update
+  });
+
+  it('a resumed ws_open for an already-known real session is a no-op (no duplicate, no frame reset)', () => {
+    const s = new Store();
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 1, url: 'wss://api.example.io/live', protocols: [] }, 'gen-1');
+    s.appendWsFrame('w1', frame({ ts: 2 }), null, 'd1');
+    s.appendWsFrame('w1', frame({ ts: 3, data: 'yo' }), null, 'd1');
+    expect(s.wsSessions('d1')[0].frames).toHaveLength(2);
+
+    // A replayed ws_open on a new generation must not duplicate the session or reset frames.
+    s.applyDeviceMessage('d1', { type: 'ws_open', wsId: 'w1', ts: 4, url: 'wss://api.example.io/live', protocols: [], resumed: true }, 'gen-2');
+
+    const sessions = s.wsSessions('d1');
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].url).toBe('wss://api.example.io/live');
+    expect(sessions[0].resumed).toBeUndefined();
+    expect(sessions[0].frames).toHaveLength(2); // frames not reset
+  });
+
+  it('counts an orphan frame as dropped (only) when admission refuses to synthesize', () => {
+    const s = new Store({ limits: { admissionIdsPerGeneration: 0 } });
+    s.appendWsFrame('w1', frame(), null, 'd1');
+    expect(s.wsSessions('d1')).toHaveLength(0);
+    expect(s.retentionCounters().droppedFrames).toBe(1);
+  });
+
+  it('drops an orphan frame with no deviceId (cannot synthesize) and counts it', () => {
+    const s = new Store();
+    s.appendWsFrame('w1', frame(), null); // no deviceId, no session
+    expect(s.wsSessions()).toHaveLength(0);
+    expect(s.retentionCounters().droppedFrames).toBe(1);
+  });
+});

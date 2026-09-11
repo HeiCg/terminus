@@ -88,10 +88,21 @@ describe('per-message caps on every write path (IMPORTANT 2)', () => {
 });
 
 describe('WS admission integration (IMPORTANT 3/4/8)', () => {
-  it('counts a frame for a session that does not exist as dropped', () => {
+  it('counts a frame for an unknown session with no deviceId as dropped (cannot synthesize)', () => {
+    const s = new Store();
+    s.appendWsFrame('ghost', { ts: 1, direction: 'in', data: 'x', size: 1, binary: false }); // no deviceId
+    expect(s.retentionCounters().droppedFrames).toBe(1);
+    expect(s.wsSessions()).toHaveLength(0);
+  });
+
+  it('synthesizes a resumed session for an orphan frame that carries a deviceId', () => {
     const s = new Store();
     s.appendWsFrame('ghost', { ts: 1, direction: 'in', data: 'x', size: 1, binary: false }, null, 'd1');
-    expect(s.retentionCounters().droppedFrames).toBe(1);
+    expect(s.retentionCounters().droppedFrames).toBe(0);
+    const ws = s.wsSessions('d1');
+    expect(ws).toHaveLength(1);
+    expect(ws[0].resumed).toBe(true);
+    expect(ws[0].url).toBeNull();
   });
 
   it('stamps a session opened from an orphan frame as partial', () => {
