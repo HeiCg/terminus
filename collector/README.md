@@ -61,7 +61,9 @@ default `8788`), `ATLANTIS_PORT` (Atlantis TLS, default `10909`),
 `~/Library/Application Support/Terminus`), `TERMINUS_PAIRING_HOST` (the host the
 pairing blob/QR advertise — see [Device identity and pairing](#device-identity-and-pairing)),
 `TERMINUS_INGEST_PAUSE_MAX_MS` (back-pressure deadline, default `30000` — see
-[Ingest limits and back-pressure](#ingest-limits-and-back-pressure)).
+[Ingest limits and back-pressure](#ingest-limits-and-back-pressure)),
+`TERMINUS_ATLANTIS_PING_MS` (Atlantis liveness ping interval, default `30000`, `0`
+disables — see [Using Atlantis](#using-atlantis-iosandroid)).
 The deprecated `NETCAPTURE_STATE_DIR` is still read as a fallback with a one-time
 warning.
 
@@ -244,6 +246,18 @@ Atlantis app build must declare the **same** service in its `NSBonjourServices`:
 
 The collector applies header/query redaction to Atlantis traffic (the in-app
 protocol is already redacted at the source). Redaction is never undone.
+
+### Liveness ping
+
+After the `ready` control frame, the collector sends a `ping` control frame on each
+authenticated connection every `TERMINUS_ATLANTIS_PING_MS` (default `30000`; set `0`
+to disable). The frame carries a `ts`; the timer is per connection and cleared on
+close, and a write failure closes the socket. An SDK at or beyond the next fork tag
+reads these pings for dead-connection detection (it drops the connection after two
+missed pings); the current forks tolerate the unknown control type — iOS ignores it,
+the Android fork has no reader yet — so pinging is safe today. If the SDK ever replies
+with a `pong` control frame, the collector accepts and ignores it (not counted as
+traffic).
 
 ### Device channels and identity
 
