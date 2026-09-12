@@ -9,6 +9,7 @@ import type { CollectorIdentity } from '../security/types.js';
 import { createIngestShared, type IngestShared } from '../deviceServer.js';
 import type { Store } from '../store.js';
 import { log } from '../log.js';
+import { env } from '../env.js';
 
 // A device.model like "Google Pixel 7 (Android 14)" marks an Android client; the
 // iOS fork sends no such suffix.
@@ -19,10 +20,14 @@ const AUTH_TIMEOUT_MS = 5_000;      // ConnectionPackage/ACK deadline
 const FRAME_PROGRESS_MS = 10_000;   // a started frame must keep making progress
 const READ_CHUNK = 16 * 1024;       // bound per-read reservation so backpressure is fine-grained
 
-// Encode a v2 control frame (`ready` / `auth_error`) in the Atlantis envelope shape,
-// length-prefixed like any other frame. Exclusive to authenticated TLS v2 — legacy
-// fork APIs never see it.
-export function encodeControlFrame(collectorId: string, control: { type: 'ready' | 'auth_error'; protocolVersion: 2 }): Buffer {
+// Encode a v2 control frame (`ready` / `auth_error` / `ping`) in the Atlantis
+// envelope shape, length-prefixed like any other frame. Exclusive to authenticated
+// TLS v2 — legacy fork APIs never see it. The `ping` frame carries a `ts` the SDK
+// (>= next fork tag) uses for dead-connection detection; both current forks tolerate
+// an unknown control type (iOS ignores it, Android has no reader yet).
+export function encodeControlFrame(collectorId: string, control:
+  | { type: 'ready' | 'auth_error'; protocolVersion: 2 }
+  | { type: 'ping'; protocolVersion: 2; ts: number }): Buffer {
   const envelope = { id: collectorId, messageType: 'control', content: Buffer.from(JSON.stringify(control)).toString('base64'), buildVersion: 'terminus-2' };
   const payload = Buffer.from(JSON.stringify(envelope));
   const h = Buffer.alloc(8); h.writeBigUInt64LE(BigInt(payload.length));
@@ -35,6 +40,9 @@ export function encodeControlFrame(collectorId: string, control: { type: 'ready'
 // frame after a clear/eviction on this same connection; the `wsCreated` per-socket
 // Set is gone — the store owns that decision now.
 export function applyAtlantisEvent(store: Store, ev: AtlantisEvent, generation: string): 'overload' | void {
+  // A client control frame (e.g. a `pong` reply) carries no capture data: accept
+  // and ignore it, never touching the store or counting it as traffic.
+  if (ev.kind === 'control') return;
   if (ev.kind === 'connection') {
     const platform = platformOf(ev.device?.model);
     store.touchDevice({ deviceId: ev.deviceKey, platform, appVersion: ev.appVersion ?? ev.project?.name ?? '', buildProfile: 'atlantis', dropped: 0, lastSeen: Date.now() }, 'atlantis');
@@ -67,7 +75,20 @@ export function applyAtlantisEvent(store: Store, ev: AtlantisEvent, generation: 
   }
 }
 
-export type AtlantisOpts = { identity: CollectorIdentity; shared?: IngestShared; host?: string; pauseDeadlineMs?: number; progressDeadlineMs?: number };
+export type AtlantisOpts = { identity: CollectorIdentity; shared?: IngestShared; host?: string; pauseDeadlineMs?: number; progressDeadlineMs?: number; pingMs?: number };
+
+// Interval between server->client `ping` control frames on an authenticated
+// connection, in ms. `0` disables pinging. Sourced from TERMINUS_ATLANTIS_PING_MS
+// (with the deprecated NETCAPTURE_ fallback via env()); default 30 s. A negative or
+// non-numeric value falls back to the default.
+const DEFAULT_PING_MS = 30_000;
+function resolvePingMs(override?: number): number {
+  if (override != null) return override >= 0 ? override : DEFAULT_PING_MS;
+  const raw = env('ATLANTIS_PING_MS');
+  if (raw == null) return DEFAULT_PING_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PING_MS;
+}
 
 // Absolute cap on how long a connection may stay read-paused (backpressure). Bounds
 // the reservations a parked connection holds, so a set of peers each parked mid-frame
@@ -86,6 +107,7 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
   const { scheduler, budget, slots } = shared;
   const pauseDeadlineMs = opts.pauseDeadlineMs ?? DEFAULT_PAUSE_DEADLINE_MS;
   const progressDeadlineMs = opts.progressDeadlineMs ?? FRAME_PROGRESS_MS;
+  const pingMs = resolvePingMs(opts.pingMs);
 
   const server = tls.createServer(tlsServerOptions(identity), (sock) => {
     if (!slots.tryAcquire()) { log.warn('atlantis: connection slots full, rejecting'); sock.destroy(); return; }
@@ -124,6 +146,24 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
     // parked connection holds so a livelocked set cannot wedge the shared budget. A
     // pending-cap throttle with a healthy budget holds nothing beyond a bounded queue
     // and is drained by the scheduler itself, so it is left deadline-free.
+    // Server->client liveness ping. Armed only after auth succeeds and the `ready`
+    // frame is sent; a write failure closes the socket. The timer is per connection
+    // and always cleared on close/error via release().
+    let pingTimer: NodeJS.Timeout | null = null;
+    const stopPing = () => { if (pingTimer) { clearInterval(pingTimer); pingTimer = null; } };
+    const startPing = () => {
+      if (pingMs <= 0 || pingTimer) return;
+      pingTimer = setInterval(() => {
+        try {
+          sock.write(encodeControlFrame(identity.collectorId, { type: 'ping', protocolVersion: 2, ts: Date.now() }));
+        } catch {
+          log.info('atlantis: ping failed, closing', key);
+          stopPing(); sock.destroy();
+        }
+      }, pingMs);
+      pingTimer.unref?.();
+    };
+
     let resumeTimer: NodeJS.Timeout | null = null;
     let pauseTimer: NodeJS.Timeout | null = null;
     let held: Buffer | null = null; // a frame taken from the accumulator but not yet admitted
@@ -144,7 +184,7 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
 
     const release = () => {
       if (released) return; released = true;
-      clearTimeout(authTimer); clearProgress(); stopResumeTimer(); stopPauseTimer();
+      clearTimeout(authTimer); clearProgress(); stopResumeTimer(); stopPauseTimer(); stopPing();
       if (held) { budget.release(held.length); held = null; }
       slots.release(); scheduler.close(connId); store.closeWsGeneration(connId); acc.dispose();
     };
@@ -165,7 +205,9 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
         authorized = true; clearTimeout(authTimer); acc.setMaxFrame(MAX_FRAME_V2);
         key = ev.deviceKey;
         applyAtlantisEvent(store, ev, connId);
-        try { sock.write(encodeControlFrame(identity.collectorId, { type: 'ready', protocolVersion: 2 })); } catch { /* gone */ }
+        // Send `ready`, then start the liveness ping (never before auth succeeds). If
+        // the socket is already gone, skip the ping — release() runs on close.
+        try { sock.write(encodeControlFrame(identity.collectorId, { type: 'ready', protocolVersion: 2 })); startPing(); } catch { /* gone */ }
         return 'continue';
       }
       if (scheduler.submit(connId, frame) === 'overload') { held = frame; enterPause(); return 'pause'; }

@@ -28,7 +28,11 @@ export type WsFrameDecoded = { id: string; createdAt: number; messageType: strin
 export type AtlantisEvent =
   | { kind: 'connection'; deviceKey: string; buildVersion: string | null; appVersion: string | null; passcode: string | null; device: { name: string; model: string }; project: { name: string; bundleIdentifier: string } }
   | { kind: 'traffic'; deviceKey: string; isWebsocket: boolean; isSse: boolean; entry: EntryInput }
-  | { kind: 'ws'; deviceKey: string; trafficId: string; url: string; msg: WsFrameDecoded };
+  | { kind: 'ws'; deviceKey: string; trafficId: string; url: string; msg: WsFrameDecoded }
+  // A control frame from the client (e.g. a `pong` replying to a server ping). The
+  // type is not inspected: any control message decodes to this no-op event so it is
+  // accepted and ignored rather than counted as an undecodable/invalid frame.
+  | { kind: 'control'; deviceKey: string };
 const isGzip = (b: Buffer) => b.length > 2 && b[0] === 0x1f && b[1] === 0x8b;
 // Preserve repeated headers (e.g. multiple Set-Cookie) by joining with a newline
 // instead of letting later keys overwrite earlier ones.
@@ -122,6 +126,9 @@ function parseEnvelope(raw: Buffer, limits: DecodeLimits): AtlantisEvent | null 
     return { kind: 'ws', deviceKey: env.id, trafficId: t.id, url: redactUrl(t.request?.url ?? ''),
       msg: { id: m.id, createdAt: m.createdAt, messageType: m.messageType, text, bytes, size, binary } };
   }
+  // A control frame (server sends `ready`/`auth_error`/`ping`; the client may reply
+  // `pong`). Unknown control types are a no-op: accepted and ignored.
+  if (env.messageType === 'control') return { kind: 'control', deviceKey: env.id };
   if (env.messageType !== 'traffic') return null;
   const t = inner as Traffic;
   const isWebsocket = t.packageType === 'websocket';
