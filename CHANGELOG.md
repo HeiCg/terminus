@@ -17,6 +17,17 @@ All notable changes to this project are documented here. The format is based on
   reconnect, surfaced with a dedicated DTO, a UI chip, and CLI `ws:?` rendering.
 - Periodic Atlantis ping: the collector sends a periodic ping control frame on the
   Atlantis channel, tunable via `TERMINUS_ATLANTIS_PING_MS`.
+- `GET /api/status` (authenticated) reports version, uptime, pause state, connected
+  devices, retention counters, body-store stats, and ingest scheduler stats.
+  `terminus status` consumes it; `terminus status --json` now emits
+  `{ snapshot, status }`.
+- `terminus --version` / `-V`, and per-command `--help` (`terminus ls --help`).
+- `terminus tail` reconnects with exponential backoff when the collector drops the
+  connection or restarts, without reprinting entries already shown;
+  `--no-reconnect` restores the fail-fast exit 3.
+- ESLint now covers `collector/src` and `collector/test`; CI runs on Ubuntu and
+  macOS with npm caching; `LICENSE` ships in both packages; Dependabot, issue
+  templates, and CODEOWNERS added.
 
 ### Changed
 
@@ -29,6 +40,16 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Body budget pressure now evicts the oldest entries (down to a floor of 100)
+  before admitting a new body, instead of permanently omitting bodies once the
+  64 MiB budget filled; evictions are counted as `evictedForBodyBudget`.
+- Rejected device authentication on the ingest WSS is now logged (rate-limited,
+  token never printed) and counted in `ingest.rejectedDeviceAuth`.
+- `/health`, the HAR creator, and the boot banner report the real `package.json`
+  version instead of a hardcoded string.
+- `terminus ls --limit N` with filters pages through the store until N matches
+  instead of filtering a single page. Unknown flags and invalid `--limit`,
+  `--last`, `--status`, and `--body` values now fail with exit 1.
 - "Jump to newest" pill now appears under any non-time sort, not only the default.
 - A pill announces new arrivals on devices other than the selected one, and the
   capture view shows an explicit cross-device empty state.
