@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { WebSocket } from 'ws';
 import http from 'node:http';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import type { Entry } from '../src/types.js';
 import { safeStaticPath } from '../src/http.js';
 import { createCollectorHarness } from './fixtures/harness.js';
@@ -216,6 +217,56 @@ describe('streaming exports (R5)', () => {
       expect(Array.isArray(doc.entries)).toBe(true);
       expect(Array.isArray(doc.ws)).toBe(true);
       expect(doc.entries).toHaveLength(1);
+    } finally { await h.close(); }
+  });
+});
+
+describe('/health version (T1.3)', () => {
+  it('reports the collector package.json version', async () => {
+    const h = await createCollectorHarness();
+    try {
+      const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+      const body = await (await fetch(h.url + '/health')).json();
+      expect(body.version).toBe(pkg.version);
+    } finally { await h.close(); }
+  });
+});
+
+describe('GET /api/status (T1.4)', () => {
+  it('requires auth and returns the operational-status shape', async () => {
+    const h = await createCollectorHarness();
+    try {
+      seed(h.store);
+      // Same session-or-bearer gate as every other /api/* route.
+      expect((await fetch(h.url + '/api/status')).status).toBe(401);
+
+      const cookie = await h.login();
+      const res = await fetch(h.url + '/api/status', { headers: { cookie } });
+      expect(res.status).toBe(200);
+      const b = await res.json();
+      expect(typeof b.version).toBe('string');
+      expect(typeof b.uptimeMs).toBe('number');
+      expect(b.paused).toBe(false);
+      expect(typeof b.devices).toBe('number');
+      expect(typeof b.retention.evictedForBodyBudget).toBe('number');
+      expect(b.bodies).toMatchObject({
+        retainedBytes: expect.any(Number), blobCount: expect.any(Number), references: expect.any(Number),
+      });
+      expect(b.ingest).toMatchObject({
+        connections: expect.any(Number), queued: expect.any(Number), rejectedDeviceAuth: expect.any(Number),
+      });
+
+      // Version is the single source of truth shared with /health.
+      const health = await (await fetch(h.url + '/health')).json();
+      expect(b.version).toBe(health.version);
+    } finally { await h.close(); }
+  });
+
+  it('answers 405 for a non-GET', async () => {
+    const h = await createCollectorHarness();
+    try {
+      const cookie = await h.login();
+      expect((await fetch(h.url + '/api/status', { method: 'POST', headers: { cookie } })).status).toBe(405);
     } finally { await h.close(); }
   });
 });

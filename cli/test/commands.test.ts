@@ -16,7 +16,7 @@ function fixturePairing(): PairingImport {
 }
 
 describe('status', () => {
-  it('prints a snapshot summary and --json', async () => {
+  it('prints a snapshot summary plus the ingest/bodies sections and --json', async () => {
     const h = await createCollectorHarness();
     try {
       h.store.addEntry(makeEntry());
@@ -24,11 +24,37 @@ describe('status', () => {
       expect(text.code).toBe(0);
       expect(text.stdout).toContain('Terminus collector');
       expect(text.stdout).toContain('paused');
+      // T1.4: the /api/status sections the snapshot alone cannot supply.
+      expect(text.stdout).toContain('version');
+      expect(text.stdout).toContain('bodies');
+      expect(text.stdout).toContain('ingest');
+      expect(text.stdout).toContain('rejected auth');
 
+      // --json merges both objects as { snapshot, status }.
       const json = await runCli(['status', '--json'], { harness: h });
-      const snap = JSON.parse(json.stdout);
-      expect(snap.type).toBe('snapshot');
-      expect(snap.protocolVersion).toBeGreaterThanOrEqual(3);
+      const merged = JSON.parse(json.stdout);
+      expect(merged.snapshot.type).toBe('snapshot');
+      expect(merged.snapshot.protocolVersion).toBeGreaterThanOrEqual(3);
+      expect(typeof merged.status.version).toBe('string');
+      expect(typeof merged.status.uptimeMs).toBe('number');
+      expect(merged.status.ingest).toBeTruthy();
+      expect(typeof merged.status.bodies.retainedBytes).toBe('number');
+    } finally { await h.close(); }
+  });
+
+  it('degrades to null status against an older collector that 404s the route', async () => {
+    // The command relies on getJsonOr404: an absent /api/status resolves to null
+    // (snapshot-only) rather than failing. Prove the mechanism against a 404 route.
+    const h = await createCollectorHarness();
+    try {
+      const u = new URL(h.url);
+      const config = {
+        host: u.hostname, port: Number(u.port), token: h.adminToken,
+        baseUrl: h.url, origin: h.url,
+      };
+      const { getJsonOr404 } = await import('../src/http.js');
+      expect(await getJsonOr404(config, '/api/status')).not.toBeNull(); // present on this collector
+      expect(await getJsonOr404(config, '/api/does-not-exist')).toBeNull(); // 404 → null, no throw
     } finally { await h.close(); }
   });
 });
@@ -127,7 +153,10 @@ describe('pause / resume / clear', () => {
       const p = await runCli(['pause'], { harness: h });
       expect(p.stdout).toContain('paused');
       const s = await runCli(['status', '--json'], { harness: h });
-      expect(JSON.parse(s.stdout).paused).toBe(true);
+      // status --json now merges { snapshot, status }; pause state shows in both.
+      const merged = JSON.parse(s.stdout);
+      expect(merged.snapshot.paused).toBe(true);
+      expect(merged.status.paused).toBe(true);
       const r = await runCli(['resume'], { harness: h });
       expect(r.stdout).toContain('resumed');
     } finally { await h.close(); }

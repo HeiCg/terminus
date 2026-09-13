@@ -38,6 +38,11 @@ export type WorkStats = {
   // notePause()/noteResume(); the scheduler only tallies.
   paused: number;
   pauses: number;
+  // Device upgrades refused at authentication (absent or invalid device token),
+  // since boot. Driven by the transport via noteRejectedAuth(); the scheduler only
+  // tallies. A never-authenticated connection carries no frames, so this would
+  // otherwise be invisible in the ingest stats.
+  rejectedDeviceAuth: number;
 };
 
 type QueueItem = { frame: Buffer; bytes: number };
@@ -98,6 +103,7 @@ export class IngestScheduler {
   private closedForErrors = 0;
   private pausedNow = 0;   // connections the transport currently holds read-paused
   private pausesTotal = 0; // pause episodes since boot (monotonic)
+  private rejectedAuth = 0; // device upgrades refused at auth since boot (monotonic)
   private readonly budget: Budget;
   private readonly now: () => number;
   private readonly logw: { warn: (...a: unknown[]) => void };
@@ -168,6 +174,8 @@ export class IngestScheduler {
   // again. `pauses` is monotonic; `paused` is the current count and never goes negative.
   notePause(): void { this.pausedNow++; this.pausesTotal++; }
   noteResume(): void { if (this.pausedNow > 0) this.pausedNow--; }
+  // The transport calls this when a device upgrade/handshake is refused at auth.
+  noteRejectedAuth(): void { this.rejectedAuth++; }
 
   // Register a one-shot drain callback for a back-pressured connection. It fires once
   // this connection's pending count has fallen to <= PENDING_LOW_WATER_PER_CONN and the
@@ -205,6 +213,7 @@ export class IngestScheduler {
       budgetUsed: (this.budget as ByteBudget).used?.() ?? 0,
       paused: this.pausedNow,
       pauses: this.pausesTotal,
+      rejectedDeviceAuth: this.rejectedAuth,
     };
   }
 

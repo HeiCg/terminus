@@ -17,6 +17,11 @@ export type RetentionLimits = {
   wsMessagesGlobal: number;
   admissionIdsPerGeneration: number; // session-admission registry, per connection
   admissionBytes: number;            // registry budget, counted inside metadataBytes
+  // Floor for body-budget eviction: when a new body does not fit the shared body
+  // budget, the store evicts oldest retained entries to free room, but never below
+  // this many retained entries — so a single oversized capture can never wipe the
+  // recent window to make space for itself.
+  bodyEvictionFloor: number;
 };
 
 export const DEFAULT_LIMITS: RetentionLimits = {
@@ -33,6 +38,7 @@ export const DEFAULT_LIMITS: RetentionLimits = {
   wsMessagesGlobal: 20000,
   admissionIdsPerGeneration: 4096,
   admissionBytes: 1 * 1024 * 1024,
+  bodyEvictionFloor: 100,
 };
 
 // UTF-8 serialized size of a record's metadata — the currency of the 32 MiB

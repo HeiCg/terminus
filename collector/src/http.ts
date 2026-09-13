@@ -8,6 +8,8 @@ import type { UiAuth } from './security/uiAuth.js';
 import type { PairingImport } from './security/types.js';
 import { writeHar, writeJson } from './har.js';
 import { createUiBroadcast } from './uiBroadcast.js';
+import { VERSION } from './version.js';
+import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
@@ -16,7 +18,6 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.txt': 'text/plain',
 };
 const HEARTBEAT_MS = 30_000;
-const VERSION = '0.1.0'; // reported by /health; no capture data crosses this route
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1']);
 
 // Resolve a request path to a file strictly inside uiDir, or null if it escapes.
@@ -56,9 +57,13 @@ function originState(origin: string | undefined, port: string | null): OriginSta
 export function createHttpServer(
   store: Store,
   uiDir: string,
-  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number },
+  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number; ingest?: IngestShared },
 ) {
-  const { uiAuth, getPairing, getPairingWarning, certPort } = opts;
+  const { uiAuth, getPairing, getPairingWarning, certPort, ingest } = opts;
+  // Boot instant, so GET /api/status can report the collector's uptime without a
+  // process-global. A server created after boot reports its own age, which is what
+  // the operator asked "how long has this been serving".
+  const startedAt = Date.now();
   // One broadcaster per server owns the /ui sockets: it fans out deltas with a
   // shared serialization and byte budget, and lets logout close a session's
   // sockets by id.
@@ -118,6 +123,23 @@ export function createHttpServer(
           if (certPort != null) body.certPort = certPort;
           body.pairingHostWarning = getPairingWarning?.() ?? null;
           return res.end(JSON.stringify(body));
+        }
+        // Operational status: version, uptime, pause state, connected-device count
+        // and the live retention / bodies / ingest counters. Same session-or-bearer
+        // auth as every other /api/* route (checked above); no capture payload
+        // crosses it, only aggregate numbers. `ingest` is null when the server was
+        // built without the shared ingest machinery (the metadata-only test harness).
+        if (u.pathname === '/api/status') {
+          if (method !== 'GET') { res.writeHead(405); return res.end(); }
+          return json({
+            version: VERSION,
+            uptimeMs: Date.now() - startedAt,
+            paused: broadcast.isPaused(),
+            devices: ingest ? ingest.slots.count() : 0,
+            retention: store.retentionCounters(),
+            bodies: store.bodyStats(),
+            ingest: ingest ? ingest.scheduler.stats() : null,
+          });
         }
         // Parsed path segments for the parametric metadata/body routes below.
         // e.g. /api/entries/d1/r1/body -> ['api','entries','d1','r1','body'].

@@ -85,6 +85,21 @@ export function createDeviceServer(
   const pauseMaxMs = opts.pauseMaxMs ?? readPauseMaxMs();
   const idleConnId = () => `wss:${identity.collectorId}:${randomUUID()}`;
 
+  // Rate-limit the rejected-auth warning to at most one per remote every 10 s so a
+  // device stuck in a reconnect loop (wrong/rotated token) cannot flood the log.
+  // The map is pruned as it is read, so it stays bounded by the number of remotes
+  // seen inside one window.
+  const AUTH_WARN_INTERVAL_MS = 10_000;
+  const lastAuthWarn = new Map<string, number>();
+  const warnRejectedAuth = (remote: string, reason: string): void => {
+    const now = Date.now();
+    for (const [addr, at] of lastAuthWarn) if (now - at > AUTH_WARN_INTERVAL_MS) lastAuthWarn.delete(addr);
+    const prev = lastAuthWarn.get(remote);
+    if (prev != null && now - prev <= AUTH_WARN_INTERVAL_MS) return;
+    lastAuthWarn.set(remote, now);
+    log.warn(`wss ingest: rejected device auth (${reason})`, remote);
+  };
+
   const server = https.createServer(tlsServerOptions(identity), (_req, res) => {
     // No HTTP surface on the LAN listener.
     res.writeHead(404); res.end();
@@ -100,7 +115,13 @@ export function createDeviceServer(
       const url = new URL(req.url ?? '/', 'https://x');
       if (url.pathname !== '/ingest') return refuseUpgrade(socket, 404, 'Not Found');
       // Authorize before the handshake; a wrong/absent token never reaches ingest.
-      if (!verifyDeviceToken(bearer(req.headers.authorization), identity.deviceToken)) {
+      const token = bearer(req.headers.authorization);
+      if (!verifyDeviceToken(token, identity.deviceToken)) {
+        // Log the remote and WHY (absent vs invalid) — never the token itself —
+        // rate-limited per remote, and tally it in the ingest stats. Mirrors the
+        // Atlantis channel's rejected-connection warn (atlantis/server.ts).
+        warnRejectedAuth((socket as net.Socket).remoteAddress ?? 'unknown', token == null ? 'token absent' : 'token invalid');
+        scheduler.noteRejectedAuth();
         return refuseUpgrade(socket, 401, 'Unauthorized');
       }
       if (!slots.tryAcquire()) return refuseUpgrade(socket, 503, 'Too Many Connections');

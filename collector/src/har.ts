@@ -3,6 +3,7 @@ import type {
   Entry, WsSession, StoredEntry, StoredFrame, ExportSession, ExportSnapshot, BodyRef,
 } from './types.js';
 import { storedToEntry } from './captureDto.js';
+import { VERSION } from './version.js';
 import type { BodyStore } from './bodyStore.js';
 
 type Nv = { name: string; value: string };
@@ -47,7 +48,7 @@ export type HarEntry = {
 };
 export type HarLog = { log: { version: '1.2'; creator: { name: string; version: string }; entries: HarEntry[] } };
 
-const CREATOR = { name: 'terminus', version: '0.1.0' };
+const CREATOR = { name: 'terminus', version: VERSION };
 const nv = (h: Record<string, string>): Nv[] => Object.entries(h).map(([name, value]) => ({ name, value }));
 const mime = (h: Record<string, string>) => Object.entries(h).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? 'application/octet-stream';
 function query(url: string): Nv[] { try { return [...new URL(url).searchParams].map(([name, value]) => ({ name, value })); } catch { return []; } }
