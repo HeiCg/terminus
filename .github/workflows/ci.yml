@@ -5,9 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +23,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
@@ -39,10 +48,14 @@ jobs:
       - name: Build CLI
         run: npm run build -w @terminus/cli
 
+      # Playwright runs once, on Linux only: --with-deps is Linux-only and the
+      # browser suite should not fan out across the OS matrix.
       - name: Install Playwright Chromium
+        if: matrix.os == 'ubuntu-latest'
         working-directory: collector
         run: npx playwright install --with-deps chromium
 
       - name: Browser tests
+        if: matrix.os == 'ubuntu-latest'
         working-directory: collector
         run: npm run test:browser
