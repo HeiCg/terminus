@@ -2,6 +2,7 @@ import net from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { Store } from '../../src/store.js';
 import { createHttpServer } from '../../src/http.js';
+import { createIngestShared } from '../../src/deviceServer.js';
 import { createUiAuth } from '../../src/security/uiAuth.js';
 import type { Page, EntrySummary, WsSummary, UiDevice } from '../../src/uiProtocol.js';
 
@@ -42,7 +43,8 @@ export async function createCollectorHarness(
   const uiDir = opts.uiDir ?? '/nonexistent-ui';
   const store = new Store();
   const uiAuth = createUiAuth({ adminToken, now: opts.now });
-  const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort });
+  const shared = createIngestShared();
+  const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort, ingest: shared });
 
   await new Promise<void>((r) => handle.server.listen(0, '127.0.0.1', () => r()));
   const port = (handle.server.address() as net.AddressInfo).port;

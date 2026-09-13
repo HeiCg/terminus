@@ -437,6 +437,7 @@ that manual DevTools trial.
 | GET    | `/api/ws/:device/:wsId/frames?after=&limit=` | session | `Page<FrameSummary>` — `after` is the last `sequence` seen. |
 | GET    | `/api/ws/:device/:wsId/frames/:sequence/body` | session | One frame's payload (same `200`/`410`/`404` contract as an entry body). |
 | GET    | `/api/devices?cursor=&limit=` | session | `Page<UiDevice>`                        |
+| GET    | `/api/status`            | session   | Operational status: `{ version, uptimeMs, paused, devices, retention, bodies, ingest }` — aggregate counters only, no capture payload. `ingest` is the ingest scheduler's `WorkStats` (or `null`). |
 | POST   | `/api/clear?device=`     | session   | Clear one device (or all); needs Origin  |
 | POST   | `/api/pause`             | session   | Pause/resume the live `/ui` stream. Body `{ "paused": true\|false }` (≤1 KiB, else `413`; non-boolean/malformed → `400`) → `200 { "paused": bool }`. Cookie mutation needs Origin. While paused the store keeps recording; resume replays a fresh snapshot. |
 | GET    | `/api/pairing`           | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store) |

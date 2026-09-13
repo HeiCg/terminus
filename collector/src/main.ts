@@ -12,6 +12,7 @@ import { createDeviceServer, createIngestShared } from './deviceServer.js';
 import { startAtlantisServer, startLegacyLoopback } from './atlantis/server.js';
 import { createProxySource, loadOrCreateProxyCA, type ProxySource } from './proxy/server.js';
 import { startDiscovery } from './discovery.js';
+import { VERSION } from './version.js';
 import { log } from './log.js';
 import { env, envName } from './env.js';
 
@@ -97,6 +98,7 @@ async function boot() {
   process.on('SIGTERM', () => shutdown(0));
 
   try {
+    log.info(`terminus collector v${VERSION}`);
     const identity = await loadOrCreateIdentity(stateDir, { host, ingestPort: INGEST_PORT, atlantisPort: ATLANTIS_PORT });
     log.info(`collector identity ${identity.collectorId} (generation ${identity.generation}), cert sha256 ${identity.certificateSha256}`);
     // Boot drift check: if no current LAN IPv4 is in the cert SAN, devices that dial
@@ -108,6 +110,10 @@ async function boot() {
 
     const store = new Store();
     const uiAuth = createUiAuth({ adminToken });
+    // Shared ingest machinery (budget, scheduler, connection slots) across both LAN
+    // capture channels. Built before the HTTP server so GET /api/status can report
+    // its live scheduler stats and connected-device count.
+    const shared = createIngestShared();
     // certPort is echoed additively on GET /api/pairing so the UI can mint the QR's
     // QrPairing; it is the LAN cert listener's port, where the app fetches the DER.
     httpHandle = createHttpServer(store, uiDir, {
@@ -115,6 +121,7 @@ async function boot() {
       getPairing: () => toPairingImport(identity, pairingHost(identity, env)),
       getPairingWarning: () => pairingHostWarning(identity, env),
       certPort: CERT_PORT,
+      ingest: shared,
     });
     httpHandle.server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE') log.error(`port ${HTTP_PORT} already in use; set PORT to another value`);
@@ -127,9 +134,6 @@ async function boot() {
       log.info(`open http://127.0.0.1:${HTTP_PORT}/#token=${adminToken}`);
     });
 
-    // Shared ingest machinery (budget, scheduler, connection slots) across both LAN
-    // capture channels.
-    const shared = createIngestShared();
     device = createDeviceServer(store, identity, shared);
     device.server.on('error', (e: NodeJS.ErrnoException) => log.error('device server error', e));
     device.server.listen(INGEST_PORT, '0.0.0.0', () => log.info(`wss ingest listening on ${INGEST_PORT} (tls)`));
