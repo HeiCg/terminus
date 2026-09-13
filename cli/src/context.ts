@@ -17,6 +17,10 @@ export type Ctx = {
   out(s: string): void;
   err(s: string): void;
   signal?: AbortSignal;
+  // The process environment, so a command can read its own tunables (e.g. tail's
+  // reconnect backoff bounds, ls's page size). Connection env is already folded into
+  // `config`; this is for command-local knobs and test overrides.
+  env: NodeJS.ProcessEnv;
 };
 
 // Write one line to stdout.

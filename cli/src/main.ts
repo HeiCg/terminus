@@ -12,30 +12,86 @@ import { runPause, runResume } from './commands/pauseResume.js';
 import { runClear } from './commands/clear.js';
 import { runDevices } from './commands/devices.js';
 import { runPair } from './commands/pair.js';
+import { VERSION } from './version.js';
+import { type CommandSpec, valueFlagNames, validateFlags, commandHelp } from './flagspec.js';
 
-// Every value-taking flag across all commands. Parsing is one pass with this
-// superset (a boolean flag is never listed, so it never swallows the next token),
-// then the command is dispatched on the first positional.
-const VALUE_FLAGS = [
-  'host', 'port', 'token', 'last', 'limit', 'device', 'method', 'status', 'path', 'body', 'o', 'output',
-];
+// Filters shared by `tail` and `ls`, declared once so both tables (and their
+// `--help`) stay in sync.
+const FILTER_FLAGS: CommandSpec['flags'] = {
+  device: { type: 'string', arg: '<id>', help: 'only this device' },
+  method: { type: 'string', arg: '<list>', help: 'comma-list of HTTP methods, e.g. GET,POST' },
+  status: { type: 'status', arg: '<list>', help: 'codes/classes, e.g. 200,4xx,5xx' },
+  host: { type: 'string', arg: '<substr>', help: 'host substring match' },
+  path: { type: 'string', arg: '<substr>', help: 'path substring match' },
+  errors: { type: 'boolean', help: 'only transport errors and 4xx/5xx' },
+};
 
-type Command = { run: (ctx: Ctx) => Promise<number>; hostIsFilter?: boolean };
+type Command = { run: (ctx: Ctx) => Promise<number>; hostIsFilter?: boolean; spec: CommandSpec };
 
 // `status` and `pause`/`resume` etc. are commands; `--status`/`--host` are flags.
 // The two never collide because the command is a positional and the flags are not.
+// Each command carries a flag table: `main()` validates the parsed flags against it
+// (unknown flag / bad value → exit 1) and `--help` renders it.
 const COMMANDS: Record<string, Command> = {
-  status: { run: runStatus },
-  tail: { run: runTail, hostIsFilter: true },
-  ls: { run: runLs, hostIsFilter: true },
-  show: { run: runShow },
-  export: { run: runExport },
-  pause: { run: runPause },
-  resume: { run: runResume },
-  clear: { run: runClear },
-  devices: { run: runDevices },
-  pair: { run: runPair },
+  status: { run: runStatus, spec: { summary: 'collector snapshot (devices, counts, paused, retention)', flags: {} } },
+  tail: {
+    run: runTail, hostIsFilter: true,
+    spec: {
+      summary: 'follow live traffic (Ctrl-C to stop)',
+      flags: {
+        ...FILTER_FLAGS,
+        last: { type: 'number', arg: 'N', help: 'entries from the initial snapshot to show (default 50)' },
+        'no-reconnect': { type: 'boolean', help: 'exit 3 on a dropped connection instead of reconnecting' },
+      },
+    },
+  },
+  ls: {
+    run: runLs, hostIsFilter: true,
+    spec: {
+      summary: 'list captured entries',
+      flags: {
+        ...FILTER_FLAGS,
+        limit: { type: 'number', arg: 'N', help: 'stop after N matches (paginates when filters are set)' },
+        all: { type: 'boolean', help: 'follow pagination to the end of the store' },
+      },
+    },
+  },
+  show: {
+    run: runShow,
+    spec: {
+      summary: 'one entry: headers, timing, bodies',
+      usage: '<dev>/<key>',
+      flags: {
+        body: { type: 'enum', values: ['request', 'response', 'both', 'none'], arg: '<which>', help: 'which bodies to print (default both)' },
+        curl: { type: 'boolean', help: 'print a reproduction curl command' },
+      },
+    },
+  },
+  export: {
+    run: runExport,
+    spec: {
+      summary: 'download the capture',
+      flags: {
+        har: { type: 'boolean', help: 'HAR format (default)' },
+        o: { type: 'string', aliases: ['output'], arg: '<file>', help: 'write to a file (default stdout)' },
+      },
+    },
+  },
+  pause: { run: runPause, spec: { summary: 'pause the live stream', flags: {} } },
+  resume: { run: runResume, spec: { summary: 'resume the live stream', flags: {} } },
+  clear: {
+    run: runClear,
+    spec: { summary: 'drop captured data', flags: { device: { type: 'string', arg: '<id>', help: 'only this device' } } },
+  },
+  devices: { run: runDevices, spec: { summary: 'list paired devices', flags: {} } },
+  pair: {
+    run: runPair,
+    spec: { summary: 'show pairing (QR contains the device token)', flags: { qr: { type: 'boolean', help: 'render a scannable QR' } } },
+  },
 };
+
+// The parse-time value-flag superset, derived from the tables so it never drifts.
+const VALUE_FLAGS = valueFlagNames(Object.fromEntries(Object.entries(COMMANDS).map(([k, c]) => [k, c.spec])));
 
 const USAGE = `terminus — talk to a local Terminus collector
 
@@ -58,6 +114,8 @@ Common filters (tail, ls): --device <id> --method GET,POST --status 4xx|5xx|200
 Connection: --host <h> (default 127.0.0.1) --port <p> (default 8787)
 Auth:       --token <t> | TERMINUS_TOKEN | admin-token file in the state dir
 Output:     --json for machine-readable output; NO_COLOR disables colour
+Help:       terminus <command> --help for a command's flags
+Version:    terminus --version | -V
 `;
 
 export type MainDeps = {
@@ -71,10 +129,18 @@ export type MainDeps = {
 export async function main(argv: string[], deps: MainDeps): Promise<number> {
   const parsed = parseArgs(argv, { valueFlags: VALUE_FLAGS });
 
+  // `--version`/`-V` wins anywhere, before any command dispatch or help.
+  if (parsed.flags.version === true || parsed.flags.V === true) { deps.stdout.write(`${VERSION}\n`); return 0; }
+
   if (!parsed.command || parsed.command === 'help') { deps.stdout.write(USAGE); return 0; }
   const cmd = COMMANDS[parsed.command];
   if (!cmd) { deps.stderr.write(`unknown command: ${parsed.command}\n\n${USAGE}`); return 1; }
-  if (parsed.help) { deps.stdout.write(USAGE); return 0; }
+  // `terminus <command> --help` prints the command's own flags, not the global usage.
+  if (parsed.help) { deps.stdout.write(commandHelp(parsed.command, cmd.spec)); return 0; }
+
+  // Reject unknown flags and malformed values before doing any work.
+  const flagError = validateFlags(parsed.command, parsed.flags, cmd.spec);
+  if (flagError) { deps.stderr.write(`${flagError}\n`); return 1; }
 
   const colors = makeColors(colorEnabled(deps.env, deps.stdout.isTTY ?? false));
   try {
@@ -91,6 +157,7 @@ export async function main(argv: string[], deps: MainDeps): Promise<number> {
       out: (s) => deps.stdout.write(s),
       err: (s) => deps.stderr.write(s),
       signal: deps.signal,
+      env: deps.env,
     };
     return await cmd.run(ctx);
   } catch (e) {
