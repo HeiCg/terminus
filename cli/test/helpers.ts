@@ -1,5 +1,8 @@
+import { createServer } from 'node:http';
+import { WebSocketServer, type WebSocket } from 'ws';
 import type { CollectorHarness } from '../../collector/test/fixtures/harness.js';
 import type { Entry } from '../../collector/src/types.js';
+import { PROTOCOL_VERSION } from '../../collector/src/uiProtocol.js';
 import { main } from '../src/main.js';
 
 export type RunResult = { code: number; stdout: string; stderr: string };
@@ -53,6 +56,56 @@ export async function waitUntil(pred: () => boolean, ms = 3000): Promise<void> {
     if (Date.now() - start > ms) throw new Error('waitUntil timed out');
     await new Promise((r) => setTimeout(r, 15));
   }
+}
+
+// A snapshot-message entry as it crosses the /ui socket. Only the fields the CLI
+// renders (and the key) matter for these tests, so the rest are filled minimally.
+export function snapshotEntry(over: { id: string; deviceId?: string; method?: string; url: string; status?: number | null }): Record<string, unknown> {
+  const ref = { sha256: null, size: 0, omitted: null };
+  return {
+    id: over.id, deviceId: over.deviceId ?? 'd1', source: 'xhr', startedAt: Date.now(),
+    method: over.method ?? 'GET', url: over.url, status: over.status ?? 200, durationMs: 10, error: null,
+    requestBody: ref, responseBody: ref,
+  };
+}
+
+// A `snapshot` UI message wrapping the given entries.
+export function snapshotMessage(entries: Record<string, unknown>[]): Record<string, unknown> {
+  return {
+    type: 'snapshot', devices: [],
+    entries: { items: entries, nextCursor: null }, ws: { items: [], nextCursor: null },
+    retention: null, atMax: false, truncated: false, paused: false, protocolVersion: PROTOCOL_VERSION,
+  };
+}
+
+// A fake /ui WebSocket endpoint on an ephemeral loopback port. It accepts the CLI's
+// upgrade (no auth check — tests set a token so config resolves) and lets the test
+// script each connection: send the initial snapshot, push live frames, and drop the
+// socket to simulate an unsolicited close so the CLI's reconnect path runs. `onOpen`
+// receives the connection count (1 on first connect, 2 on the first reconnect, …).
+export type FakeUiServer = {
+  port: number;
+  connections: () => number;
+  send: (msg: unknown) => void;
+  drop: () => void;
+  close: () => Promise<void>;
+};
+
+export async function createFakeUiServer(onOpen: (n: number, sock: WebSocket) => void): Promise<FakeUiServer> {
+  const http = createServer();
+  const wss = new WebSocketServer({ server: http, path: '/ui' });
+  let current: WebSocket | null = null;
+  let count = 0;
+  wss.on('connection', (sock) => { current = sock; count++; onOpen(count, sock); });
+  await new Promise<void>((r) => http.listen(0, '127.0.0.1', () => r()));
+  const port = (http.address() as { port: number }).port;
+  return {
+    port,
+    connections: () => count,
+    send: (msg) => current?.send(JSON.stringify(msg)),
+    drop: () => current?.close(),
+    close: () => new Promise<void>((r) => { wss.close(); http.close(() => r()); }),
+  };
 }
 
 // A complete Entry for the store, with request/response bodies by default.
