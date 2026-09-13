@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # npm dependencies for the whole monorepo. The root package-lock.json and the
+  # `workspaces` field cover both collector/ and cli/, so a single root entry is
+  # enough — Dependabot resolves workspace manifests from the root lockfile.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
