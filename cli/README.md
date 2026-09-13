@@ -64,14 +64,31 @@ With none of these you get:
 | Command | What it does |
 |---|---|
 | `terminus status` | Collector snapshot over the /ui socket: devices, live-window counts, paused, protocol version, retention. `--json` for the raw snapshot. |
-| `terminus tail [filters]` | Connect to /ui, print the last N entries (`--last 50`) then follow live traffic. One line per entry (time, device, method, status, duration, host+path); WebSocket/SSE frames as `WS ↑/↓`. Ctrl-C stops cleanly. `--json` emits NDJSON of every event. |
-| `terminus ls [filters]` | `GET /api/entries` (paged). `--limit N`, `--all`. Same columns as `tail`. |
+| `terminus tail [filters]` | Connect to /ui, print the last N entries (`--last 50`) then follow live traffic. One line per entry (time, device, method, status, duration, host+path); WebSocket/SSE frames as `WS ↑/↓`. Ctrl-C stops cleanly. `--json` emits NDJSON of every event. Reconnects automatically with exponential backoff after a dropped connection (`--no-reconnect` to disable). |
+| `terminus ls [filters]` | `GET /api/entries` (paged). `--limit N`, `--all`. Same columns as `tail`. With filters, `--limit N` pages through the store to gather up to N matches (not just the first page). |
 | `terminus show <deviceId>/<entryKey>` | One entry: request/response headers, timing, and bodies (pretty JSON when JSON, text when textual, `<binary N bytes>` otherwise). `--body request\|response\|none`, `--curl` prints a reproduction curl. |
 | `terminus export [--har\|--json] [-o file]` | Download the capture as HAR (default) or JSON; stdout unless `-o`. |
 | `terminus pause` / `terminus resume` | Toggle the live stream (`POST /api/pause` with `{paused}`). |
 | `terminus clear [--device <id>]` | Drop captured data, optionally for one device. |
 | `terminus devices` | List paired devices: id, platform, app version, build profile, last seen, dropped. |
 | `terminus pair [--qr] [--json]` | Show the pairing. `--json` prints the QrPairing blob to paste into the app; `--qr` renders it as a scannable QR (Unicode half-blocks) — the QR contains the device token, so it prints a red warning. |
+
+### Help & version
+
+- `terminus --version` (or `-V`) prints the CLI version.
+- `terminus <command> --help` prints that command's own flags (e.g. `terminus ls --help`);
+  `terminus --help` prints the global usage.
+- Unknown flags and malformed values fail fast with exit `1` and a message
+  (`unknown flag --stauts (did you mean --status?)`, `flag --limit expects a number`,
+  `invalid --status: …`).
+
+### Reconnecting tail
+
+`tail` retries a dropped connection with exponential backoff (1s, 2s, 4s … capped at
+15s, jittered), printing `reconnecting…`/`reconnected` to stderr — or, under `--json`,
+a `{"event":"reconnect","state":…}` line on stdout. The reconnect snapshot never
+reprints entries already shown. `--no-reconnect` restores the old behaviour (exit `3`
+on a dropped connection). Ctrl-C always exits cleanly.
 
 ### Common filters (`tail`, `ls`)
 

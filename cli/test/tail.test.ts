@@ -25,11 +25,11 @@ describe('tail', () => {
     } finally { await h.close(); }
   });
 
-  it('reports exit 3 when the collector closes the connection unsolicited', async () => {
+  it('reports exit 3 when the collector closes the connection unsolicited (--no-reconnect)', async () => {
     const h = await createCollectorHarness();
     try {
       const controller = new AbortController(); // never aborted: the close is the collector's
-      const { done } = startCli(['tail'], { harness: h, signal: controller.signal });
+      const { done } = startCli(['tail', '--no-reconnect'], { harness: h, signal: controller.signal });
       // Give the socket a moment to connect and receive the snapshot, then drop it.
       await new Promise((r) => setTimeout(r, 80));
       await h.close(); // closes the ws server → unsolicited close on the client

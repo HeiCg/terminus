@@ -44,6 +44,9 @@ export function firstSnapshot(config: Config): Promise<SnapshotMessage> {
 
 export type StreamOptions = {
   onMessage: (m: UiMessage) => void;
+  // Called once the socket is open. The reconnecting caller uses it to announce a
+  // successful reconnection (streamUi itself resolves only on a clean stop/close).
+  onOpen?: () => void;
   // Abort to close the socket and resolve cleanly (Ctrl-C).
   signal?: AbortSignal;
 };
@@ -53,7 +56,7 @@ export type StreamOptions = {
 // is attached at creation so the initial snapshot is never missed. An upgrade
 // rejection (auth) or transport failure rejects; an unsolicited close by the
 // collector rejects with exit 3, distinct from the user's own Ctrl-C.
-export function streamUi(config: Config, { onMessage, signal }: StreamOptions): Promise<void> {
+export function streamUi(config: Config, { onMessage, onOpen, signal }: StreamOptions): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const ws = open(config);
     let settled = false;
@@ -66,7 +69,7 @@ export function streamUi(config: Config, { onMessage, signal }: StreamOptions): 
       if (signal.aborted) { aborting = true; try { ws.close(); } catch { /* not open yet */ } }
       else signal.addEventListener('abort', () => { aborting = true; try { ws.close(); } catch { /* already closing */ } }, { once: true });
     }
-    ws.once('open', () => { opened = true; });
+    ws.once('open', () => { opened = true; onOpen?.(); });
     ws.on('message', (data) => {
       let m: UiMessage;
       try { m = JSON.parse(String(data)) as UiMessage; }
