@@ -44,6 +44,16 @@ export async function getJson<T = any>(config: Config, pathAndQuery: string): Pr
   return res.json() as Promise<T>;
 }
 
+// Like getJson, but a 404 resolves to null instead of erroring — for routes an older
+// collector may not serve (GET /api/status), so a new CLI degrades gracefully rather
+// than failing. Auth failures (401/403) and other non-2xx still throw.
+export async function getJsonOr404<T = any>(config: Config, pathAndQuery: string): Promise<T | null> {
+  const res = await request(config, pathAndQuery);
+  if (res.status === 404) { await res.arrayBuffer().catch(() => undefined); return null; }
+  await ok(res, 'GET', pathAndQuery);
+  return res.json() as Promise<T>;
+}
+
 // Fetch one body route: null for 404 (no such record), the omission reason for a 410
 // (body dropped), or the decoded text/bytes. The collector serves octet-stream for a
 // binary body and text/plain otherwise.
