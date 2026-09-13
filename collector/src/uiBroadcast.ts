@@ -258,7 +258,7 @@ export function createUiBroadcast(store: Store, opts: UiBroadcastOptions = {}) {
         return { type: 'sessions_removed', keys: m.keys.slice(0, MARKER_MAX_KEYS).map((k) => ({ deviceId: mclip(k.deviceId), wsId: mclip(k.wsId) })) };
       case 'retention':
         return { type: 'retention', retainedBodyBytes: mnum(m.retainedBodyBytes), retainedMetadataBytes: mnum(m.retainedMetadataBytes),
-          droppedEntries: mnum(m.droppedEntries), droppedSessions: mnum(m.droppedSessions), droppedFrames: mnum(m.droppedFrames), omittedBodies: mnum(m.omittedBodies), refusedSessions: mnum(m.refusedSessions), rejectedRecords: mnum(m.rejectedRecords) };
+          droppedEntries: mnum(m.droppedEntries), droppedSessions: mnum(m.droppedSessions), droppedFrames: mnum(m.droppedFrames), omittedBodies: mnum(m.omittedBodies), refusedSessions: mnum(m.refusedSessions), rejectedRecords: mnum(m.rejectedRecords), evictedForBodyBudget: mnum(m.evictedForBodyBudget) };
     }
   }
 

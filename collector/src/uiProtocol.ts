@@ -120,6 +120,9 @@ export type RetentionMessage = {
   // HTTP records rejected whole because their metadata alone exceeded
   // `maxRecordBytes` (64 KiB); no bytes were retained for them.
   rejectedRecords: number;
+  // Entries evicted to free shared body-budget room for a newer body (T1.1); a
+  // subset of `droppedEntries`.
+  evictedForBodyBudget: number;
 };
 
 export type UiMessage =

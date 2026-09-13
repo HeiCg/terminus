@@ -65,6 +65,7 @@ export const STORE_DEFAULT_LIMITS: RetentionLimits = {
   wsMessagesGlobal: 20000,
   admissionIdsPerGeneration: 4096,
   admissionBytes: 1 * 1024 * 1024,
+  bodyEvictionFloor: 100,
 };
 
 const keyOf = (deviceId: string, id: string): string => JSON.stringify([deviceId, id]);
@@ -89,6 +90,10 @@ export type RetentionCounters = {
   // Sessions the admission authority refused outright (a late frame after removal,
   // or the registry full) — distinct from `droppedSessions` (retained-then-evicted).
   refusedSessions: number;
+  // Entries evicted specifically to free shared body-budget room for a newer body
+  // (T1.1) — a subset of `droppedEntries`, surfaced separately so the operator can
+  // tell budget-pressure eviction from count/metadata-cap eviction.
+  evictedForBodyBudget: number;
 };
 
 type StoredSession = {
@@ -147,6 +152,7 @@ export class Store extends EventEmitter {
   private counters: RetentionCounters = {
     retainedBodyBytes: 0, retainedMetadataBytes: 0,
     droppedEntries: 0, droppedSessions: 0, droppedFrames: 0, omittedBodies: 0, rejectedRecords: 0, refusedSessions: 0,
+    evictedForBodyBudget: 0,
   };
 
   constructor(opts: StoreOptions = {}) {
@@ -169,8 +175,8 @@ export class Store extends EventEmitter {
     const key = keyOf(input.deviceId, input.id);
     const existing = this.entriesByKey.get(key);
 
-    const reqRef = makeBodyRef(input.requestBytes, input.requestBodyOmitted, input.requestBodySize, this.bodies, this.limits.perBodyBytes);
-    const resRef = makeBodyRef(input.responseBytes, input.responseBodyOmitted, input.responseBodySize, this.bodies, this.limits.perBodyBytes);
+    const reqRef = this.admitEntryBody(input.requestBytes, input.requestBodyOmitted, input.requestBodySize, key);
+    const resRef = this.admitEntryBody(input.responseBytes, input.responseBodyOmitted, input.responseBodySize, key);
     this.countOmission(reqRef); this.countOmission(resRef);
 
     const { requestBytes: _rb, responseBytes: _sb, requestBodySize: _rs, responseBodySize: _ss, requestBodyOmitted: _ro, responseBodyOmitted: _so, ...meta } = input;
@@ -241,7 +247,7 @@ export class Store extends EventEmitter {
     const existing = this.entriesByKey.get(key);
     if (!existing) return;
     const bytes = r.responseBody != null && r.responseBodyOmitted == null ? Buffer.from(r.responseBody, 'utf8') : null;
-    const resRef = makeBodyRef(bytes, r.responseBodyOmitted, r.responseBodySize, this.bodies, this.limits.perBodyBytes);
+    const resRef = this.admitEntryBody(bytes, r.responseBodyOmitted, r.responseBodySize, key);
     this.countOmission(resRef);
     const merged: StoredEntry = {
       ...existing, status: r.status, statusText: r.statusText, responseHeaders: r.responseHeaders,
@@ -806,6 +812,46 @@ export class Store extends EventEmitter {
 
   private markCapped(): void { if (!this.capped) { this.capped = true; this.emit('atmax', true); } }
 
+  // Acquire a body ref, but when the shared body budget is full (T1.1), first evict
+  // oldest retained entries to free room and retry, instead of dropping the new body
+  // as `omitted:'budget'` forever. `exceptKey` is the entry currently being admitted,
+  // which is never evicted to make room for its own body. A blob larger than the
+  // whole budget can never be made to fit, so it still ends up `omitted:'budget'`.
+  private admitEntryBody(bytes: Uint8Array | null, declaredOmitted: BodyOmitted, declaredSize: number, exceptKey: string | null): BodyRef {
+    let ref = makeBodyRef(bytes, declaredOmitted, declaredSize, this.bodies, this.limits.perBodyBytes);
+    if (bytes != null && ref.state === 'omitted' && ref.omitted === 'budget') {
+      if (this.evictForBodyBudget(bytes.length, exceptKey)) {
+        ref = makeBodyRef(bytes, declaredOmitted, declaredSize, this.bodies, this.limits.perBodyBytes);
+      }
+    }
+    return ref;
+  }
+
+  // Free shared body-budget room for a body of `needBytes` by evicting oldest retained
+  // entries (global admission order, the same order `evictEntries` uses), releasing
+  // their bodies until the new body fits — but never below `bodyEvictionFloor` retained
+  // entries, and never the entry being admitted (`exceptKey`). Returns whether there is
+  // now room. A body larger than the entire budget is refused up front (eviction can
+  // never help), so it stays `omitted:'budget'` with nothing evicted.
+  private evictForBodyBudget(needBytes: number, exceptKey: string | null): boolean {
+    const budget = this.limits.bodyBytes;
+    if (needBytes > budget) return false;
+    const floor = this.limits.bodyEvictionFloor;
+    const fits = () => this.bodies.stats().retainedBytes + needBytes <= budget;
+    if (fits()) return true;
+    const removed: EntryKey[] = [];
+    // Snapshot the admission order so mutating entriesByKey mid-loop is safe.
+    for (const key of [...this.entriesByKey.keys()]) {
+      if (fits()) break;
+      if (this.entriesByKey.size <= floor) break;
+      if (key === exceptKey) continue;
+      this.dropEntryKey(key, removed);
+      this.counters.evictedForBodyBudget++;
+    }
+    if (removed.length) this.emit('entries_removed', { keys: removed });
+    return fits();
+  }
+
   // Evict oldest HTTP entries (admission order) until per-device and global caps
   // hold; emit the removed keys.
   private evictEntries(deviceId: string): void {
@@ -933,7 +979,7 @@ export class Store extends EventEmitter {
       retainedBodyBytes: c.retainedBodyBytes, retainedMetadataBytes: c.retainedMetadataBytes,
       droppedEntries: c.droppedEntries, droppedSessions: c.droppedSessions,
       droppedFrames: c.droppedFrames, omittedBodies: c.omittedBodies, refusedSessions: c.refusedSessions,
-      rejectedRecords: c.rejectedRecords,
+      rejectedRecords: c.rejectedRecords, evictedForBodyBudget: c.evictedForBodyBudget,
     });
   }
 }
