@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Per-device capture channels: each device record now tracks which channels it
+  arrived on (in-app ingest over WSS vs the Atlantis wire protocol). The Devices
+  view shows channel chips and `terminus devices` gains a `CHANNELS` column.
+- Ingest back-pressure: a burst on the ingest WSS is paused rather than dropped or
+  closed, with the pause budget tunable via `TERMINUS_INGEST_PAUSE_MAX_MS`.
+- Resumed WebSocket sessions: sessions are synthesized from orphan frames after a
+  reconnect, surfaced with a dedicated DTO, a UI chip, and CLI `ws:?` rendering.
+- Periodic Atlantis ping: the collector sends a periodic ping control frame on the
+  Atlantis channel, tunable via `TERMINUS_ATLANTIS_PING_MS`.
+
+### Changed
+
+- Pairing advertises the LAN IPv4 address instead of the unresolvable hostname, and
+  rotates it when the DHCP-assigned address changes. Override it with
+  `TERMINUS_PAIRING_HOST`; `terminus pair` surfaces the advertised host and warns on
+  drift.
+- Atlantis traffic is aliased onto the app's ingest `deviceId`, so a device seen on
+  both channels is a single device record.
+
+### Fixed
+
+- "Jump to newest" pill now appears under any non-time sort, not only the default.
+- A pill announces new arrivals on devices other than the selected one, and the
+  capture view shows an explicit cross-device empty state.
+- The topbar connection dot is always visible, reflecting the live connection state.
+- The body pane shows an explicit "Empty body (0 bytes)" card for a captured empty
+  body instead of a blank pane that read as still-loading.
+- The ingest build profile is preserved over channel placeholders on the device
+  record.
+
 ## 0.1.0 — initial public release
 
 - Local Mac collector capturing HTTP and WebSocket/SSE traffic from devices on the
