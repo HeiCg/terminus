@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { Store } from '../src/store.js';
-import { storedToEntrySummary } from '../src/captureDto.js';
 import type { EntryInput } from '../src/types.js';
 import { createCollectorHarness } from './fixtures/harness.js';
 

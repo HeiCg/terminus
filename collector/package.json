@@ -14,7 +14,8 @@
   "files": [
     "dist",
     "dist-ui",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "private": true,
   "type": "module",
@@ -31,6 +32,7 @@
     "test:browser": "npm run ui:build && playwright test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:ui": "svelte-check --tsconfig ui/tsconfig.json",
+    "lint": "eslint src test",
     "lint:ui": "eslint -c ui/eslint.config.js ui/src",
     "identity:rotate": "tsx src/security/identityCli.ts",
     "bench": "tsx bench/run.ts"
