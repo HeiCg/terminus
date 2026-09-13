@@ -14,7 +14,8 @@
   "files": [
     "dist",
     "dist-ui",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "private": true,
   "type": "module",
