@@ -383,6 +383,7 @@ is illustrative (it is not run in CI), but it is a correct use of the protocol.
 
 ```js
 import WebSocket from 'ws';
+import http from 'node:http';
 import https from 'node:https';
 import { createHash } from 'node:crypto';
 
@@ -396,9 +397,10 @@ const EXPECTED_SHA256 = '<certificateSha256-from-QR>'; // 64 lowercase hex
 // 1. Fetch and pin the certificate DER from the public cert endpoint.
 async function fetchPinnedCert() {
   const body = await new Promise((resolve, reject) => {
-    https.get(
-      // The cert endpoint is plain HTTP; use http here in a real client.
-      { host: HOST, port: CERT_PORT, path: '/api/cert', protocol: 'http:' },
+    // The cert endpoint is plain HTTP (the certificate is public); the QR's
+    // certificateSha256 is what pins it, checked below.
+    http.get(
+      { host: HOST, port: CERT_PORT, path: '/api/cert' },
       (res) => {
         let buf = '';
         res.on('data', (c) => (buf += c));
