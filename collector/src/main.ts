@@ -14,8 +14,10 @@ import { createProxySource, loadOrCreateProxyCA, type ProxySource } from './prox
 import { startDiscovery } from './discovery.js';
 import { VERSION } from './version.js';
 import { log } from './log.js';
-import { env, envName, envWithBare } from './env.js';
+import { env, envName, envWithBare, parseByteSize } from './env.js';
 import { createCrashGuard } from './crashGuard.js';
+import { parseCollectorArgs, COLLECTOR_USAGE } from './mainArgs.js';
+import { loadCaptureFile } from './loadCapture.js';
 
 // Resolve a port from `TERMINUS_<name>` first, then the deprecated `NETCAPTURE_<name>`
 // (warns once via env()), and finally the bare unprefixed `<name>` (e.g. `PORT`),
@@ -34,6 +36,20 @@ function checkPort(label: string, raw: string | undefined, def: number): number 
   if (!Number.isInteger(n) || n < 1 || n > 65535) { log.error(`invalid ${label}: ${raw}`); process.exit(1); }
   return n;
 }
+// Parse the optional bodies-budget override `TERMINUS_BODY_BUDGET` into a byte
+// count: a positive integer, optionally suffixed `k`/`m`/`g` (case-insensitive,
+// binary multiples). Returns undefined when unset (the store keeps its compiled
+// 64 MiB default); an invalid value is fatal like a bad port (log.error + exit 1),
+// naming the spelling actually set.
+function bodyBudget(): number | undefined {
+  const raw = env('BODY_BUDGET');
+  if (raw == null || raw === '') return undefined;
+  const n = parseByteSize(raw);
+  if (n == null) { log.error(`invalid ${envName('BODY_BUDGET')}: ${raw} (expected a positive integer of bytes, optional k/m/g suffix)`); process.exit(1); }
+  return n;
+}
+
+const BODY_BUDGET = bodyBudget();
 const HTTP_PORT = port('PORT', 8787);
 const INGEST_PORT = port('INGEST_PORT', 8788);
 const ATLANTIS_PORT = port('ATLANTIS_PORT', 10909);
@@ -58,6 +74,13 @@ const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '
 
 // How many unhandled crashes inside 60 s trip the loop guard (see below).
 const CRASH_THRESHOLD = Math.max(1, Math.floor(Number(env('CRASH_THRESHOLD') ?? 5) || 5));
+
+// Command-line options (T7.3). `--help`/`--version` short-circuit before any state
+// is touched; `--load` paths are imported into the store during boot.
+const ARGS = parseCollectorArgs(process.argv.slice(2));
+if (ARGS.help) { process.stdout.write(COLLECTOR_USAGE); process.exit(0); }
+if (ARGS.version) { process.stdout.write(`${VERSION}\n`); process.exit(0); }
+for (const u of ARGS.unknown) log.warn(`ignoring unrecognized argument: ${u}`);
 
 async function boot() {
   const host = os.hostname().replace(/\.local$/, '');
@@ -128,7 +151,15 @@ async function boot() {
     if (expiryWarn) log.warn(expiryWarn);
     log.info(`advertising pairing host ${pairingHost(identity, env)}`);
 
-    const store = new Store();
+    // The bodies budget is the store's compiled 64 MiB default unless the operator
+    // raised it via TERMINUS_BODY_BUDGET (T7.5).
+    const store = new Store(BODY_BUDGET != null ? { limits: { bodyBytes: BODY_BUDGET } } : {});
+    // Import any --load capture files before the listeners come up, so the UI's
+    // first snapshot already includes the imported records (T7.3).
+    for (const file of ARGS.loads) {
+      const { entries, sessions, frames } = loadCaptureFile(store, file);
+      log.info(`loaded ${file}: ${entries} entries, ${sessions} sessions, ${frames} frames`);
+    }
     const uiAuth = createUiAuth({ adminToken });
     // Shared ingest machinery (budget, scheduler, connection slots) across both LAN
     // capture channels. Built before the HTTP server so GET /api/status can report

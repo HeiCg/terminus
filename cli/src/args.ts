@@ -4,7 +4,9 @@
 // declared per call (`valueFlags`) so `--last 50` reads 50 as the value while
 // `--json` stays boolean and 50 does not leak into the positionals.
 
-export type Flags = Record<string, string | boolean>;
+// A flag value is a string, a boolean (bare flag), or an array of strings when the
+// same value flag is repeated (e.g. `--header a:b --header c:d`).
+export type Flags = Record<string, string | boolean | string[]>;
 
 export type ParsedArgs = {
   // The first positional token, e.g. `status` in `terminus status --json`.
@@ -32,6 +34,15 @@ export function parseArgs(argv: string[], opts: ParseOptions = {}): ParsedArgs {
   const positionals: string[] = [];
   let rest = false; // everything after a bare `--` is positional
 
+  // Assign a flag, accumulating a repeated value flag into an array (e.g. a
+  // repeatable `--header`); a repeated boolean stays boolean (last wins).
+  const put = (name: string, value: string | boolean): void => {
+    const prev = flags[name];
+    if (typeof value === 'string' && typeof prev === 'string') flags[name] = [prev, value];
+    else if (typeof value === 'string' && Array.isArray(prev)) prev.push(value);
+    else flags[name] = value;
+  };
+
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if (rest) { positionals.push(tok); continue; }
@@ -40,11 +51,11 @@ export function parseArgs(argv: string[], opts: ParseOptions = {}): ParsedArgs {
     if (tok.startsWith('--')) {
       const body = tok.slice(2);
       const eq = body.indexOf('=');
-      if (eq >= 0) { flags[body.slice(0, eq)] = body.slice(eq + 1); continue; }
+      if (eq >= 0) { put(body.slice(0, eq), body.slice(eq + 1)); continue; }
       if (valueFlags.has(body) && i + 1 < argv.length && !isFlagToken(argv[i + 1])) {
-        flags[body] = argv[++i];
+        put(body, argv[++i]);
       } else {
-        flags[body] = true;
+        put(body, true);
       }
       continue;
     }
@@ -52,9 +63,9 @@ export function parseArgs(argv: string[], opts: ParseOptions = {}): ParsedArgs {
     if (isFlagToken(tok)) {
       const name = tok.slice(1);
       if (valueFlags.has(name) && i + 1 < argv.length && !isFlagToken(argv[i + 1])) {
-        flags[name] = argv[++i];
+        put(name, argv[++i]);
       } else {
-        flags[name] = true;
+        put(name, true);
       }
       continue;
     }
@@ -85,4 +96,17 @@ export function flagBool(flags: Flags, ...names: string[]): boolean {
     if (typeof v === 'string') return v === '' || v === 'true' || v === '1' || v === 'yes';
   }
   return false;
+}
+
+
+// Read a value flag that may be repeated, as a list: [] when absent, one element
+// for a single value, or every value when the flag was given more than once.
+export function flagList(flags: Flags, ...names: string[]): string[] {
+  const out: string[] = [];
+  for (const n of names) {
+    const v = flags[n];
+    if (typeof v === 'string') out.push(v);
+    else if (Array.isArray(v)) out.push(...v);
+  }
+  return out;
 }

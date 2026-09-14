@@ -73,7 +73,7 @@ const mclip = (s: string): string => (typeof s === 'string' ? s.slice(0, MARKER_
 const mnum = (n: number): number => (Number.isFinite(n) ? n : 0);
 // `source` is a small fixed enum, not device-supplied text, so the marker keeps it
 // intact (never collapsing `proxy` into `xhr`) while staying bounded by construction.
-const clipSource = (s: Source): Source => (s === 'atlantis' || s === 'proxy' ? s : 'xhr');
+const clipSource = (s: Source): Source => (s === 'atlantis' || s === 'proxy' || s === 'replay' ? s : 'xhr');
 // Ceiling on a SCALAR marker message (entry / ws / ws_frame / device / clear /
 // atmax): each is built from literals plus at most two MARKER_CLIP_BYTES-long ids
 // (which JSON can escape to 6 bytes per character), so its worst case is a few KiB.

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { env, envWithBare } from '../src/env.js';
+import { env, envWithBare, parseByteSize } from '../src/env.js';
 
 // Each case uses a distinct variable name so the module-level "warn once" set
 // never bleeds between assertions.
@@ -78,5 +78,27 @@ describe('envWithBare() port resolution', () => {
 
   it('returns undefined with the TERMINUS_ spelling as the source when nothing is set', () => {
     expect(envWithBare('MISSING_PORT')).toEqual({ value: undefined, source: 'TERMINUS_MISSING_PORT' });
+  });
+});
+
+// TERMINUS_BODY_BUDGET (T7.5): a positive integer of bytes with an optional binary
+// k/m/g suffix. Anything else is null (main.ts turns that into a fatal exit 1).
+describe('parseByteSize()', () => {
+  it('parses a bare byte count', () => {
+    expect(parseByteSize('1048576')).toBe(1048576);
+    expect(parseByteSize('  1024 ')).toBe(1024);
+  });
+
+  it('applies k/m/g suffixes case-insensitively as binary multiples', () => {
+    expect(parseByteSize('1k')).toBe(1024);
+    expect(parseByteSize('64M')).toBe(64 * 1024 * 1024);
+    expect(parseByteSize('2g')).toBe(2 * 1024 * 1024 * 1024);
+    expect(parseByteSize('1G')).toBe(1024 * 1024 * 1024);
+  });
+
+  it('rejects zero, negatives, decimals, junk and empty', () => {
+    for (const bad of ['0', '0k', '-5', '1.5m', '', 'abc', '10x', 'm', '1 k', '0x10']) {
+      expect(parseByteSize(bad)).toBeNull();
+    }
   });
 });

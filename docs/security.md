@@ -145,6 +145,27 @@ for the QA device that trusts its CA. Turning it on means:
   capture, and a refused proxy CA is recorded as a `tls_error` entry rather than
   silently lost.
 
+## Replay re-sends captured requests
+
+`POST /api/replay` (and `terminus replay`) re-sends a captured request from the
+collector's machine to the **original host**, reusing the request's **captured
+credentials** — the `authorization`/`cookie` headers as they were sent, plus any
+overrides the caller supplies. This is a deliberate outbound request, distinct from
+passive capture:
+
+- **It leaves the machine.** Unlike everything else the collector does (loopback UI,
+  LAN-only ingest), a replay makes a real outbound request to the target host. It
+  follows no redirects and times out at 30 s.
+- **It reuses captured auth.** The stored request headers are replayed verbatim
+  (only hop-by-hop and `host`/`content-length` are stripped and recomputed), so the
+  captured session token/cookie is sent again. Replaying a state-changing request
+  (POST/PUT/DELETE) repeats its side effect. Only replay what you intend to re-issue.
+- **It is authenticated and same-origin.** The route needs the same session-or-bearer
+  auth as every `/api/*` route, and a cookie-driven call needs a valid loopback
+  Origin (a bearer CLI does not) — so a web page cannot drive a replay via CSRF.
+- **The result is a new record.** The response is stored as a fresh entry with
+  `source: replay` and a `replayOf` back-reference; the original is untouched.
+
 ## Residual risks
 
 - Capture data lives in memory unencrypted for the life of the process; anyone

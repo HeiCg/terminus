@@ -12,8 +12,11 @@ import { runPause, runResume } from './commands/pauseResume.js';
 import { runClear } from './commands/clear.js';
 import { runDevices } from './commands/devices.js';
 import { runPair } from './commands/pair.js';
+import { runReplay } from './commands/replay.js';
+import { runCompletion } from './commands/completion.js';
 import { VERSION } from './version.js';
-import { type CommandSpec, valueFlagNames, validateFlags, commandHelp } from './flagspec.js';
+import { type CommandSpec, type FlagSpec, GLOBAL_FLAGS, valueFlagNames, validateFlags, commandHelp } from './flagspec.js';
+import type { CompletionFlag, CompletionModel } from './completion.js';
 
 // Filters shared by `tail` and `ls`, declared once so both tables (and their
 // `--help`) stay in sync.
@@ -23,10 +26,31 @@ const FILTER_FLAGS: CommandSpec['flags'] = {
   status: { type: 'status', arg: '<list>', help: 'codes/classes, e.g. 200,4xx,5xx' },
   host: { type: 'string', arg: '<substr>', help: 'host substring match' },
   path: { type: 'string', arg: '<substr>', help: 'path substring match' },
+  source: { type: 'enum', values: ['xhr', 'atlantis', 'proxy', 'replay'], arg: '<src>', help: 'only this capture source' },
   errors: { type: 'boolean', help: 'only transport errors and 4xx/5xx' },
 };
 
-type Command = { run: (ctx: Ctx) => Promise<number>; hostIsFilter?: boolean; spec: CommandSpec };
+type Command = { run: (ctx: Ctx) => Promise<number>; hostIsFilter?: boolean; offline?: boolean; spec: CommandSpec };
+
+// The completion model is derived from the same COMMANDS/GLOBAL_FLAGS tables the
+// parser and --help use, so a completion script never lists a flag the CLI does
+// not accept. A `status` flag completes the class tokens; an `enum` its values.
+function toCompletionFlag(name: string, s: FlagSpec): CompletionFlag {
+  return {
+    name,
+    aliases: s.aliases ?? [],
+    takesValue: s.type !== 'boolean',
+    values: s.type === 'enum' ? s.values : s.type === 'status' ? ['1xx', '2xx', '3xx', '4xx', '5xx'] : undefined,
+  };
+}
+function completionModel(): CompletionModel {
+  return {
+    globals: Object.entries(GLOBAL_FLAGS).map(([n, s]) => toCompletionFlag(n, s)),
+    commands: Object.entries(COMMANDS).map(([name, c]) => ({
+      name, summary: c.spec.summary, flags: Object.entries(c.spec.flags).map(([n, s]) => toCompletionFlag(n, s)),
+    })),
+  };
+}
 
 // `status` and `pause`/`resume` etc. are commands; `--status`/`--host` are flags.
 // The two never collide because the command is a positional and the flags are not.
@@ -67,6 +91,20 @@ const COMMANDS: Record<string, Command> = {
       },
     },
   },
+  replay: {
+    run: runReplay,
+    spec: {
+      summary: 're-send a captured request from this machine',
+      usage: '<dev>/<key>',
+      flags: {
+        method: { type: 'string', arg: '<verb>', help: 'override the HTTP method' },
+        url: { type: 'string', arg: '<url>', help: 'override the target URL' },
+        header: { type: 'string', arg: '<K:V>', help: 'override/add a request header (repeatable)' },
+        body: { type: 'string', arg: '<string>', help: 'override the request body (utf-8)' },
+        'body-file': { type: 'string', arg: '<path>', help: 'override the request body from a file' },
+      },
+    },
+  },
   export: {
     run: runExport,
     spec: {
@@ -88,6 +126,12 @@ const COMMANDS: Record<string, Command> = {
     run: runPair,
     spec: { summary: 'show pairing (QR contains the device token)', flags: { qr: { type: 'boolean', help: 'render a scannable QR' } } },
   },
+  completion: {
+    // Offline: emits a static script from the flag tables; no collector, no token.
+    run: (ctx) => runCompletion(ctx, completionModel()),
+    offline: true,
+    spec: { summary: 'print a shell completion script', usage: '<bash|zsh|fish>', flags: {} },
+  },
 };
 
 // The parse-time value-flag superset, derived from the tables so it never drifts.
@@ -102,11 +146,13 @@ Commands:
   tail [filters]         follow live traffic (Ctrl-C to stop); --last N, --json (NDJSON)
   ls [filters]           list captured entries; --limit N, --all
   show <dev>/<key>       one entry: headers, timing, bodies; --body req|res|none, --curl
+  replay <dev>/<key>     re-send a captured request; --method/--url/--header/--body
   export [--har|--json]  download capture; -o <file> (default stdout)
   pause | resume         toggle the live stream
   clear [--device <id>]  drop captured data
   devices                list paired devices
   pair [--qr|--json]     show pairing (QR contains the device token)
+  completion <shell>     print a bash|zsh|fish completion script
 
 Common filters (tail, ls): --device <id> --method GET,POST --status 4xx|5xx|200
                            --host <substr> --path <substr> --errors
@@ -144,9 +190,11 @@ export async function main(argv: string[], deps: MainDeps): Promise<number> {
 
   const colors = makeColors(colorEnabled(deps.env, deps.stdout.isTTY ?? false));
   try {
-    const config = resolveConfig({
-      flags: parsed.flags, env: deps.env, stateDir: deps.stateDir, hostIsFilter: cmd.hostIsFilter,
-    });
+    // An offline command (completion) needs no collector connection or token; give
+    // it a placeholder config it never reads rather than resolving or demanding auth.
+    const config = cmd.offline
+      ? { host: '', port: 0, token: '', baseUrl: '', origin: '' }
+      : resolveConfig({ flags: parsed.flags, env: deps.env, stateDir: deps.stateDir, hostIsFilter: cmd.hostIsFilter });
     const ctx: Ctx = {
       config,
       flags: parsed.flags,

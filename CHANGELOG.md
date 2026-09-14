@@ -64,6 +64,22 @@ All notable changes to this project are documented here. The format is based on
   private; install from source; release is a git tag with a version bump and
   changelog roll-over).
 
+- Request replay: `POST /api/replay` and `terminus replay <device>/<id>` re-send a
+  captured request from the collector's machine (with optional `--method`/`--url`/
+  `--header`/`--body` overrides) and store the result as a new entry with
+  `source: replay` and a `replayOf` back-reference. A **Replay** button on the detail
+  panel does the same from the UI.
+- Import a capture at start: `node dist/main.js --load <file.har|file.json>`
+  (repeatable) preloads a Terminus HAR or JSON export into the store, creating
+  synthetic devices as needed; the collector also accepts `--help`/`--version`.
+- Shell completion: `terminus completion <bash|zsh|fish>` prints a completion script
+  generated from the command/flag tables (commands, per-command flags, and enum
+  value sets for `--status`/`--source`/`--body`).
+- `terminus ls`/`tail` gain a `--source xhr|atlantis|proxy|replay` filter.
+- `TERMINUS_BODY_BUDGET` makes the bodies retention budget configurable (a positive
+  byte count, optional binary `k`/`m`/`g` suffix; default 64 MiB); an invalid value
+  is fatal at start.
+
 ### Changed
 
 - Pairing advertises the LAN IPv4 address instead of the unresolvable hostname, and

@@ -703,6 +703,15 @@ export class Store extends EventEmitter {
     return s ? storedToEntryDetail(s) : null;
   }
 
+  // The full legacy `Entry` DTO (text bodies materialized) for one record, or null
+  // when it is unknown. Used by POST /api/replay to reconstruct the original
+  // request; unlike entryDetail it carries the bodies, so a captured request body
+  // can be re-sent without a second /body round-trip.
+  entry(deviceId: string, id: string): Entry | null {
+    const s = this.entriesByKey.get(keyOf(deviceId, id));
+    return s ? this.toEntry(s) : null;
+  }
+
   // GET /api/entries/:device/:id/body?side= — the bytes (or omission) of one body.
   // null means the entry itself is unknown (404); otherwise the caller maps the
   // BodyBytes.state to 200 (absent/captured) or 410 (omitted).
