@@ -55,22 +55,47 @@ same full-access secret as the login link; because the token rotates every boot,
 stale file left by a crash authenticates nothing. See
 [docs/security.md](../docs/security.md#the-admin-token-file-for-the-local-cli).
 
-Environment overrides: `PORT` (UI, default `8787`), `INGEST_PORT` (WSS capture,
-default `8788`), `ATLANTIS_PORT` (Atlantis TLS, default `10909`),
-`TERMINUS_STATE_DIR` (identity storage, default
+Environment overrides: `TERMINUS_PORT` (UI, default `8787`), `TERMINUS_INGEST_PORT`
+(WSS capture, default `8788`), `TERMINUS_ATLANTIS_PORT` (Atlantis TLS, default
+`10909`) — the bare `PORT`, `INGEST_PORT` and `ATLANTIS_PORT` spellings are still
+accepted as legacy, `TERMINUS_STATE_DIR` (identity storage, default
 `~/Library/Application Support/Terminus`), `TERMINUS_PAIRING_HOST` (the host the
 pairing blob/QR advertise — see [Device identity and pairing](#device-identity-and-pairing)),
 `TERMINUS_INGEST_PAUSE_MAX_MS` (back-pressure deadline, default `30000` — see
 [Ingest limits and back-pressure](#ingest-limits-and-back-pressure)),
 `TERMINUS_ATLANTIS_PING_MS` (Atlantis liveness ping interval, default `30000`, `0`
-disables — see [Using Atlantis](#using-atlantis-iosandroid)).
-The deprecated `NETCAPTURE_STATE_DIR` is still read as a fallback with a one-time
-warning.
+disables — see [Using Atlantis](#using-atlantis-iosandroid)),
+`TERMINUS_LOG_LEVEL` (`debug|info|warn|error`, default `info`; an invalid value
+falls back to `info` with a warning), `TERMINUS_CRASH_THRESHOLD` (unhandled crashes
+within 60 s that trigger a clean shutdown, default `5`).
+Every `TERMINUS_*` variable also accepts its deprecated `NETCAPTURE_*` spelling as a
+fallback with a one-time warning.
 
 `TERMINUS_PASSCODE` (and the legacy `NETCAPTURE_PASSCODE`) is **no longer used** — the
 old plaintext passcode was sent in
 the clear and is never reused as a v2 credential. If it is set, the collector prints
 a migration notice; unset it and pair devices from the authenticated UI instead.
+
+## Run as a service (macOS)
+
+To keep the collector running across logins, install it as a per-user launchd agent.
+It runs the built `dist/main.js`, so build first:
+
+```sh
+npm run build -w collector
+collector/scripts/launchd/install.sh
+```
+
+`install.sh` renders `scripts/launchd/com.terminus.collector.plist.template` with the
+absolute paths of your `node` and this checkout, writes
+`~/Library/LaunchAgents/com.terminus.collector.plist`, and bootstraps it under your
+GUI session (`launchctl bootstrap gui/$UID`). Logs (stdout and stderr) go to
+`~/Library/Logs/Terminus/collector.log`. Check state with
+`launchctl print gui/$UID/com.terminus.collector`.
+
+Remove it with `collector/scripts/launchd/uninstall.sh` (the log file is kept). The
+agent uses fixed ports; set overrides in the plist's `EnvironmentVariables` if the
+defaults collide, then reinstall.
 
 ## Migration from argo-netcapture
 
