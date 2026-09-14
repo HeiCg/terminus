@@ -149,7 +149,10 @@ describe('HAR export — WebSocket / SSE union (E1b)', () => {
     const e = har.log.entries[0];
     expect(e.request.url).toBe('https://api.example.io/live');
     expect(e._webSocketMessages).toHaveLength(1);
-    expect(Array.isArray(e._terminus)).toBe(true);
+    // The HTTP entry carries its identity; the linked socket rides `_terminus.sessions`.
+    expect(e._terminus).toMatchObject({ deviceId: 'd1', id: 'h1', source: 'atlantis' });
+    expect(Array.isArray(e._terminus.sessions)).toBe(true);
+    expect(e._terminus.sessions).toHaveLength(1);
   });
 
   it('carries binary frames as base64 with opcode 2 and marks the encoding', async () => {

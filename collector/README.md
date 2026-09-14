@@ -454,6 +454,16 @@ The exporter never fabricates data it did not capture — no invented
 express is carried in `_`-prefixed extension fields (HAR 1.2 permits custom
 members prefixed with `_`; standard importers ignore the ones they do not know):
 
+- **HTTP entry identity.** Every exported HTTP entry carries
+  `_terminus = { deviceId, id, source, replayOf? }` — the identity a plain HAR
+  entry cannot express (`startedDateTime`/`time` already carry the time, so no
+  timestamp is duplicated). This is what makes an `--load` re-import **lossless**:
+  the entry returns to the same device/id/source it was captured under, and a
+  replay keeps its `replayOf` back-reference. WS/SSE sessions **linked** to the
+  entry ride `_terminus.sessions` (each a socket ext); a plain socket ext has
+  `kind`, this identity object never does, so the two are told apart on import.
+  A third-party HAR has no `_terminus`, so its HTTP entries import onto a
+  `har:<basename>` device with `source: xhr`.
 - **Bodies.** Captured **text** rides `response.content.text` (UTF-8) /
   `request.postData.text`. Captured **binary** response bytes ride
   `response.content` with `encoding: "base64"` and the true `size`. A captured
@@ -503,13 +513,13 @@ node dist/main.js --load capture.har --load other.json
 `--load` (repeatable) accepts a **Terminus JSON export** (`{ entries, ws }`) or a
 **HAR 1.2** log (including the `_terminus*` extensions above); a plain third-party
 HAR is imported best-effort too. A synthetic device is created for any device the
-file references. The JSON export is lossless for identity (each entry's `source`,
-`deviceId` and text bodies survive); a HAR **HTTP** entry carries neither `source`
-nor `deviceId`, so imported HAR HTTP entries land on a `har:<basename>` device with
-`source: xhr` (their bodies, including base64 binary, are still recovered), while
-HAR **sockets** keep the `source`/`deviceId` from their `_terminus` extension. Use
-the JSON export when exact round-tripping of source/device matters. `node dist/main.js
---help` and `--version` are also accepted.
+file references. Both Terminus exports are **lossless for identity**: a HAR HTTP
+entry carries its `deviceId`/`id`/`source` (and any `replayOf`) on its `_terminus`
+identity extension, so it re-imports onto the same device/id/source it was captured
+under, with bodies (including base64 binary) recovered, and HAR **sockets** keep the
+`source`/`deviceId` from their own `_terminus` extension. Only a plain third-party
+HAR (no `_terminus`) lands on a `har:<basename>` device with `source: xhr`.
+`node dist/main.js --help` and `--version` are also accepted.
 
 ## Replay a captured request
 

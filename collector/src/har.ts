@@ -34,6 +34,21 @@ type TerminusWsExt = {
   close: { at: number; code: number | null; reason: string } | null;
 };
 
+// The `_terminus` identity extension carried on every HTTP HAR entry the exporter
+// writes (T9): the fields a plain HAR entry cannot express — which device/id/source
+// the exchange belongs to and, on a replay entry, its back-reference. This is what
+// import needs to be lossless; `startedDateTime`/`time` already carry the time so no
+// timestamp is duplicated (`ts` is reserved but unused). Any WS/SSE sessions LINKED
+// to this exchange ride `sessions` here (a plain WS/SSE ext has `kind`; this one
+// never does, so import tells the two apart). A synthetic socket-only entry keeps a
+// bare `TerminusWsExt` instead.
+type TerminusHttpExt = {
+  deviceId: string; id: string; source: string;
+  ts?: number;
+  replayOf?: Entry['replayOf'];
+  sessions?: TerminusWsExt[];
+};
+
 export type HarEntry = {
   startedDateTime: string; time: number;
   request: { method: string; url: string; httpVersion: string; cookies: Nv[]; headers: Nv[]; queryString: Nv[]; postData?: PostData; headersSize: number; bodySize: number };
@@ -44,7 +59,7 @@ export type HarEntry = {
   // own `_terminusEventStream`. Interop of these fields is documented, not assumed.
   _webSocketMessages?: WsMessage[];
   _terminusEventStream?: WsMessage[];
-  _terminus?: TerminusWsExt | TerminusWsExt[];
+  _terminus?: TerminusHttpExt | TerminusWsExt | TerminusWsExt[];
 };
 export type HarLog = { log: { version: '1.2'; creator: { name: string; version: string }; entries: HarEntry[] } };
 
@@ -138,16 +153,29 @@ function frameMessage(fr: StoredFrame, snap: ExportSnapshot, withOpcode: boolean
 const wsMessages = (ss: ExportSession, snap: ExportSnapshot): WsMessage[] => ss.frames.map((fr) => frameMessage(fr, snap, true));
 const sseMessages = (ss: ExportSession, snap: ExportSnapshot): WsMessage[] => ss.frames.map((fr) => frameMessage(fr, snap, false));
 
-function attachSessions(har: HarEntry, sessions: ExportSession[], snap: ExportSnapshot): void {
+// The HTTP entry's identity extension: what import needs that a plain HAR entry
+// cannot carry (device/id/source, a replay back-reference), plus any LINKED sockets
+// nested under `sessions` (previously the bare `_terminus` array).
+function httpExt(e: StoredEntry, linked: ExportSession[]): TerminusHttpExt {
+  return {
+    deviceId: e.deviceId, id: e.id, source: e.source,
+    ...(e.replayOf ? { replayOf: e.replayOf } : {}),
+    ...(linked.length ? { sessions: linked.map((s) => wsExt(s)) } : {}),
+  };
+}
+
+// Attach the LINKED sockets' message arrays to the HTTP entry (their metadata rides
+// `_terminus.sessions`); the frames are not duplicated as separate entries.
+function attachMessages(har: HarEntry, sessions: ExportSession[], snap: ExportSnapshot): void {
   const ws = sessions.filter((s) => s.kind === 'websocket');
   const sse = sessions.filter((s) => s.kind === 'sse');
   if (ws.length) har._webSocketMessages = ws.flatMap((s) => wsMessages(s, snap));
   if (sse.length) har._terminusEventStream = sse.flatMap((s) => sseMessages(s, snap));
-  har._terminus = sessions.map((s) => wsExt(s));
 }
 
-// A real HTTP exchange → HAR entry, with any WS/SSE sessions LINKED to it
-// (`httpEntryKey`) attached rather than duplicated as separate entries.
+// A real HTTP exchange → HAR entry. Every entry carries a `_terminus` identity
+// extension so import is lossless; any WS/SSE sessions LINKED to it (`httpEntryKey`)
+// attach their messages here rather than being duplicated as separate entries.
 function harFromEntry(e: StoredEntry, linked: ExportSession[], snap: ExportSnapshot): HarEntry {
   const postData = requestPostData(e.requestBody, e.requestHeaders, snap);
   const har: HarEntry = {
@@ -157,8 +185,9 @@ function harFromEntry(e: StoredEntry, linked: ExportSession[], snap: ExportSnaps
     response: { status: e.status ?? 0, statusText: e.statusText, httpVersion: 'HTTP/1.1', cookies: [], headers: nv(e.responseHeaders),
       content: responseContent(e.responseBody, e.responseHeaders, snap), redirectURL: '', headersSize: -1, bodySize: bodySize(e.responseBody) },
     cache: {}, timings: { send: 0, wait: e.durationMs ?? -1, receive: 0 }, ...(e.error ? { comment: `error: ${e.error}` } : {}),
+    _terminus: httpExt(e, linked),
   };
-  if (linked.length) attachSessions(har, linked, snap);
+  if (linked.length) attachMessages(har, linked, snap);
   return har;
 }
 

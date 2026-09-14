@@ -82,6 +82,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- HAR export now writes a `_terminus` identity extension on every HTTP entry
+  (`deviceId`, `id`, `source`, and `replayOf` when present), so `--load` re-imports a
+  Terminus HAR **losslessly** — entries return to the device/id/source they were
+  captured under instead of a synthetic `har:<basename>` device. Linked WS/SSE
+  sessions ride `_terminus.sessions`. A third-party HAR (no `_terminus`) still
+  imports best-effort.
+
 - Pairing advertises the LAN IPv4 address instead of the unresolvable hostname, and
   rotates it when the DHCP-assigned address changes. Override it with
   `TERMINUS_PAIRING_HOST`; `terminus pair` surfaces the advertised host and warns on

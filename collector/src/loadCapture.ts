@@ -9,12 +9,13 @@ import type { HarLog, HarEntry } from './har.js';
 // extensions) and insert its records into the store. A synthetic `Device` is
 // created for any device the file references that is not already present.
 //
-// The JSON export is lossless for identity: it carries each entry's `source`,
-// `deviceId` and text bodies verbatim. HAR carries `source`/`deviceId` only on its
-// socket `_terminus` extension — a plain HAR HTTP entry has neither — so imported
-// HAR HTTP entries take `deviceId: 'har:<basename>'` and a default `source: 'xhr'`,
-// while their bodies (including base64 binary) are recovered. Use the JSON export
-// when exact round-tripping of source/deviceId matters.
+// Both exports are lossless for identity. The JSON export carries each entry's
+// `source`, `deviceId` and text bodies verbatim. A Terminus HAR carries an HTTP
+// entry's `deviceId`/`id`/`source` (and any `replayOf`) on its `_terminus` identity
+// extension (T9), so imported entries land exactly where they were captured, with
+// bodies (including base64 binary) recovered. A plain third-party HAR has no
+// `_terminus`, so its HTTP entries take `deviceId: 'har:<basename>'` and a default
+// `source: 'xhr'`.
 
 export type LoadSummary = { entries: number; sessions: number; frames: number };
 
@@ -87,20 +88,28 @@ function bodyBytes(
   return { bytes: b, omitted: b.length && !isUtf8(b) ? 'binary' : null, size: b.length };
 }
 
-function harHttpEntry(store: Store, he: HarEntry, deviceId: string, seen: Set<string>): void {
-  const startedAt = Date.parse(he.startedDateTime) || Date.now();
+// The `_terminus` identity extension the exporter writes on an HTTP entry (T9). A
+// third-party HAR carries none of this; a Terminus HAR carries device/id/source so
+// the entry lands exactly where it was captured, with its replay back-reference and
+// linked sockets (`sessions`) preserved.
+type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; sessions?: WsExt[] };
+
+function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fallbackDevice: string, seen: Set<string>): void {
+  const startedAt = (http?.ts ?? Date.parse(he.startedDateTime)) || Date.now();
+  const deviceId = http?.deviceId ?? fallbackDevice;
   ensureDevice(store, deviceId, startedAt, seen);
   const req = bodyBytes(he.request.postData?.text, undefined, he.request.postData?._terminus, he.request.postData?._terminusContent);
   const resp = bodyBytes(he.response.content?.text, he.response.content?.encoding, he.response.content?._terminus, undefined);
   const input: EntryInput = {
-    id: `har-${startedAt}-${Math.random().toString(36).slice(2, 8)}`,
-    deviceId, source: 'xhr', startedAt,
+    id: http?.id ?? `har-${startedAt}-${Math.random().toString(36).slice(2, 8)}`,
+    deviceId, source: http?.source != null ? asSource(http.source) : 'xhr', startedAt,
     method: he.request.method, url: he.request.url,
     requestHeaders: headerObj(he.request.headers), requestBytes: req.bytes, requestBodySize: req.size, requestBodyOmitted: req.omitted,
     status: he.response.status || null, statusText: he.response.statusText ?? '',
     responseHeaders: headerObj(he.response.headers), responseBytes: resp.bytes, responseBodySize: resp.size, responseBodyOmitted: resp.omitted,
     durationMs: he.time >= 0 ? he.time : null,
     error: he.comment?.startsWith('error: ') ? he.comment.slice('error: '.length) : null,
+    ...(http?.replayOf ? { replayOf: http.replayOf } : {}),
   };
   store.addEntryInput(input);
 }
@@ -144,21 +153,26 @@ function loadHar(store: Store, doc: HarLog, basename: string, gen: string): Load
   const seen = new Set<string>();
   const httpDevice = `har:${basename}`;
   for (const he of doc.log.entries ?? []) {
-    const exts = he._terminus == null ? [] : Array.isArray(he._terminus) ? he._terminus : [he._terminus];
+    const t = he._terminus;
     const wsMsgs = (he._webSocketMessages ?? []) as WsMsg[];
     const sseMsgs = (he._terminusEventStream ?? []) as WsMsg[];
-    const isSyntheticSocket = exts.length === 1 && (exts[0] as unknown as { synthetic?: boolean }).synthetic === true;
-    if (isSyntheticSocket) {
-      // A socket-only entry (no real HTTP handshake in scope at export time).
-      const ext = exts[0] as unknown as WsExt;
+    // A socket-only entry: a WS/SSE ext (it has `kind`) with no HTTP exchange in
+    // scope at export time. The HTTP identity ext (T9) never has `kind`.
+    if (t != null && !Array.isArray(t) && 'kind' in t) {
+      const ext = t as unknown as WsExt;
       harSocket(store, ext, he.request.url || null, ext.kind === 'sse' ? sseMsgs : wsMsgs, gen, seen, summary);
       continue;
     }
-    // A real HTTP entry, plus any linked sockets attached to it.
-    harHttpEntry(store, he, httpDevice, seen);
+    // A real HTTP entry. Its identity rides `_terminus` (T9) when the file is a
+    // Terminus export; a third-party HAR has none, so it falls back to the
+    // `har:<basename>` device and `source: xhr`.
+    const http = (t != null && !Array.isArray(t)) ? (t as unknown as HttpExt) : undefined;
+    harHttpEntry(store, he, http, httpDevice, seen);
     summary.entries++;
-    for (const raw of exts) {
-      const ext = raw as unknown as WsExt;
+    // Linked sockets: the T9 shape nests them under `_terminus.sessions`; a legacy
+    // export carried them as the bare `_terminus` array.
+    const linked: WsExt[] = http?.sessions ?? (Array.isArray(t) ? (t as unknown as WsExt[]) : []);
+    for (const ext of linked) {
       harSocket(store, ext, he.request.url || null, ext.kind === 'sse' ? sseMsgs : wsMsgs, gen, seen, summary);
     }
   }
