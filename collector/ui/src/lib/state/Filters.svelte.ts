@@ -3,11 +3,15 @@ import type { Store } from './Store.svelte.js';
 import type { EntrySummary } from '../protocol.js';
 import { entityKey } from '../protocol.js';
 import { splitUrl, statusBucket } from '../format.js';
+import { parseQuery, matchQuery, isEmptyQuery, type ParsedQuery } from '../query.js';
+import { updateHashParams } from '../hash.js';
 
 // The type-chip filter (top row of the filter bar). `errors` is a synthetic
 // bucket: any 4xx/5xx/transport-error row, regardless of kind.
 export type TypeFilter = 'all' | 'xhr' | 'ws' | 'sse' | 'errors';
 export type SortKey = 'status' | 'method' | 'host' | 'path' | 'size' | 'duration' | 'time';
+type StatusBucket = '2xx' | '3xx' | '4xx' | '5xx';
+type SourceId = 'xhr' | 'atlantis' | 'proxy';
 
 // One HTTP row as the table consumes it: the summary plus the derived display
 // fields (kind join, split host/path, status bucket, response size). `size` is
@@ -20,14 +24,28 @@ export type Row = EntrySummary & {
   size: number | null;
 };
 
+// The slice of BodyCache the `body:` mini-query term needs: a NON-touching
+// lowercased peek by hash. Optional at construction — unit tests stand Filters up
+// without a cache, and then a `body:` term simply matches nothing.
+type BodyPeek = { peekLower(hash: string): string | undefined };
+
 // `errors` covers client/server failures and transport errors — the buckets a
 // developer scans for when something broke.
 const ERROR_BUCKETS = new Set(['4xx', '5xx', 'error']);
+
+const TYPE_FILTERS: readonly TypeFilter[] = ['all', 'xhr', 'ws', 'sse', 'errors'];
+const STATUS_BUCKETS: readonly StatusBucket[] = ['2xx', '3xx', '4xx', '5xx'];
+const SOURCE_IDS: readonly SourceId[] = ['xhr', 'atlantis', 'proxy'];
+const SORT_KEYS: readonly SortKey[] = ['status', 'method', 'host', 'path', 'size', 'duration', 'time'];
 
 // Filters is the Capture view's query state and the single place the entry list
 // is shaped for the table. It reads the Store's `$derived` arrays, so every
 // `$derived.by` here recomputes when a batch lands or a filter field changes —
 // no effect required. The class owns nothing the Store owns; it only projects.
+//
+// The public filter fields are getter/setter pairs (or class methods) so each
+// mutation writes the shared location-hash querystring from the exact point the
+// state changes — T6.3 no-reactive-effect rule. `applyHash` restores at boot.
 export class Filters {
   // Backing state for `device`; the accessor pair below rebaselines the
   // "other-device arrivals" counter whenever the selection changes (a plain field
@@ -37,16 +55,36 @@ export class Filters {
   set device(v: string | 'all') {
     this.#device = v;
     this.#rebaseline();
+    this.#syncHash();
   }
-  search = $state('');
-  type = $state<TypeFilter>('all');
-  statuses = new SvelteSet<'2xx' | '3xx' | '4xx' | '5xx'>();
-  sources = new SvelteSet<'xhr' | 'atlantis' | 'proxy'>();
-  host = $state<string | null>(null);
-  hasBody = $state(false);
-  sort = $state<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'time', dir: 'desc' });
+
+  #search = $state('');
+  get search(): string { return this.#search; }
+  set search(v: string) { this.#search = v; this.#syncHash(); }
+
+  #type = $state<TypeFilter>('all');
+  get type(): TypeFilter { return this.#type; }
+  set type(v: TypeFilter) { this.#type = v; this.#syncHash(); }
+
+  statuses = new SvelteSet<StatusBucket>();
+  sources = new SvelteSet<SourceId>();
+
+  #host = $state<string | null>(null);
+  get host(): string | null { return this.#host; }
+  set host(v: string | null) { this.#host = v; this.#syncHash(); }
+
+  #hasBody = $state(false);
+  get hasBody(): boolean { return this.#hasBody; }
+  set hasBody(v: boolean) { this.#hasBody = v; this.#syncHash(); }
+
+  #sort = $state<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'time', dir: 'desc' });
+  get sort(): { key: SortKey; dir: 'asc' | 'desc' } { return this.#sort; }
 
   #store: Store;
+  #cache?: BodyPeek;
+  // Suppresses hash writes while `applyHash` restores state, so the one-shot boot
+  // restore never fights the setters it drives.
+  #restoring = false;
 
   // Baseline for `otherDeviceNew`, captured whenever `device` changes: the total
   // arrival count and the count of arrivals NOT on the selected device, both taken
@@ -62,8 +100,9 @@ export class Filters {
   // reactive): it is a pure cache the derived reads through, never a dependency.
   #urlMemo = new Map<string, { url: string; host: string; path: string }>();
 
-  constructor(store: Store) {
+  constructor(store: Store, cache?: BodyPeek) {
     this.#store = store;
+    this.#cache = cache;
   }
 
   // Re-anchor the other-device counter to the store's current arrival totals, so
@@ -158,19 +197,37 @@ export class Filters {
   // chips and its own column sort; `allRows` applies neither.)
   allRows = $derived.by((): Row[] => [...this.#deviceRows].sort((a, b) => b.startedAt - a.startedAt));
 
+  // The search box's parsed mini-query (`method:` / `status:` / `host:` / `path:` /
+  // `source:` / `device:` / `body:` typed terms + a free substring), recomputed
+  // once per keystroke, not once per row.
+  #parsed = $derived.by((): ParsedQuery => parseQuery(this.#search));
+
+  // Lowercased body text for a `body:` term: the resident request or response
+  // body, whichever is cached. NON-touching (peekLower never reorders the LRU),
+  // so a $derived read of `rows` is side-effect free. Null when nothing resident.
+  #bodyText = (r: Row): string | null => {
+    const cache = this.#cache;
+    if (!cache) return null;
+    const rsp = r.responseBody.sha256 ? cache.peekLower(r.responseBody.sha256) : undefined;
+    if (rsp != null) return rsp;
+    const req = r.requestBody.sha256 ? cache.peekLower(r.requestBody.sha256) : undefined;
+    return req ?? null;
+  };
+
   rows = $derived.by((): Row[] => {
-    const q = this.search.trim().toLowerCase();
+    const parsed = this.#parsed;
+    const hasQuery = !isEmptyQuery(parsed);
     const out = this.#deviceRows.filter((r) => {
       if (this.type === 'xhr' || this.type === 'ws' || this.type === 'sse') {
         if (r.kind !== this.type) return false;
       } else if (this.type === 'errors' && !ERROR_BUCKETS.has(r.bucket)) {
         return false;
       }
-      if (this.statuses.size > 0 && !this.statuses.has(r.bucket as '2xx' | '3xx' | '4xx' | '5xx')) return false;
+      if (this.statuses.size > 0 && !this.statuses.has(r.bucket as StatusBucket)) return false;
       if (this.sources.size > 0 && !this.sources.has(r.source)) return false;
       if (this.host !== null && r.host !== this.host) return false;
       if (this.hasBody && r.requestBody.state !== 'captured' && r.responseBody.state !== 'captured') return false;
-      if (q && !r.url.toLowerCase().includes(q) && !r.method.toLowerCase().includes(q)) return false;
+      if (hasQuery && !matchQuery(parsed, r, this.#bodyText)) return false;
       return true;
     });
     return this.#sorted(out);
@@ -197,40 +254,115 @@ export class Filters {
     return [...set].sort((a, b) => a.localeCompare(b));
   });
 
-  toggleStatus(b: '2xx' | '3xx' | '4xx' | '5xx'): void {
+  toggleStatus(b: StatusBucket): void {
     if (this.statuses.has(b)) this.statuses.delete(b);
     else this.statuses.add(b);
+    this.#syncHash();
   }
 
-  toggleSource(s: 'xhr' | 'atlantis' | 'proxy'): void {
+  toggleSource(s: SourceId): void {
     if (this.sources.has(s)) this.sources.delete(s);
     else this.sources.add(s);
+    this.#syncHash();
   }
 
   // Clicking the active sort column flips its direction; a new column starts
   // descending for time (newest first, the default) and ascending otherwise.
   setSort(key: SortKey): void {
-    if (this.sort.key === key) {
-      this.sort = { key, dir: this.sort.dir === 'asc' ? 'desc' : 'asc' };
+    if (this.#sort.key === key) {
+      this.#sort = { key, dir: this.#sort.dir === 'asc' ? 'desc' : 'asc' };
     } else {
-      this.sort = { key, dir: key === 'time' ? 'desc' : 'asc' };
+      this.#sort = { key, dir: key === 'time' ? 'desc' : 'asc' };
     }
+    this.#syncHash();
   }
 
   // Reset every filter EXCEPT device (the device scope is picked in the topbar,
   // not the filter bar, so "Clear filters" leaves it alone).
   clear(): void {
-    this.search = '';
-    this.type = 'all';
+    this.#search = '';
+    this.#type = 'all';
     this.statuses.clear();
     this.sources.clear();
-    this.host = null;
-    this.hasBody = false;
-    this.sort = { key: 'time', dir: 'desc' };
+    this.#host = null;
+    this.#hasBody = false;
+    this.#sort = { key: 'time', dir: 'desc' };
+    this.#syncHash();
+  }
+
+  // ── URL hash (T6.3) ──────────────────────────────────────────────────────
+  // Encode the filter state as a querystring: only non-default fields appear, so
+  // a pristine view serializes to nothing. Exposed for the round-trip test.
+  toHash(): string {
+    const p = new URLSearchParams();
+    this.#writeInto(p);
+    return p.toString();
+  }
+
+  // Write this owner's keys into a param set, deleting any that are at their
+  // default — so a shared hash (Nav's `view=` lives alongside) stays minimal.
+  #writeInto(p: URLSearchParams): void {
+    const put = (k: string, v: string): void => { if (v) p.set(k, v); else p.delete(k); };
+    put('device', this.#device === 'all' ? '' : this.#device);
+    put('type', this.#type === 'all' ? '' : this.#type);
+    put('status', [...this.statuses].sort().join(','));
+    put('sources', [...this.sources].sort().join(','));
+    put('host', this.#host ?? '');
+    put('q', this.#search);
+    put('hasBody', this.#hasBody ? '1' : '');
+    const s = this.#sort;
+    put('sort', s.key === 'time' && s.dir === 'desc' ? '' : `${s.key}:${s.dir}`);
+  }
+
+  #syncHash(): void {
+    if (this.#restoring) return;
+    updateHashParams((p) => this.#writeInto(p));
+  }
+
+  // Restore filter state from a parsed hash (boot / one-shot). Unknown or missing
+  // keys fall back to defaults, so a partial or foreign hash never lands the UI in
+  // a bad state. Sets backing fields directly and suppresses hash writes so the
+  // restore does not thrash location during startup.
+  applyHash(p: URLSearchParams): void {
+    this.#restoring = true;
+    try {
+      const device = p.get('device');
+      this.#device = device && device !== 'all' ? device : 'all';
+
+      const type = p.get('type');
+      this.#type = type && (TYPE_FILTERS as readonly string[]).includes(type) ? (type as TypeFilter) : 'all';
+
+      this.statuses.clear();
+      const status = p.get('status');
+      if (status) for (const b of status.split(',')) if ((STATUS_BUCKETS as readonly string[]).includes(b)) this.statuses.add(b as StatusBucket);
+
+      this.sources.clear();
+      const sources = p.get('sources');
+      if (sources) for (const s of sources.split(',')) if ((SOURCE_IDS as readonly string[]).includes(s)) this.sources.add(s as SourceId);
+
+      const host = p.get('host');
+      this.#host = host ? host : null;
+
+      this.#search = p.get('q') ?? '';
+      this.#hasBody = p.get('hasBody') === '1';
+      this.#sort = this.#parseSort(p.get('sort'));
+
+      this.#rebaseline();
+    } finally {
+      this.#restoring = false;
+    }
+  }
+
+  #parseSort(raw: string | null): { key: SortKey; dir: 'asc' | 'desc' } {
+    const def = { key: 'time', dir: 'desc' } as const;
+    if (!raw) return { ...def };
+    const [key, dir] = raw.split(':');
+    if (!(SORT_KEYS as readonly string[]).includes(key)) return { ...def };
+    return { key: key as SortKey, dir: dir === 'asc' ? 'asc' : 'desc' };
   }
 
   #sorted(rows: Row[]): Row[] {
-    const { key, dir } = this.sort;
+    const { key, dir } = this.#sort;
     const f = dir === 'asc' ? 1 : -1;
     const isStr = key === 'method' || key === 'host' || key === 'path';
     // status/size/duration can be null (pending/unknown); time never is.

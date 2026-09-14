@@ -32,10 +32,15 @@ export class Session {
   }
 
   async boot(): Promise<void> {
-    const token = new URLSearchParams(location.hash.slice(1)).get('token');
-    // Strip the fragment FIRST, before any await — the token must not survive in
-    // the address bar (or a later reload) once we hold it.
-    history.replaceState(null, '', location.pathname + location.search);
+    const params = new URLSearchParams(location.hash.slice(1));
+    const token = params.get('token');
+    // Strip the token FIRST, before any await — it must not survive in the address
+    // bar (or a later reload) once we hold it. Only the token is removed: the hash
+    // is a querystring the Nav view and Capture filters (T6.3) also live in, and a
+    // shareable/bookmarked view must survive boot.
+    params.delete('token');
+    const qs = params.toString();
+    history.replaceState(null, '', qs ? `${location.pathname}${location.search}#${qs}` : `${location.pathname}${location.search}`);
     this.status = 'authenticating';
     if (token && (await login(token))) { this.ready(); return; }
     if (await probeSession()) { this.ready(); return; }

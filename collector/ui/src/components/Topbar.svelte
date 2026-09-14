@@ -112,7 +112,7 @@
     class="search"
     type="search"
     data-testid="search"
-    placeholder="Search url, header, body…  ⌘K"
+    placeholder="Search, or method:GET status:5xx host:api…  ⌘K"
     aria-label="Search"
     bind:value={filters.search}
   />
