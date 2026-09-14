@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { env } from '../src/env.js';
+import { env, envWithBare } from '../src/env.js';
 
 // Each case uses a distinct variable name so the module-level "warn once" set
 // never bleeds between assertions.
@@ -40,5 +40,43 @@ describe('env() TERMINUS_/NETCAPTURE_ fallback', () => {
     expect(env('EMPTY')).toBeUndefined();
     expect(env('MISSING')).toBeUndefined();
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+// The collector's port vars predate the TERMINUS_ prefix, so a bare spelling stays a
+// silent legacy fallback after the prefixed and deprecated ones (T5.4).
+describe('envWithBare() port resolution', () => {
+  const touched: string[] = [];
+  const set = (k: string, v: string) => { touched.push(k); process.env[k] = v; };
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => {
+    warnSpy.mockRestore();
+    for (const k of touched.splice(0)) delete process.env[k];
+  });
+
+  it('prefers TERMINUS_ and reports that spelling as the source', () => {
+    set('TERMINUS_PORT', '9001');
+    set('NETCAPTURE_PORT', '9002');
+    set('PORT', '9003');
+    expect(envWithBare('PORT')).toEqual({ value: '9001', source: 'TERMINUS_PORT' });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to NETCAPTURE_ (with the deprecation warning) over a bare name', () => {
+    set('NETCAPTURE_INGEST_PORT', '9100');
+    set('INGEST_PORT', '9200');
+    expect(envWithBare('INGEST_PORT')).toEqual({ value: '9100', source: 'NETCAPTURE_INGEST_PORT' });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a bare name silently and names it as the source', () => {
+    set('ATLANTIS_PORT', '9300');
+    expect(envWithBare('ATLANTIS_PORT')).toEqual({ value: '9300', source: 'ATLANTIS_PORT' });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined with the TERMINUS_ spelling as the source when nothing is set', () => {
+    expect(envWithBare('MISSING_PORT')).toEqual({ value: undefined, source: 'TERMINUS_MISSING_PORT' });
   });
 });

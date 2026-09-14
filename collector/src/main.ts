@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { Store } from './store.js';
 import { createHttpServer } from './http.js';
 import { createUiAuth } from './security/uiAuth.js';
-import { loadOrCreateIdentity, toPairingImport, defaultStateDir, migrateLegacyStateDir, acquireStateLock, lanAddresses, pairingHost, pairingHostWarning, logPairingHostDrift } from './security/identity.js';
+import { loadOrCreateIdentity, toPairingImport, defaultStateDir, migrateLegacyStateDir, acquireStateLock, lanAddresses, pairingHost, pairingHostWarning, logPairingHostDrift, certExpiryWarning } from './security/identity.js';
 import { writeAdminTokenFile, removeAdminTokenFile } from './security/adminToken.js';
 import { createCertServer } from './security/certServer.js';
 import { createDeviceServer, createIngestShared } from './deviceServer.js';
@@ -14,10 +14,16 @@ import { createProxySource, loadOrCreateProxyCA, type ProxySource } from './prox
 import { startDiscovery } from './discovery.js';
 import { VERSION } from './version.js';
 import { log } from './log.js';
-import { env, envName } from './env.js';
+import { env, envName, envWithBare } from './env.js';
+import { createCrashGuard } from './crashGuard.js';
 
+// Resolve a port from `TERMINUS_<name>` first, then the deprecated `NETCAPTURE_<name>`
+// (warns once via env()), and finally the bare unprefixed `<name>` (e.g. `PORT`),
+// accepted silently as documented legacy. The invalid-value error names whichever
+// spelling was actually read.
 function port(name: string, def: number): number {
-  return checkPort(name, process.env[name], def);
+  const { value, source } = envWithBare(name);
+  return checkPort(source, value, def);
 }
 // Validate an already-read port value (raw string) against a label used only for
 // the error message. Shared by the bare PORT/INGEST/ATLANTIS reads and the
@@ -50,9 +56,8 @@ if (passcodeVar) {
 
 const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist-ui');
 
-// A crash in one handler must not take the whole collector down mid-session.
-process.on('uncaughtException', (e) => log.error('uncaughtException', e));
-process.on('unhandledRejection', (e) => log.error('unhandledRejection', e));
+// How many unhandled crashes inside 60 s trip the loop guard (see below).
+const CRASH_THRESHOLD = Math.max(1, Math.floor(Number(env('CRASH_THRESHOLD') ?? 5) || 5));
 
 async function boot() {
   const host = os.hostname().replace(/\.local$/, '');
@@ -97,6 +102,17 @@ async function boot() {
   process.on('SIGINT', () => shutdown(0));
   process.on('SIGTERM', () => shutdown(0));
 
+  // A single crash is logged and swallowed so one bad handler cannot end a live
+  // session. A crash *loop* (>= CRASH_THRESHOLD within 60 s) is worse than stopping:
+  // shut down with exit 1 through the same path as a signal (lock released,
+  // admin-token removed) rather than spin.
+  const crashGuard = createCrashGuard({
+    threshold: CRASH_THRESHOLD,
+    onTrip: (count) => { log.error(`${count} unhandled errors within 60s (threshold ${CRASH_THRESHOLD}); shutting down`); shutdown(1); },
+  });
+  process.on('uncaughtException', (e) => { log.error('uncaughtException', e); crashGuard.record(); });
+  process.on('unhandledRejection', (e) => { log.error('unhandledRejection', e); crashGuard.record(); });
+
   try {
     log.info(`terminus collector v${VERSION}`);
     const identity = await loadOrCreateIdentity(stateDir, { host, ingestPort: INGEST_PORT, atlantisPort: ATLANTIS_PORT });
@@ -106,6 +122,10 @@ async function boot() {
     // rotation invalidates every existing pairing); the same guard covers the
     // per-request pairingHost fallback so this logs a single time.
     logPairingHostDrift(identity, env);
+    // The cert is a hard error the moment it lapses; warn while there is still time
+    // to rotate (365-day issuance, 30-day heads-up).
+    const expiryWarn = certExpiryWarning(identity);
+    if (expiryWarn) log.warn(expiryWarn);
     log.info(`advertising pairing host ${pairingHost(identity, env)}`);
 
     const store = new Store();
@@ -124,7 +144,7 @@ async function boot() {
       ingest: shared,
     });
     httpHandle.server.on('error', (e: NodeJS.ErrnoException) => {
-      if (e.code === 'EADDRINUSE') log.error(`port ${HTTP_PORT} already in use; set PORT to another value`);
+      if (e.code === 'EADDRINUSE') log.error(`port ${HTTP_PORT} already in use; set TERMINUS_PORT to another value`);
       else log.error('http server error', e);
       shutdown(1);
     });
