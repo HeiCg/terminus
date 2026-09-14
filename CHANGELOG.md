@@ -28,6 +28,18 @@ All notable changes to this project are documented here. The format is based on
 - ESLint now covers `collector/src` and `collector/test`; CI runs on Ubuntu and
   macOS with npm caching; `LICENSE` ships in both packages; Dependabot, issue
   templates, and CODEOWNERS added.
+- `docs/ingest-protocol.md`: the WSS capture protocol (pairing, connection, message
+  types, back-pressure/close codes, and a minimal Node client) for instrumenting
+  your own app without the Atlantis SDK.
+- `docs/troubleshooting.md`: fixes for certificate/SHA mismatch, an unreachable LAN
+  IP, `EADDRINUSE`, a stale `admin-token`, missing OpenSSL, QR pairing on a
+  hardened QA build, and `terminus tail` reconnect behaviour.
+- A single **Configuration** table in the collector README documenting every
+  collector and CLI environment variable, with defaults, scope, and the deprecated
+  `NETCAPTURE_*` aliases; `docs/architecture.md` now points to it.
+- **Distribution** and **Releasing** sections in `CONTRIBUTING.md` (packages are
+  private; install from source; release is a git tag with a version bump and
+  changelog roll-over).
 
 ### Changed
 
@@ -37,6 +49,8 @@ All notable changes to this project are documented here. The format is based on
   drift.
 - Atlantis traffic is aliased onto the app's ingest `deviceId`, so a device seen on
   both channels is a single device record.
+- The `@terminus/cli` package now declares its license (`MIT`), matching the
+  collector package.
 
 ### Fixed
 
