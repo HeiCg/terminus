@@ -11,6 +11,7 @@ import { createUiBroadcast } from './uiBroadcast.js';
 import { VERSION } from './version.js';
 import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
+import { performReplay } from './replay.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -240,6 +241,45 @@ export function createHttpServer(
               res.writeHead(500); return res.end('pause failed');
             }
             return json({ paused: broadcast.isPaused() });
+          });
+          return;
+        }
+        // Replay (T7.1): re-send a captured request to its original host from this
+        // machine and store the result as a NEW `replay` entry. Like /api/clear a
+        // cookie-driven mutation needs an exact Origin; a bearer CLI need not. The
+        // JSON body is bounded (an override body can be sizeable, but not unbounded)
+        // and read fully before the replay runs. Codes: 201 (key of the new entry),
+        // 400 (malformed body), 404 (unknown entry), 422 (nothing replayable).
+        if (u.pathname === '/api/replay') {
+          if (method !== 'POST') { res.writeHead(405); return res.end(); }
+          if (auth.kind === 'session' && origin !== 'valid') { res.writeHead(403); return res.end('origin required'); }
+          const chunks: Buffer[] = [];
+          let size = 0;
+          let aborted = false;
+          req.on('data', (d: Buffer) => {
+            if (aborted) return;
+            size += d.length;
+            if (size > 16 * 1024 * 1024) { aborted = true; res.writeHead(413); res.end('payload too large'); req.destroy(); }
+            else chunks.push(d);
+          });
+          req.on('end', () => {
+            if (aborted) return;
+            let parsed: unknown;
+            try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null'); }
+            catch { res.writeHead(400); return res.end('bad json'); }
+            // Runs in the 'end' callback, outside the handler's outer try; turn any
+            // failure into a logged 500 so the client sees a 5xx rather than a hang.
+            performReplay(store, parsed).then((result) => {
+              if (!result.ok) {
+                res.writeHead(result.code, { 'content-type': 'application/json' });
+                return res.end(JSON.stringify({ error: result.message }));
+              }
+              res.writeHead(201, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ key: result.key, status: result.status, durationMs: result.durationMs, error: result.error }));
+            }).catch((e) => {
+              log.warn('replay', String(e));
+              if (!res.headersSent) { res.writeHead(500); res.end('replay failed'); }
+            });
           });
           return;
         }

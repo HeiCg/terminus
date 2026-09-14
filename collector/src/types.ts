@@ -26,7 +26,10 @@ export type DeviceMessage = Hello | RequestEvent | ResponseEvent | WsOpen | WsFr
 // the additive MITM-proxy source. A proxy sees the SAME request Atlantis/patchWS
 // already reported as a SECOND, independent piece of evidence — the sources are
 // never merged, so `source` is what the UI/HAR filter on to tell them apart.
-export type Source = 'xhr' | 'atlantis' | 'proxy';
+// `replay` (T7) marks a request the collector re-sent from an existing entry via
+// POST /api/replay: the result is stored as a fresh entry with this source and a
+// `replayOf` back-reference, never merged into the original.
+export type Source = 'xhr' | 'atlantis' | 'proxy' | 'replay';
 
 // Why a body is not carried as recoverable bytes. `size`/`binary` are the legacy
 // DTO markers the UI still understands; `budget` marks a body dropped because the
@@ -62,6 +65,9 @@ export type Entry = {
   responseHeaders: Record<string, string>; responseBody: string | null; responseBodySize: number; responseBodyOmitted: BodyOmitted;
   durationMs: number | null;
   error: string | null;
+  // Set only on a replay entry (source 'replay'): the id of the entry this request
+  // was re-sent from. Optional and additive; absent on every captured entry.
+  replayOf?: { id: string };
 };
 
 // Ingest input for a captured exchange: everything of `Entry` except the text
