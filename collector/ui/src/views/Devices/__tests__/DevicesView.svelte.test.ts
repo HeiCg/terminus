@@ -45,7 +45,7 @@ function snapshot(over: Partial<SnapshotMessage> = {}): SnapshotMessage {
     type: 'snapshot', devices,
     entries: { items: [entry('iphone12abc', 'a', NOW - 8000), entry('iphone12abc', 'b', NOW - 4000), entry('pixel9xyzzz', 'c', NOW - 2000)], nextCursor: null },
     ws: { items: [ws('iphone12abc', 'w1')], nextCursor: null },
-    retention: { retainedBodyBytes: 2048, retainedMetadataBytes: 512, droppedEntries: 4, droppedSessions: 1, droppedFrames: 7, omittedBodies: 2, refusedSessions: 0, rejectedRecords: 0 },
+    retention: { retainedBodyBytes: 2048, retainedMetadataBytes: 512, droppedEntries: 4, droppedSessions: 1, droppedFrames: 7, omittedBodies: 2, refusedSessions: 0, rejectedRecords: 0, evictedForBodyBudget: 0 },
     atMax: false, truncated: false, paused: false, ...over,
   };
 }

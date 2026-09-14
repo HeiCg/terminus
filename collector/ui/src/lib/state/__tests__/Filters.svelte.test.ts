@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Store } from '../Store.svelte.js';
 import { Filters } from '../Filters.svelte.js';
+import { BodyCache } from '../../bodyCache.js';
 import * as format from '../../format.js';
 import type { SnapshotMessage, EntrySummary, WsSummary, BodyRef } from '../../protocol.js';
 import { entityKey } from '../../protocol.js';
@@ -302,5 +303,103 @@ describe('Filters', () => {
     expect(filters.hasBody).toBe(false);
     expect(filters.search).toBe('');
     expect(filters.sort).toEqual({ key: 'time', dir: 'desc' });
+  });
+});
+
+describe('Filters — mini-query (T6.2)', () => {
+  it('method: filters by an OR list, case-insensitively', () => {
+    const { filters } = seeded();
+    filters.search = 'method:post,delete';
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e10', 'e2', 'e4']);
+  });
+
+  it('status: accepts a class and a range', () => {
+    const { filters } = seeded();
+    filters.search = 'status:5xx';
+    expect(filters.rows.map((r) => r.id)).toEqual(['e5']);
+    filters.search = 'status:400-499';
+    expect(filters.rows.map((r) => r.id)).toEqual(['e4']);
+  });
+
+  it('host: and path: are substrings; source: is exact', () => {
+    const { filters } = seeded();
+    filters.search = 'host:b.test';
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e3', 'e9']);
+    filters.search = 'source:proxy';
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e3', 'e5', 'e9']);
+  });
+
+  it('composes typed terms with a free substring (AND)', () => {
+    const { filters } = seeded();
+    filters.search = 'method:get host:a.test users';
+    // GET + host a.test + url contains "users": e1 (d1) and e7 (d2)
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e1', 'e7']);
+  });
+
+  it('composes the query with the chip filters (AND)', () => {
+    const { filters } = seeded();
+    filters.device = 'd1';
+    filters.search = 'method:get';
+    // Every GET on d1: e1, e3, e5, e11.
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e1', 'e11', 'e3', 'e5']);
+    filters.type = 'xhr'; // now the WS-linked e11 drops out
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e1', 'e3', 'e5']);
+  });
+
+  it('body: matches resident body text when a cache is wired', () => {
+    const store = new Store();
+    store.apply([fixture()]);
+    const cache = new BodyCache();
+    cache.putRaw('h', 'the-secret-token');
+    const filters = new Filters(store, cache);
+    filters.search = 'body:secret';
+    // Every row whose request/response body is captured under sha "h".
+    expect(filters.rows.map((r) => r.id).sort()).toEqual(['e1', 'e2', 'e5', 'e9']);
+  });
+});
+
+describe('Filters — URL hash (T6.3)', () => {
+  it('a pristine filter set serializes to nothing', () => {
+    const { filters } = seeded();
+    expect(filters.toHash()).toBe('');
+  });
+
+  it('round-trips every serialized field', () => {
+    const { store, filters } = seeded();
+    filters.device = 'd2';
+    filters.type = 'errors';
+    filters.toggleStatus('4xx');
+    filters.toggleStatus('5xx');
+    filters.toggleSource('proxy');
+    filters.host = 'a.test';
+    filters.search = 'method:get token';
+    filters.setSort('size');
+
+    const restored = new Filters(store);
+    restored.applyHash(new URLSearchParams(filters.toHash()));
+
+    expect(restored.device).toBe('d2');
+    expect(restored.type).toBe('errors');
+    expect([...restored.statuses].sort()).toEqual(['4xx', '5xx']);
+    expect([...restored.sources]).toEqual(['proxy']);
+    expect(restored.host).toBe('a.test');
+    expect(restored.search).toBe('method:get token');
+    expect(restored.sort).toEqual({ key: 'size', dir: 'asc' });
+  });
+
+  it('applyHash ignores unknown/foreign keys and falls back to defaults', () => {
+    const { filters } = seeded();
+    filters.applyHash(new URLSearchParams('view=sockets&type=bogus&status=9xx&sort=nope'));
+    expect(filters.type).toBe('all');
+    expect(filters.statuses.size).toBe(0);
+    expect(filters.sort).toEqual({ key: 'time', dir: 'desc' });
+  });
+
+  it('a setter writes the filter state into location.hash', () => {
+    const { filters } = seeded();
+    filters.search = 'host:api';
+    expect(new URLSearchParams(location.hash.slice(1)).get('q')).toBe('host:api');
+    filters.clear();
+    expect(new URLSearchParams(location.hash.slice(1)).get('q')).toBeNull();
   });
 });

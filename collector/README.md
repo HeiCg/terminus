@@ -50,6 +50,18 @@ missing or expires, the UI shows a login screen instead of reconnecting in a
 silent loop. You can still drive the collector with the admin bearer directly
 (e.g. `curl` with `Authorization: Bearer <adminToken>`).
 
+The topbar search box takes a mini-query as well as a plain substring: space-separated
+`key:value` terms filter by `method:` (comma-separated list), `status:` (a code like
+`404`, a class like `5xx`, or a range like `400-499`), `host:`, `path:`, `source:`
+(`xhr|atlantis|proxy`), `device:`, and `body:` (over already-loaded response/request
+bodies); quote a value to include spaces (`host:"api v2"`), and any token without a
+known `key:` is matched as a free substring over the request's method and URL. Query
+terms combine with the filter-bar chips using AND. The active device, chips, sort and
+search are mirrored into the URL hash, so a filtered view is bookmarkable and
+shareable, and it is restored on reload. Press `?` (or ⌘/Ctrl-`/`) for a sheet listing
+every keyboard shortcut; in the WebSocket frame inspector the search box finds matches
+within the loaded frames and steps through them with Enter / Shift+Enter.
+
 The collector also writes the current admin token to `admin-token` in the state dir
 (`0600`, atomic, removed on a clean shutdown) so the [`terminus` CLI](../cli/README.md)
 running on the same machine can authenticate without copying a token. It carries the

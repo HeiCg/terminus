@@ -23,6 +23,10 @@ function comboFor(e: KeyboardEvent): string | null {
   const key = e.key.toLowerCase();
   if (mod && key === 'k') return 'mod+k';
   if (key === 'escape') return 'escape';
+  // The shortcuts sheet: `?` (Shift+/ on most layouts, so shift is expected) or
+  // mod+/. Both surface as the single `help` binding.
+  if (key === '?') return 'help';
+  if (mod && key === '/') return 'help';
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
     if (key === 'j') return 'j';
     if (key === 'k') return 'k';

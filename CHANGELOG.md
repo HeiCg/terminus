@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- UI search mini-query: the Capture search box parses `method:`, `status:` (code,
+  `5xx` class, or `400-499` range), `host:`, `path:`, `source:`, `device:` and
+  `body:` terms (quote for spaces, free text otherwise) and ANDs them with the
+  filter chips.
+- Shareable Capture URLs: the device, filter chips, sort and search are serialized
+  into the location hash and restored on reload (`history.replaceState`).
+- WebSocket frame search: the frame inspector finds text matches across the loaded
+  frames with an "N of M" counter and next/prev navigation (Enter / Shift+Enter);
+  binary frames never match.
+- Keyboard-shortcut sheet: `?` (or ⌘/Ctrl-`/`) opens a dialog listing every
+  shortcut, also reachable from the command palette.
 - Per-device capture channels: each device record now tracks which channels it
   arrived on (in-app ingest over WSS vs the Atlantis wire protocol). The Devices
   view shows channel chips and `terminus devices` gains a `CHANNELS` column.

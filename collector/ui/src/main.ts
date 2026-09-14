@@ -12,6 +12,7 @@ import { Sockets } from './lib/state/Sockets.svelte.js';
 import * as api from './lib/api.js';
 import { teardownOnLogout } from './lib/session/logout.js';
 import { rootContext } from './lib/context.js';
+import { readHashParams } from './lib/hash.js';
 import './lib/global.css';
 
 // Single mount point. index.html ships an empty #app; the built app.js (this
@@ -32,7 +33,7 @@ const client = new Client({ store, session });
 // here (and seeding them through context) means a tab switch preserves chips,
 // search, sort, selection, detail cache, selected socket and loaded frames. The
 // per-view `dispose()` methods survive for tests; nothing disposes them at runtime.
-const filters = new Filters(store);
+const filters = new Filters(store, cache);
 const selection = new Selection({ store, cache, api });
 const sockets = new Sockets({ store, cache, api, filters });
 
@@ -48,6 +49,12 @@ session.onLogout = () => teardownOnLogout({ client, store, cache, selection, soc
 
 clock.start();
 nav.view = Nav.fromLocation(location);
+// Restore the Capture filters from the hash querystring once, at boot, before the
+// first render (T6.3) — read here, not via a reactive effect. Read BEFORE
+// session.boot() strips the one-time admin token so a bookmarked filter URL that
+// also carried a token still restores. A pristine hash leaves every filter at its
+// default.
+filters.applyHash(readHashParams());
 // Browser Back/Forward walks the pushState hash Nav wrote; mirror it back.
 window.addEventListener('popstate', () => { nav.view = Nav.fromLocation(location); });
 void session.boot();
