@@ -1,5 +1,5 @@
 <script lang="ts">
-  type Props = { source: 'xhr' | 'atlantis' | 'proxy'; label?: boolean };
+  type Props = { source: 'xhr' | 'atlantis' | 'proxy' | 'replay'; label?: boolean };
   let { source, label = false }: Props = $props();
 </script>
 

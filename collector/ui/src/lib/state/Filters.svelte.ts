@@ -11,7 +11,7 @@ import { updateHashParams } from '../hash.js';
 export type TypeFilter = 'all' | 'xhr' | 'ws' | 'sse' | 'errors';
 export type SortKey = 'status' | 'method' | 'host' | 'path' | 'size' | 'duration' | 'time';
 type StatusBucket = '2xx' | '3xx' | '4xx' | '5xx';
-type SourceId = 'xhr' | 'atlantis' | 'proxy';
+type SourceId = 'xhr' | 'atlantis' | 'proxy' | 'replay';
 
 // One HTTP row as the table consumes it: the summary plus the derived display
 // fields (kind join, split host/path, status bucket, response size). `size` is
@@ -35,7 +35,7 @@ const ERROR_BUCKETS = new Set(['4xx', '5xx', 'error']);
 
 const TYPE_FILTERS: readonly TypeFilter[] = ['all', 'xhr', 'ws', 'sse', 'errors'];
 const STATUS_BUCKETS: readonly StatusBucket[] = ['2xx', '3xx', '4xx', '5xx'];
-const SOURCE_IDS: readonly SourceId[] = ['xhr', 'atlantis', 'proxy'];
+const SOURCE_IDS: readonly SourceId[] = ['xhr', 'atlantis', 'proxy', 'replay'];
 const SORT_KEYS: readonly SortKey[] = ['status', 'method', 'host', 'path', 'size', 'duration', 'time'];
 
 // Filters is the Capture view's query state and the single place the entry list

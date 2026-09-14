@@ -11,6 +11,7 @@
   import ResponseTab from './ResponseTab.svelte';
   import TimingTab from './TimingTab.svelte';
   import CurlTab from './CurlTab.svelte';
+  import ReplayButton from './ReplayButton.svelte';
 
   type Props = { selection: Selection };
   let { selection }: Props = $props();
@@ -62,6 +63,7 @@
         <span class="sep">·</span>
         <span class="time">{fmtTime(row.startedAt)}</span>
         <button type="button" class="curl-btn" onclick={copyCurl}>Copy as cURL</button>
+        <ReplayButton deviceId={row.deviceId} id={row.id} />
       </div>
     </header>
 
