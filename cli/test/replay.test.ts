@@ -53,7 +53,7 @@ describe('terminus replay (T7.2)', () => {
     expect(seen[before].method).toBe('POST');
     expect(seen[before].body).toBe('{"a":1}');
     const rep = h.store.entries('d1').find((e) => e.source === 'replay');
-    expect(rep?.replayOf).toEqual({ id: 'a1' });
+    expect(rep?.replayOf).toEqual({ id: 'a1', credentials: 'strip', stripped: [] });
   });
 
   it('applies --method, --url, repeatable --header and --body', async () => {
@@ -92,6 +92,32 @@ describe('terminus replay (T7.2)', () => {
     const parsed = JSON.parse(r.stdout) as { key: { id: string }; status: number };
     expect(parsed.status).toBe(200);
     expect(parsed.key.id.startsWith('replay-')).toBe(true);
+  });
+
+  it('strips captured credentials by default and lists them (T8.1)', async () => {
+    h.store.addEntry(entry({
+      id: 'c1',
+      requestHeaders: { 'content-type': 'application/json', authorization: 'Bearer secret', cookie: 'sid=1' },
+    }));
+    const before = seen.length;
+    const r = await runCli(['replay', 'd1/c1'], { harness: h });
+    expect(r.code).toBe(0);
+    expect(seen[before].headers.authorization).toBeUndefined();
+    expect(seen[before].headers.cookie).toBeUndefined();
+    expect(r.stdout).toContain('stripped: authorization, cookie');
+  });
+
+  it('--with-credentials re-sends the captured credentials (T8.1)', async () => {
+    h.store.addEntry(entry({
+      id: 'c2',
+      requestHeaders: { 'content-type': 'application/json', authorization: 'Bearer secret', cookie: 'sid=1' },
+    }));
+    const before = seen.length;
+    const r = await runCli(['replay', 'd1/c2', '--with-credentials'], { harness: h });
+    expect(r.code).toBe(0);
+    expect(seen[before].headers.authorization).toBe('Bearer secret');
+    expect(seen[before].headers.cookie).toBe('sid=1');
+    expect(r.stdout).not.toContain('stripped:');
   });
 
   it('exit 1 with a helpful message on an unknown entry (404)', async () => {

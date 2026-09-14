@@ -102,6 +102,7 @@ const COMMANDS: Record<string, Command> = {
         header: { type: 'string', arg: '<K:V>', help: 'override/add a request header (repeatable)' },
         body: { type: 'string', arg: '<string>', help: 'override the request body (utf-8)' },
         'body-file': { type: 'string', arg: '<path>', help: 'override the request body from a file' },
+        'with-credentials': { type: 'boolean', help: 'replay with the captured credentials (default: strip auth headers/cookies and token query params)' },
       },
     },
   },
@@ -146,7 +147,8 @@ Commands:
   tail [filters]         follow live traffic (Ctrl-C to stop); --last N, --json (NDJSON)
   ls [filters]           list captured entries; --limit N, --all
   show <dev>/<key>       one entry: headers, timing, bodies; --body req|res|none, --curl
-  replay <dev>/<key>     re-send a captured request; --method/--url/--header/--body
+  replay <dev>/<key>     re-send a captured request (credentials stripped by
+                         default); --method/--url/--header/--body/--with-credentials
   export [--har|--json]  download capture; -o <file> (default stdout)
   pause | resume         toggle the live stream
   clear [--device <id>]  drop captured data
