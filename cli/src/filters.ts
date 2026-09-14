@@ -33,10 +33,12 @@ export function buildEntryFilter(flags: Flags): EntryFilter {
   const statuses = flagString(flags, 'status')?.split(',').map((s) => s.trim()).filter(Boolean);
   const host = flagString(flags, 'host')?.toLowerCase();
   const path = flagString(flags, 'path')?.toLowerCase();
+  const source = flagString(flags, 'source');
   const errorsOnly = flagBool(flags, 'errors');
 
   return (e: EntrySummary): boolean => {
     if (device && e.deviceId !== device) return false;
+    if (source && e.source !== source) return false;
     if (methods && methods.length && !methods.includes((e.method || '').toUpperCase())) return false;
     if (statuses && statuses.length && !statuses.some((t) => statusMatches(e.status, t))) return false;
     if (host || path) {
