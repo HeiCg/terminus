@@ -16,6 +16,8 @@ import { VERSION } from './version.js';
 import { log } from './log.js';
 import { env, envName, envWithBare, parseByteSize } from './env.js';
 import { createCrashGuard } from './crashGuard.js';
+import { parseCollectorArgs, COLLECTOR_USAGE } from './mainArgs.js';
+import { loadCaptureFile } from './loadCapture.js';
 
 // Resolve a port from `TERMINUS_<name>` first, then the deprecated `NETCAPTURE_<name>`
 // (warns once via env()), and finally the bare unprefixed `<name>` (e.g. `PORT`),
@@ -72,6 +74,13 @@ const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '
 
 // How many unhandled crashes inside 60 s trip the loop guard (see below).
 const CRASH_THRESHOLD = Math.max(1, Math.floor(Number(env('CRASH_THRESHOLD') ?? 5) || 5));
+
+// Command-line options (T7.3). `--help`/`--version` short-circuit before any state
+// is touched; `--load` paths are imported into the store during boot.
+const ARGS = parseCollectorArgs(process.argv.slice(2));
+if (ARGS.help) { process.stdout.write(COLLECTOR_USAGE); process.exit(0); }
+if (ARGS.version) { process.stdout.write(`${VERSION}\n`); process.exit(0); }
+for (const u of ARGS.unknown) log.warn(`ignoring unrecognized argument: ${u}`);
 
 async function boot() {
   const host = os.hostname().replace(/\.local$/, '');
@@ -145,6 +154,12 @@ async function boot() {
     // The bodies budget is the store's compiled 64 MiB default unless the operator
     // raised it via TERMINUS_BODY_BUDGET (T7.5).
     const store = new Store(BODY_BUDGET != null ? { limits: { bodyBytes: BODY_BUDGET } } : {});
+    // Import any --load capture files before the listeners come up, so the UI's
+    // first snapshot already includes the imported records (T7.3).
+    for (const file of ARGS.loads) {
+      const { entries, sessions, frames } = loadCaptureFile(store, file);
+      log.info(`loaded ${file}: ${entries} entries, ${sessions} sessions, ${frames} frames`);
+    }
     const uiAuth = createUiAuth({ adminToken });
     // Shared ingest machinery (budget, scheduler, connection slots) across both LAN
     // capture channels. Built before the HTTP server so GET /api/status can report
