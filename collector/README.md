@@ -88,6 +88,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
 | `TERMINUS_INGEST_PAUSE_MAX_MS` | `30000` | collector | Max time a back-pressured (read-paused) WSS ingest connection may stay paused before it is closed with `1013` (overload). | `NETCAPTURE_INGEST_PAUSE_MAX_MS` |
 | `TERMINUS_ATLANTIS_PING_MS` | `30000` | collector | Interval between server→client Atlantis `ping` control frames on an authenticated connection; `0` disables pinging. | `NETCAPTURE_ATLANTIS_PING_MS` |
+| `TERMINUS_BODY_BUDGET` | `67108864` (64 MiB) | collector | Total bytes of captured request/response/frame bodies retained across all devices before the store evicts to make room. A positive integer of bytes, optional binary `k`/`m`/`g` suffix (e.g. `256m`); an invalid value is fatal at start. | `NETCAPTURE_BODY_BUDGET` |
 | `TERMINUS_PROXY` | off | collector | `=1` turns on the additive MITM proxy source (off by default). | `NETCAPTURE_PROXY` |
 | `TERMINUS_PROXY_PORT` | `8080` | collector | Proxy listener port (when the proxy is on). | `NETCAPTURE_PROXY_PORT` |
 | `TERMINUS_PROXY_ALLOW` | empty (rejects every client) | collector | Comma-separated device-IP allowlist for the proxy. An empty allowlist rejects every client, so there is no open relay. | `NETCAPTURE_PROXY_ALLOW` |
@@ -117,10 +118,6 @@ Notes:
   plaintext passcode was sent in the clear and is never reused as a v2 credential.
   If either is set, the collector prints a migration notice; unset it and pair
   devices from the authenticated UI instead.
-- **Body budget is fixed at 64 MiB.** The body-store retention budget is a
-  compiled default (`STORE_DEFAULT_LIMITS.bodyBytes`) and is not configurable via
-  an environment variable in the current collector. (The UI's omission hint refers
-  to a `TERMINUS_BODY_BUDGET`, but the collector does not read it today.)
 - **`TERMINUS_PROXY_CA`** is read on the **device / M-agent** side (where to load
   the proxy CA), not by the collector.
 

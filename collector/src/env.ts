@@ -45,3 +45,15 @@ export function envName(name: string): string {
   if ((preferred == null || preferred === '') && legacy != null && legacy !== '') return `NETCAPTURE_${name}`;
   return `TERMINUS_${name}`;
 }
+
+// Parse a byte-size value: a positive integer, optionally suffixed `k`/`m`/`g`
+// (case-insensitive, binary multiples — 1k = 1024). Returns the byte count, or
+// null when the input is not a valid positive size. Used for TERMINUS_BODY_BUDGET
+// (T7.5); the caller decides what an invalid value means (main.ts: fatal).
+export function parseByteSize(raw: string): number | null {
+  const m = /^(\d+)([kmg])?$/i.exec(raw.trim());
+  if (!m) return null;
+  const units: Record<string, number> = { k: 1024, m: 1024 * 1024, g: 1024 * 1024 * 1024 };
+  const n = Number(m[1]) * (m[2] ? units[m[2].toLowerCase()] : 1);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
