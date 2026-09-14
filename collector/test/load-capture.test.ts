@@ -87,12 +87,15 @@ describe('HAR round-trip (T7.3)', () => {
     const doc = await exportDoc(src, 'har');
     const dst = new Store();
     loadCaptureFileDoc(dst, doc);
-    // HTTP entries land on the synthetic har device.
-    const imported = dst.entries('har:cap.har');
+    // A Terminus HAR carries the entry's identity (T9), so it lands on the real
+    // device/id it was captured under — not the synthetic `har:<basename>` device.
+    const imported = dst.entries('d1');
     expect(imported).toHaveLength(1);
+    expect(imported[0].id).toBe('r1');
+    expect(imported[0].source).toBe('atlantis');
     expect(imported[0].method).toBe('GET');
     expect(imported[0].url).toBe('https://api.example.io/blob');
-    const body = dst.entryBody('har:cap.har', imported[0].id, 'response');
+    const body = dst.entryBody('d1', imported[0].id, 'response');
     expect(body?.state).toBe('captured');
     expect(Buffer.from(body!.bytes!)).toEqual(bin);
   });
@@ -143,6 +146,80 @@ describe('HAR round-trip (T7.3)', () => {
 
   it('rejects an unrecognized document', () => {
     expect(() => loadCaptureDoc(new Store(), { nope: true }, 'x')).toThrow(/unrecognized/);
+  });
+});
+
+// T9.3: a HAR export of a store with entries from several devices/sources and
+// text/binary/omitted bodies (plus a replay carrying `replayOf`) → `--load` into a
+// fresh store reproduces the same set: deviceId, id, source, method, url, status,
+// headers, recoverable bodies, and replayOf — no synthetic `har:*` device.
+describe('HAR lossless round-trip (T9.3)', () => {
+  const bin = Buffer.from([0, 255, 195, 40, 1, 2]);
+
+  function seed(): Store {
+    const s = new Store();
+    // d1: text bodies (xhr), captured binary response (atlantis), omitted response (proxy).
+    s.addEntryInput({
+      id: 'e-text', deviceId: 'd1', source: 'xhr', startedAt: 1_700_000_000_000,
+      method: 'POST', url: 'https://api.example.io/a?q=1',
+      requestHeaders: { 'content-type': 'application/json', accept: '*/*' }, requestBytes: Buffer.from('{"a":1}', 'utf8'), requestBodySize: 7, requestBodyOmitted: null,
+      status: 200, statusText: 'OK', responseHeaders: { 'content-type': 'application/json' }, responseBytes: Buffer.from('{"ok":true}', 'utf8'), responseBodySize: 11, responseBodyOmitted: null,
+      durationMs: 12, error: null,
+    });
+    s.addEntryInput({
+      id: 'e-bin', deviceId: 'd1', source: 'atlantis', startedAt: 1_700_000_000_100,
+      method: 'GET', url: 'https://api.example.io/blob',
+      requestHeaders: {}, requestBytes: null, requestBodySize: 0, requestBodyOmitted: null,
+      status: 200, statusText: 'OK', responseHeaders: { 'content-type': 'application/octet-stream' }, responseBytes: bin, responseBodySize: bin.length, responseBodyOmitted: 'binary',
+      durationMs: 5, error: null,
+    });
+    s.addEntryInput({
+      id: 'e-omit', deviceId: 'd1', source: 'proxy', startedAt: 1_700_000_000_200,
+      method: 'GET', url: 'https://api.example.io/big',
+      requestHeaders: {}, requestBytes: null, requestBodySize: 0, requestBodyOmitted: null,
+      status: 200, statusText: 'OK', responseHeaders: { 'content-type': 'application/octet-stream' }, responseBytes: null, responseBodySize: 5_000_000, responseBodyOmitted: 'size',
+      durationMs: 9, error: null,
+    });
+    // d2: a replay entry with a back-reference.
+    s.addEntryInput({
+      id: 'e-replay', deviceId: 'd2', source: 'replay', startedAt: 1_700_000_000_300,
+      method: 'POST', url: 'https://api.example.io/a?q=1',
+      requestHeaders: { 'content-type': 'application/json' }, requestBytes: Buffer.from('{"a":1}', 'utf8'), requestBodySize: 7, requestBodyOmitted: null,
+      status: 201, statusText: 'Created', responseHeaders: { 'content-type': 'application/json' }, responseBytes: Buffer.from('{"ok":1}', 'utf8'), responseBodySize: 8, responseBodyOmitted: null,
+      replayOf: { id: 'e-text' },
+      durationMs: 7, error: null,
+    });
+    return s;
+  }
+
+  type Norm = { id: string; deviceId: string; source: string; method: string; url: string; status: number | null; reqCt?: string; respState?: string; respBytes?: string; replayOf?: { id: string } };
+  function norm(store: Store): Norm[] {
+    return store.entries().map((e): Norm => {
+      const body = store.entryBody(e.deviceId, e.id, 'response');
+      return {
+        id: e.id, deviceId: e.deviceId, source: e.source, method: e.method, url: e.url, status: e.status,
+        reqCt: e.requestHeaders['content-type'], respState: body?.state,
+        respBytes: body?.bytes ? Buffer.from(body.bytes).toString('base64') : undefined,
+        replayOf: e.replayOf,
+      };
+    }).sort((a, b) => (a.deviceId + a.id).localeCompare(b.deviceId + b.id));
+  }
+
+  it('reproduces deviceId, id, source, method, url, status, headers, bodies and replayOf', async () => {
+    const src = seed();
+    const doc = await exportDoc(src, 'har');
+    const dst = new Store();
+    const summary = loadCaptureDoc(dst, doc, 'cap.har');
+    expect(summary.entries).toBe(4);
+    expect(norm(dst)).toEqual(norm(src));
+    // Devices are the real ones, never a synthetic har:<basename> device.
+    expect(dst.devices().map((d) => d.deviceId).sort()).toEqual(['d1', 'd2']);
+    // The omitted body stays omitted (not fabricated) through the round-trip.
+    expect(dst.entryBody('d1', 'e-omit', 'response')?.state).toBe('omitted');
+    // The captured binary is recovered byte-for-byte.
+    expect(Buffer.from(dst.entryBody('d1', 'e-bin', 'response')!.bytes!)).toEqual(bin);
+    // The replay back-reference survives.
+    expect(dst.entries('d2').find((e) => e.id === 'e-replay')!.replayOf).toEqual({ id: 'e-text' });
   });
 });
 

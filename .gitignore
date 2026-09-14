@@ -11,7 +11,6 @@ collector/dist-ui/
 .claude/
 .codex/
 .superpowers/
-.mcp.json
 
 # Test output
 test-results/

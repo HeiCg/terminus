@@ -55,6 +55,9 @@ effects live in `{@attach}` lifecycles or explicit event handlers. The rule is
 enforced by ESLint (`npm run lint:ui`) and by a unit test
 (`ui/src/__tests__/no-effect.test.ts`) that fails if any source reintroduces them.
 
+The Svelte MCP server is configured in `.mcp.json` (committed). Consult it for
+Svelte 5 runes/API guidance before writing or changing UI under `collector/ui`.
+
 ## Commit messages
 
 We use [Conventional Commits](https://www.conventionalcommits.org/): a
