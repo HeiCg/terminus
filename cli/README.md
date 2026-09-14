@@ -67,7 +67,7 @@ With none of these you get:
 | `terminus tail [filters]` | Connect to /ui, print the last N entries (`--last 50`) then follow live traffic. One line per entry (time, device, method, status, duration, host+path); WebSocket/SSE frames as `WS ↑/↓`. Ctrl-C stops cleanly. `--json` emits NDJSON of every event. Reconnects automatically with exponential backoff after a dropped connection (`--no-reconnect` to disable). |
 | `terminus ls [filters]` | `GET /api/entries` (paged). `--limit N`, `--all`. Same columns as `tail`. With filters, `--limit N` pages through the store to gather up to N matches (not just the first page). |
 | `terminus show <deviceId>/<entryKey>` | One entry: request/response headers, timing, and bodies (pretty JSON when JSON, text when textual, `<binary N bytes>` otherwise). `--body request\|response\|none`, `--curl` prints a reproduction curl. |
-| `terminus replay <deviceId>/<entryKey>` | `POST /api/replay`: re-send a captured request from the collector's machine and store the result as a new `replay` entry. Overrides: `--method`, `--url`, `--header K:V` (repeatable), `--body <string>`, `--body-file <path>`. Prints the outcome status, duration and the new entry key; `--json` emits the endpoint response. **The request leaves your machine and reuses the captured credentials** — see the security note. |
+| `terminus replay <deviceId>/<entryKey>` | `POST /api/replay`: re-send a captured request from the collector's machine and store the result as a new `replay` entry. Overrides: `--method`, `--url`, `--header K:V` (repeatable), `--body <string>`, `--body-file <path>`. Credentials are **stripped by default** (auth headers/cookies and token query params); `--with-credentials` re-sends them. Prints the outcome status, duration, the new entry key, and any `stripped:` names; `--json` emits the endpoint response. **The request leaves your machine** — see the security note. |
 | `terminus export [--har\|--json] [-o file]` | Download the capture as HAR (default) or JSON; stdout unless `-o`. |
 | `terminus pause` / `terminus resume` | Toggle the live stream (`POST /api/pause` with `{paused}`). |
 | `terminus clear [--device <id>]` | Drop captured data, optionally for one device. |
@@ -117,10 +117,15 @@ terminus completion fish | source
 ### Replay is a real request
 
 `terminus replay` re-sends the captured request from the collector's machine to
-the original host, reusing the **captured credentials** (auth headers, cookies).
-The response is stored as a new entry with `source: replay` and a `replayOf`
-back-reference to the original — it is never merged into the original. Only replay
-what you intend to send again.
+the original host. **Captured credentials are stripped by default** — the
+`authorization`/`cookie` headers, `x-*` token/secret/key/auth headers, and
+credential-bearing query params are removed before the request leaves, and the
+removed names are printed (`stripped: authorization, cookie`). Pass
+`--with-credentials` to re-send them verbatim. The response is stored as a new
+entry with `source: replay` and a `replayOf` back-reference to the original — it is
+never merged into the original. Even without credentials, a replay re-issues the
+request, so a non-idempotent request repeats its side effect. Only replay what you
+intend to send again.
 
 ## Output
 
