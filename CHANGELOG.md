@@ -79,6 +79,8 @@ All notable changes to this project are documented here. The format is based on
 - `TERMINUS_BODY_BUDGET` makes the bodies retention budget configurable (a positive
   byte count, optional binary `k`/`m`/`g` suffix; default 64 MiB); an invalid value
   is fatal at start.
+- Svelte MCP server configuration (`.mcp.json`, committed): points at
+  `https://mcp.svelte.dev/mcp` for Svelte 5 guidance when working on the UI.
 
 ### Changed
 
