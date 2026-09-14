@@ -310,6 +310,19 @@ export function logPairingHostDrift(id: CollectorIdentity, e: typeof env = env, 
   return w;
 }
 
+// Boot-time expiry check: the cert is issued for 365 days but is a hard error the
+// moment it lapses, so warn while there is still time to rotate. Returns the warning
+// text when the cert expires within `thresholdMs` (default 30 days), else null.
+// Pure so it can be unit-tested with an injected clock; main() logs the result.
+export const CERT_EXPIRY_WARN_MS = 30 * 24 * 60 * 60 * 1000;
+export function certExpiryWarning(id: CollectorIdentity, now: number = Date.now(), thresholdMs: number = CERT_EXPIRY_WARN_MS): string | null {
+  const remaining = id.notAfter - now;
+  if (remaining >= thresholdMs) return null;
+  const on = new Date(id.notAfter).toISOString();
+  const when = remaining <= 0 ? 'has expired' : `expires on ${on}`;
+  return `collector certificate ${when}; run \`npm run identity:rotate -w collector\` to reissue (this invalidates every existing pairing — devices must re-pair).`;
+}
+
 // Project a persisted identity to the device pairing blob. `host` overrides the
 // advertised host — main passes `pairingHost(id, env)` so /api/pairing (and the QR
 // and CLI built from it) carry the LAN IPv4, not the unresolvable meta hostname.

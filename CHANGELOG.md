@@ -28,6 +28,18 @@ All notable changes to this project are documented here. The format is based on
 - ESLint now covers `collector/src` and `collector/test`; CI runs on Ubuntu and
   macOS with npm caching; `LICENSE` ships in both packages; Dependabot, issue
   templates, and CODEOWNERS added.
+- Log levels: `log.debug` plus `TERMINUS_LOG_LEVEL` (`debug|info|warn|error`, default
+  `info`; an invalid value falls back to `info` with a warning). Every line now
+  carries an ISO-8601 timestamp and the level, e.g.
+  `[terminus] 2026-09-14T10:00:00.000Z WARN ...`.
+- Crash-loop guard: a single `uncaughtException`/`unhandledRejection` is still logged
+  and swallowed, but reaching `TERMINUS_CRASH_THRESHOLD` (default `5`) within 60 s now
+  triggers a clean shutdown (state lock released, `admin-token` removed) with exit 1.
+- Certificate expiry warning: at boot the collector warns when the identity
+  certificate is within 30 days of expiry, naming the date and the rotate command.
+- Run as a macOS service: `collector/scripts/launchd/` ships a launchd plist template
+  with `install.sh`/`uninstall.sh`, and the README gains a "Run as a service (macOS)"
+  section.
 
 ### Changed
 
@@ -37,6 +49,10 @@ All notable changes to this project are documented here. The format is based on
   drift.
 - Atlantis traffic is aliased onto the app's ingest `deviceId`, so a device seen on
   both channels is a single device record.
+- Ports now resolve `TERMINUS_PORT`, `TERMINUS_INGEST_PORT` and `TERMINUS_ATLANTIS_PORT`
+  (each with the deprecated `NETCAPTURE_*` fallback and a one-time warning); the bare
+  `PORT`/`INGEST_PORT`/`ATLANTIS_PORT` spellings stay accepted as legacy. Invalid-port
+  errors name the spelling actually read.
 
 ### Fixed
 
@@ -44,7 +60,8 @@ All notable changes to this project are documented here. The format is based on
   before admitting a new body, instead of permanently omitting bodies once the
   64 MiB budget filled; evictions are counted as `evictedForBodyBudget`.
 - Rejected device authentication on the ingest WSS is now logged (rate-limited,
-  token never printed) and counted in `ingest.rejectedDeviceAuth`.
+  token never printed) and counted in `ingest.rejectedDeviceAuth`. A rejected Atlantis
+  connection (bad device token) now increments the same counter, not just a log line.
 - `/health`, the HAR creator, and the boot banner report the real `package.json`
   version instead of a hardcoded string.
 - `terminus ls --limit N` with filters pages through the store until N matches

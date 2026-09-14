@@ -201,7 +201,7 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
         const ev = decodeAtlantis(frame, PREAUTH_LIMITS);
         budget.release(frame.length); // handled inline, not via the scheduler
         if (!ev || ev.kind !== 'connection') { log.warn('atlantis: first frame not a ConnectionPackage', key); authError(); return 'stop'; }
-        if (!verifyDeviceToken(ev.passcode, identity.deviceToken)) { log.warn('atlantis: rejected connection (bad token)', ev.deviceKey); authError(); return 'stop'; }
+        if (!verifyDeviceToken(ev.passcode, identity.deviceToken)) { scheduler.noteRejectedAuth(); log.warn('atlantis: rejected connection (bad token)', ev.deviceKey); authError(); return 'stop'; }
         authorized = true; clearTimeout(authTimer); acc.setMaxFrame(MAX_FRAME_V2);
         key = ev.deviceKey;
         applyAtlantisEvent(store, ev, connId);

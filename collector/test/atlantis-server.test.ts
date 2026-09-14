@@ -7,6 +7,7 @@ import fsp from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
 import { Store } from '../src/store.js';
 import { startAtlantisServer } from '../src/atlantis/server.js';
+import { createIngestShared } from '../src/deviceServer.js';
 import { createIdentity } from '../src/security/identity.js';
 import { FrameAccumulator } from '../src/atlantis/frames.js';
 import type { CollectorIdentity } from '../src/security/types.js';
@@ -146,6 +147,32 @@ describe('startAtlantisServer (TLS v2)', () => {
     expect(closed).toBe(true);
     expect(store.entries('dev-noise')).toHaveLength(0);
   }));
+
+  it('counts a rejected connection in the shared ingest scheduler stats (T5.5)', async () => {
+    const store = new Store();
+    const shared = createIngestShared();
+    const srv = startAtlantisServer(store, 0, { identity, host: '127.0.0.1', shared });
+    await new Promise<void>((r) => srv.once('listening', r));
+    const port = (srv.address() as net.AddressInfo).port;
+    try {
+      const s = await connectTls(port);
+      const control = readControl(s);
+      const closed = new Promise<void>((r) => s.on('close', () => r()));
+      s.write(connection('dev-bad', { passcode: 'wrong-token' }));
+      expect(await control).toBe('auth_error');
+      await closed;
+      expect(shared.scheduler.stats().rejectedDeviceAuth).toBe(1);
+      // A subsequent good connection does not further bump the rejection counter.
+      const ok = await connectTls(port);
+      const okControl = readControl(ok);
+      ok.write(connection('dev-ok', { passcode: identity.deviceToken }));
+      expect(await okControl).toBe('ready');
+      expect(shared.scheduler.stats().rejectedDeviceAuth).toBe(1);
+      ok.destroy();
+    } finally {
+      srv.close();
+    }
+  });
 
   it('closes a pre-auth connection whose first frame is oversize', () => withServer(async (port, store) => {
     const s = await connectTls(port);
