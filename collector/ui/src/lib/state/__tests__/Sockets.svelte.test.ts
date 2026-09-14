@@ -338,7 +338,7 @@ describe('Sockets — frames', () => {
     expect(sockets.framesStatus).toBe('idle');
   });
 
-  it('visibleFrames respects direction, binary, and search over cached previews', async () => {
+  it('visibleFrames respects the direction/binary chips only, never the search query', async () => {
     const api = {
       fetchFrames: vi.fn(async () => page([
         frame(0, { direction: 'in', binary: true }),
@@ -360,12 +360,48 @@ describe('Sockets — frames', () => {
     expect(sockets.visibleFrames.map((f) => f.sequence)).toEqual([0]);
     sockets.binaryOnly = false;
 
-    // Search matches only frames whose body has been fetched into the cache.
-    await sockets.toggleFrame(0);
+    // A search query never removes frames from the visible list.
     sockets.search = 'needle';
-    expect(sockets.visibleFrames.map((f) => f.sequence)).toEqual([0]);
+    expect(sockets.visibleFrames.map((f) => f.sequence)).toEqual([0, 1]);
+  });
+
+  it('search finds matches over cached frame text; a binary frame never matches', async () => {
+    const api = {
+      fetchFrames: vi.fn(async () => page([
+        frame(0, { direction: 'in', binary: true }),
+        frame(1, { direction: 'out', binary: false }),
+      ])),
+      fetchFrameBody: vi.fn(async () => ({ kind: 'ok', text: 'needle-in-haystack' }) as const),
+    };
+    const sockets = new Sockets({ store, cache, api });
+    store.apply([{ type: 'ws', session: ws({ wsId: 'w1' }) }]);
+    await sockets.select('w1');
+
+    // No matches before bodies are cached (previews are only present once fetched).
+    sockets.search = 'needle';
+    expect(sockets.matchCount).toBe(0);
+
+    // Cache both bodies. The binary frame's cached text contains the query too, but
+    // binary frames are excluded — only the text frame (seq 1) matches.
+    await sockets.toggleFrame(0);
+    await sockets.toggleFrame(1);
+    expect(sockets.matches.map((f) => f.sequence)).toEqual([1]);
+    expect(sockets.matchCount).toBe(1);
+
+    // Navigation reports position and returns the sequence to scroll to; wraps.
+    expect(sockets.matchPos).toBe(0); // nothing navigated to yet
+    expect(sockets.currentMatchSeq).toBeNull();
+    expect(sockets.nextMatch()).toBe(1);
+    expect(sockets.matchPos).toBe(1);
+    expect(sockets.currentMatchSeq).toBe(1);
+    expect(sockets.nextMatch()).toBe(1); // single match wraps back to itself
+    expect(sockets.prevMatch()).toBe(1);
+
+    // Setting the query re-arms the cursor; a miss clears the match set.
     sockets.search = 'missing';
-    expect(sockets.visibleFrames).toEqual([]);
+    expect(sockets.matchCount).toBe(0);
+    expect(sockets.matchPos).toBe(0);
+    expect(sockets.nextMatch()).toBeNull();
   });
 
   it('live-tails a new frame for the selected session onto the newest window', async () => {

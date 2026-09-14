@@ -146,4 +146,38 @@ describe('FrameTimeline', () => {
     expect(screen.getByRole('radio', { name: '↓ In' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Load older' })).toBeDisabled();
   });
+
+  it('finds matches in loaded frames, counts them, and navigates next/prev (T6.1)', async () => {
+    const api = {
+      fetchFrames: vi.fn(async () => page([frame(0), frame(1)])),
+      fetchFrameBody: vi.fn(async () => ({ kind: 'ok', text: 'hello-needle-world' }) as const),
+    };
+    const sockets = new Sockets({ store, cache, api });
+    store.apply([{ type: 'ws', session: ws({ wsId: 'w1' }) }]);
+    await sockets.select('w1');
+    // Cache both bodies so their text is searchable.
+    await sockets.toggleFrame(0);
+    await sockets.toggleFrame(1);
+
+    renderTimeline(sockets);
+
+    const input = screen.getByLabelText('Search frames');
+    await fireEvent.input(input, { target: { value: 'needle' } });
+    // Both frames match; nothing navigated to yet.
+    expect(screen.getByTestId('frame-search-count')).toHaveTextContent('0 of 2');
+    // The list is not filtered — both rows remain.
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(sockets.currentMatchSeq).toBe(0);
+    expect(screen.getByTestId('frame-search-count')).toHaveTextContent('1 of 2');
+
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(sockets.currentMatchSeq).toBe(1);
+    expect(screen.getByTestId('frame-search-count')).toHaveTextContent('2 of 2');
+
+    // Shift+Enter steps backward.
+    await fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    expect(sockets.currentMatchSeq).toBe(0);
+  });
 });

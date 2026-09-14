@@ -23,6 +23,34 @@
     { id: 'out', label: '↑ Out' },
   ];
 
+  // The frame scroll container, captured by the same attachment that registers the
+  // live-scroll callback (below), so search navigation can scroll a matched frame
+  // into view without a separate bind.
+  let framesEl: HTMLElement | null = null;
+
+  // True when the timeline is only a window onto a longer session (Load newer /
+  // older is available): search then covers just the loaded frames, and the
+  // toolbar says so.
+  const partial = $derived(sockets.canLoadOlder || sockets.canLoadNewer);
+
+  // Step to the next/previous match and scroll it into view. Deferred a frame so
+  // the scroll runs after any highlight class has painted. A user gesture (Enter /
+  // button), never a reactive effect.
+  function navigate(dir: 1 | -1): void {
+    const seq = dir > 0 ? sockets.nextMatch() : sockets.prevMatch();
+    if (seq == null) return;
+    requestAnimationFrame(() => {
+      framesEl?.querySelector<HTMLElement>(`[data-testid="ws-frame-${seq}"]`)?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function onSearchKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      navigate(e.shiftKey ? -1 : 1);
+    }
+  }
+
   const meta = $derived.by(() => {
     const s = sockets.selected;
     if (!s) return '';
@@ -45,10 +73,11 @@
   // the next animation frame so it runs after the swapped window has painted — an
   // attachment, not a reactive effect.
   function registerLiveScroll(node: HTMLElement) {
+    framesEl = node;
     sockets.scrollToLive = () => {
       requestAnimationFrame(() => { node.scrollTop = node.scrollHeight; });
     };
-    return () => { sockets.scrollToLive = null; };
+    return () => { sockets.scrollToLive = null; framesEl = null; };
   }
 </script>
 
@@ -81,10 +110,34 @@
       <input
         class="search"
         type="search"
-        placeholder="search frames…"
+        placeholder="find in frames…"
         aria-label="Search frames"
-        bind:value={sockets.search}
+        value={sockets.search}
+        oninput={(e) => (sockets.search = e.currentTarget.value)}
+        onkeydown={onSearchKeydown}
       />
+      {#if sockets.search.trim()}
+        <span class="matchnav" data-testid="frame-search-count">
+          <span class="count">{sockets.matchPos} of {sockets.matchCount}</span>
+          <button
+            type="button"
+            class="nav"
+            aria-label="Previous match"
+            disabled={sockets.matchCount === 0}
+            onclick={() => navigate(-1)}
+          >↑</button>
+          <button
+            type="button"
+            class="nav"
+            aria-label="Next match"
+            disabled={sockets.matchCount === 0}
+            onclick={() => navigate(1)}
+          >↓</button>
+          {#if partial}
+            <span class="scope" title="Search covers only the frames loaded into this window">(loaded frames only)</span>
+          {/if}
+        </span>
+      {/if}
       <div class="grow"></div>
       {#if sockets.canJumpToLive}
         <Button variant="secondary" size="sm" onclick={() => sockets.jumpToLive()}>
@@ -124,7 +177,7 @@
 
 {#snippet frameRow(fr: FrameSummary)}
   {@const body = sockets.bodies[fr.sequence]}
-  <div class="frame" role="listitem" class:expanded={sockets.expanded.has(fr.sequence)}>
+  <div class="frame" role="listitem" class:expanded={sockets.expanded.has(fr.sequence)} class:current={sockets.currentMatchSeq === fr.sequence}>
     <button
       type="button"
       class="framerow"
@@ -259,6 +312,44 @@
   .search::placeholder {
     color: var(--fg-muted);
   }
+  .matchnav {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+  .matchnav .count {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .matchnav .nav {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    font-size: 12px;
+    color: var(--fg-secondary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .matchnav .nav:hover:not(:disabled) {
+    color: var(--fg-primary);
+    background: var(--bg-surface);
+  }
+  .matchnav .nav:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .matchnav .scope {
+    font-size: 11px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
   .grow {
     flex: 1 1 auto;
   }
@@ -315,6 +406,14 @@
   }
   .frame.expanded > .framerow {
     background: var(--bg-surface);
+  }
+  /* The current search match: a left accent bar + tint so next/prev is legible as
+     the timeline scrolls it into view. */
+  .frame.current {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .frame.current > .framerow {
+    background: var(--tint-surface);
   }
   .glyph {
     flex: 0 0 auto;

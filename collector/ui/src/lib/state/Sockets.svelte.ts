@@ -82,7 +82,17 @@ export class Sockets {
   hasNewer = $state(false);
   direction = $state<FrameDirection>('all');
   binaryOnly = $state(false);
-  search = $state('');
+  // Frame search is a FIND, not a filter (T6.1): the list keeps showing every
+  // direction/binary-filtered frame; the query only drives a match set the
+  // toolbar steps through (next/prev) and the "N of M" counter. Setting the query
+  // re-arms the cursor to "nothing navigated yet" so the first Enter lands on the
+  // first match.
+  #search = $state('');
+  get search(): string { return this.#search; }
+  set search(v: string) { this.#search = v; this.#matchCursor = -1; }
+  // Index into `matches`; -1 means the user has not navigated yet (counter shows
+  // "0 of M"). Clamped on read so a shrinking match set never dangles it.
+  #matchCursor = $state(-1);
   expanded = new SvelteSet<number>();
   bodies = $state<Record<number, BodyState>>({});
 
@@ -116,6 +126,8 @@ export class Sockets {
     this.#tailPending = false;
     this.#tailing = false;
     this.atOldest = false;
+    this.#search = '';
+    this.#matchCursor = -1;
   }
 
   // Sessions for the list column: newest first (openedAt desc), narrowed by the
@@ -143,23 +155,67 @@ export class Sockets {
   // store. Frame fetches read `deviceId` from here.
   selected = $derived.by((): WsSummary | null => this.#store.ws.find((s) => s.wsId === this.selectedId) ?? null);
 
-  // The loaded frames narrowed by direction/binary and, when a query is present,
-  // by a substring match over each frame's cached text preview (only frames whose
-  // body has been fetched carry a preview to match). Reads `bodies` so a preview
-  // that arrives after the query is set refreshes the result.
-  visibleFrames = $derived.by((): FrameSummary[] => {
-    const q = this.search.trim().toLowerCase();
-    const bodies = this.bodies; // dependency: refresh matches as frame bodies cache
-    return this.frames.filter((fr) => {
+  // The loaded frames narrowed by the direction/binary CHIPS only — never by the
+  // search query. Search is a find over this set (see `matches`), so every frame
+  // the chips allow stays visible while the user steps through matches.
+  visibleFrames = $derived.by((): FrameSummary[] =>
+    this.frames.filter((fr) => {
       if (this.direction !== 'all' && fr.direction !== this.direction) return false;
       if (this.binaryOnly && !fr.binary) return false;
-      if (q) {
-        const text = this.#previewFrom(fr, bodies);
-        if (text == null || !text.toLowerCase().includes(q)) return false;
-      }
       return true;
+    }),
+  );
+
+  // The frames the current query matches, within the visible set: a substring hit
+  // over the cached text preview (only frames whose body has been fetched carry a
+  // preview). Binary frames NEVER match, even when a cached preview would contain
+  // the query. Empty when the query is blank. Reads `bodies` so a preview that
+  // arrives after the query is set refreshes the result.
+  matches = $derived.by((): FrameSummary[] => {
+    const q = this.#search.trim().toLowerCase();
+    if (!q) return [];
+    const bodies = this.bodies; // dependency: refresh matches as frame bodies cache
+    return this.visibleFrames.filter((fr) => {
+      if (fr.binary) return false;
+      const text = this.#previewFrom(fr, bodies);
+      return text != null && text.toLowerCase().includes(q);
     });
   });
+
+  matchCount = $derived(this.matches.length);
+
+  // 1-based position of the current match, or 0 when there are none / none yet
+  // navigated — the "N of M" counter's N.
+  matchPos = $derived.by((): number => {
+    const count = this.matches.length;
+    if (count === 0 || this.#matchCursor < 0) return 0;
+    return Math.min(this.#matchCursor, count - 1) + 1;
+  });
+
+  // The sequence of the current match, for the view to highlight/scroll to, or
+  // null when there are no matches or none has been navigated to yet.
+  currentMatchSeq = $derived.by((): number | null => {
+    const count = this.matches.length;
+    if (count === 0 || this.#matchCursor < 0) return null;
+    return this.matches[Math.min(this.#matchCursor, count - 1)].sequence;
+  });
+
+  // Advance to the next match (wrapping), returning its sequence so the view can
+  // scroll to it, or null when there is nothing to match. Enter in the search box.
+  nextMatch(): number | null {
+    const count = this.matches.length;
+    if (count === 0) return null;
+    this.#matchCursor = this.#matchCursor < 0 ? 0 : (this.#matchCursor + 1) % count;
+    return this.matches[this.#matchCursor].sequence;
+  }
+
+  // Step to the previous match (wrapping). Shift+Enter in the search box.
+  prevMatch(): number | null {
+    const count = this.matches.length;
+    if (count === 0) return null;
+    this.#matchCursor = this.#matchCursor <= 0 ? count - 1 : this.#matchCursor - 1;
+    return this.matches[this.#matchCursor].sequence;
+  }
 
   // True when there is an older page left to fetch and a session is loaded.
   canLoadOlder = $derived(this.framesStatus === 'done' && this.frames.length > 0 && !this.atOldest);
@@ -207,6 +263,7 @@ export class Sockets {
     this.frames = [];
     this.expanded.clear();
     this.bodies = {};
+    this.#matchCursor = -1;
     this.#loadedOlder = false;
     this.#tailPending = false;
     this.atOldest = false;
