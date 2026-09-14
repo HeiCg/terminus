@@ -12,6 +12,7 @@ import { runPause, runResume } from './commands/pauseResume.js';
 import { runClear } from './commands/clear.js';
 import { runDevices } from './commands/devices.js';
 import { runPair } from './commands/pair.js';
+import { runReplay } from './commands/replay.js';
 import { VERSION } from './version.js';
 import { type CommandSpec, valueFlagNames, validateFlags, commandHelp } from './flagspec.js';
 
@@ -67,6 +68,20 @@ const COMMANDS: Record<string, Command> = {
       },
     },
   },
+  replay: {
+    run: runReplay,
+    spec: {
+      summary: 're-send a captured request from this machine',
+      usage: '<dev>/<key>',
+      flags: {
+        method: { type: 'string', arg: '<verb>', help: 'override the HTTP method' },
+        url: { type: 'string', arg: '<url>', help: 'override the target URL' },
+        header: { type: 'string', arg: '<K:V>', help: 'override/add a request header (repeatable)' },
+        body: { type: 'string', arg: '<string>', help: 'override the request body (utf-8)' },
+        'body-file': { type: 'string', arg: '<path>', help: 'override the request body from a file' },
+      },
+    },
+  },
   export: {
     run: runExport,
     spec: {
@@ -102,6 +117,7 @@ Commands:
   tail [filters]         follow live traffic (Ctrl-C to stop); --last N, --json (NDJSON)
   ls [filters]           list captured entries; --limit N, --all
   show <dev>/<key>       one entry: headers, timing, bodies; --body req|res|none, --curl
+  replay <dev>/<key>     re-send a captured request; --method/--url/--header/--body
   export [--har|--json]  download capture; -o <file> (default stdout)
   pause | resume         toggle the live stream
   clear [--device <id>]  drop captured data
