@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## 0.1.1 — 2026-09-14
+
 ### Added
 
 - UI search mini-query: the Capture search box parses `method:`, `status:` (code,
