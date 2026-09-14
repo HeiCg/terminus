@@ -527,13 +527,26 @@ HAR (no `_terminus`) lands on a `har:<basename>` device with `source: xhr`.
 request, applies any overrides (`method`, `url`, `headers`, `body`), strips
 hop-by-hop and `host`/`content-length` headers, and re-sends it from the Mac with a
 30 s timeout and no redirect following. The response is stored as a **new** entry
-with `source: replay`, a fresh id, and a `replayOf: { id }` back-reference — the
-original is never modified. A request whose body was omitted at capture (size,
-budget, binary, or never captured) returns `422` unless an override body is given.
+with `source: replay`, a fresh id, and a `replayOf: { id, credentials, stripped }`
+back-reference — the original is never modified. A request whose body was omitted at
+capture (size, budget, binary, or never captured) returns `422` unless an override
+body is given.
 
-> **Security.** A replay leaves your machine and is sent to the original host **with
-> the credentials that were captured** (auth headers, cookies). Treat it like
-> re-issuing the request by hand. See [docs/security.md](../docs/security.md).
+**Credentials are removed by default.** The body's `credentials` field defaults to
+`'strip'`: the `authorization`, `cookie`, `proxy-authorization`, `x-api-key`,
+`x-auth-token` headers, any `x-*` header naming a token/secret/key/auth, and the
+credential-bearing query params (`token`, `access_token`, `api_key`, `apikey`,
+`key`, `auth`, `signature`, `sig`, and the same `x-*` pattern) are dropped before the
+request leaves. The removed names come back as `stripped` (a `?name` marker flags a
+query param). Send `credentials: 'keep'` (`terminus replay --with-credentials`, or
+the UI's "Include captured credentials" toggle) to re-send them verbatim. Headers you
+pass explicitly in `overrides.headers` are never stripped.
+
+> **Security.** A replay leaves your machine and is sent to the original host. Even
+> with credentials stripped it re-issues the request — a non-idempotent request
+> (POST/PUT/DELETE) repeats its side effect. `--with-credentials` additionally re-sends
+> the captured auth headers and cookies. Treat it like re-issuing the request by hand.
+> See [docs/security.md](../docs/security.md).
 
 ## Endpoints
 
@@ -553,7 +566,7 @@ budget, binary, or never captured) returns `422` unless an override body is give
 | GET    | `/api/status`            | session   | Operational status: `{ version, uptimeMs, paused, devices, retention, bodies, ingest }` — aggregate counters only, no capture payload. `ingest` is the ingest scheduler's `WorkStats` (or `null`). |
 | POST   | `/api/clear?device=`     | session   | Clear one device (or all); needs Origin  |
 | POST   | `/api/pause`             | session   | Pause/resume the live `/ui` stream. Body `{ "paused": true\|false }` (≤1 KiB, else `413`; non-boolean/malformed → `400`) → `200 { "paused": bool }`. Cookie mutation needs Origin. While paused the store keeps recording; resume replays a fresh snapshot. |
-| POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, overrides?: { method?, url?, headers?, body? } }` → `201 { key, status, durationMs, error }`; `404` unknown entry, `422` when the request body was not captured and no override is given, `400` malformed. Cookie mutation needs Origin (a bearer CLI does not). |
+| POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, credentials?: 'strip'\|'keep', overrides?: { method?, url?, headers?, body? } }` → `201 { key, status, durationMs, error, stripped }`; `404` unknown entry, `422` when the request body was not captured and no override is given, `400` malformed. `credentials` defaults to `'strip'` (removes captured auth headers/cookies and token query params; `stripped` lists what went). Cookie mutation needs Origin (a bearer CLI does not). |
 | GET    | `/api/pairing`           | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store) |
 | GET    | `/export.har?device=`    | session   | HAR 1.2 download                         |
 | GET    | `/export.json?device=`   | session   | Raw JSON download                        |

@@ -2,22 +2,73 @@ import { randomBytes } from 'node:crypto';
 import type { Store } from './store.js';
 import type { EntryInput } from './types.js';
 
-// T7.1 request replay. The collector re-sends a captured request — with the
-// credentials that were captured — to its original host from the operator's Mac,
-// and stores the result as a NEW entry (`source: 'replay'`, a fresh id, a
-// `replayOf` back-reference), never overwriting the original. See docs/security.md:
-// a replay leaves the machine and reuses captured auth material.
+// T7.1 request replay. The collector re-sends a captured request to its original
+// host from the operator's Mac and stores the result as a NEW entry
+// (`source: 'replay'`, a fresh id, a `replayOf` back-reference), never overwriting
+// the original. See docs/security.md: a replay leaves the machine.
+//
+// T8.1: by default the captured credentials are NOT re-sent. The `credentials`
+// field (default `'strip'`) removes auth headers and credential-bearing query
+// params before the request leaves; `'keep'` restores the old verbatim behaviour.
+// Headers the caller supplies explicitly via `overrides.headers` are never stripped
+// (the caller chose them). The names removed are reported back so the operator sees
+// what was dropped.
 
+export type ReplayCredentials = 'strip' | 'keep';
 export type ReplayOverrides = { method?: string; url?: string; headers?: Record<string, string>; body?: string };
-export type ReplayRequest = { deviceId: string; id: string; overrides?: ReplayOverrides };
+export type ReplayRequest = { deviceId: string; id: string; credentials?: ReplayCredentials; overrides?: ReplayOverrides };
 
 export type ReplayResult =
-  | { ok: true; key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null }
+  | { ok: true; key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null; stripped: string[] }
   | { ok: false; code: 400 | 404 | 422; message: string };
 
+// Single source of truth for what counts as a credential when stripping (T8.1).
+// Header names: an exact match, or any `x-*` header naming a token/secret/key/auth.
+const SENSITIVE_HEADER_NAMES = new Set(['authorization', 'cookie', 'proxy-authorization', 'x-api-key', 'x-auth-token']);
+const SENSITIVE_HEADER_PATTERN = /^x-.*(token|secret|key|auth)/i;
+// Query param names: an exact match against the common credential spellings, or
+// the same `x-*` pattern (a token can travel in either place).
+const SENSITIVE_QUERY_NAMES = new Set(['token', 'access_token', 'api_key', 'apikey', 'key', 'auth', 'signature', 'sig']);
+
+function isSensitiveHeaderName(name: string): boolean {
+  const n = name.toLowerCase();
+  return SENSITIVE_HEADER_NAMES.has(n) || SENSITIVE_HEADER_PATTERN.test(n);
+}
+function isSensitiveQueryName(name: string): boolean {
+  const n = name.toLowerCase();
+  return SENSITIVE_QUERY_NAMES.has(n) || SENSITIVE_HEADER_PATTERN.test(n);
+}
+
+// Remove credential-bearing headers and query params, returning the cleaned
+// headers/url and the names removed (`?name` marks a stripped query param). Header
+// names present in `protectedNames` (the caller's explicit overrides) are left
+// alone. Pure and exported for direct unit testing.
+export function stripCredentials(
+  headers: Record<string, string>,
+  url: string,
+  protectedNames: Set<string>,
+): { headers: Record<string, string>; url: string; stripped: string[] } {
+  const stripped: string[] = [];
+  const outHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (isSensitiveHeaderName(k) && !protectedNames.has(k.toLowerCase())) { stripped.push(k.toLowerCase()); continue; }
+    outHeaders[k] = v;
+  }
+  let outUrl = url;
+  try {
+    const u = new URL(url);
+    let changed = false;
+    for (const name of [...u.searchParams.keys()]) {
+      if (isSensitiveQueryName(name)) { u.searchParams.delete(name); stripped.push(`?${name.toLowerCase()}`); changed = true; }
+    }
+    if (changed) outUrl = u.toString();
+  } catch { /* non-absolute or malformed URL: nothing to strip from */ }
+  return { headers: outHeaders, url: outUrl, stripped };
+}
+
 // Hop-by-hop headers (RFC 7230 §6.1) plus `host`/`content-length`, which the
-// outgoing fetch recomputes for the new request. Everything else — including the
-// captured auth headers — is replayed verbatim.
+// outgoing fetch recomputes for the new request. This always runs; credential
+// stripping (T8.1) is a separate, default-on pass applied before this one.
 const STRIP_HEADERS = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade', 'host', 'content-length',
@@ -58,6 +109,11 @@ function parseRequest(body: unknown): ReplayRequest | { ok: false; code: 400; me
   const b = body as Record<string, unknown>;
   if (typeof b.deviceId !== 'string' || b.deviceId === '') return { ok: false, code: 400, message: 'deviceId is required' };
   if (typeof b.id !== 'string' || b.id === '') return { ok: false, code: 400, message: 'id is required' };
+  let credentials: ReplayCredentials | undefined;
+  if (b.credentials !== undefined) {
+    if (b.credentials !== 'strip' && b.credentials !== 'keep') return { ok: false, code: 400, message: "credentials must be 'strip' or 'keep'" };
+    credentials = b.credentials;
+  }
   let overrides: ReplayOverrides | undefined;
   if (b.overrides !== undefined) {
     if (typeof b.overrides !== 'object' || b.overrides === null) return { ok: false, code: 400, message: 'overrides must be an object' };
@@ -73,7 +129,7 @@ function parseRequest(body: unknown): ReplayRequest | { ok: false; code: 400; me
     }
     overrides = o as ReplayOverrides;
   }
-  return { deviceId: b.deviceId, id: b.id, overrides };
+  return { deviceId: b.deviceId, id: b.id, credentials, overrides };
 }
 
 // Re-send the request behind `deviceId/id` (with any overrides) and store the
@@ -87,14 +143,25 @@ export async function performReplay(
 ): Promise<ReplayResult> {
   const parsed = parseRequest(requestBody);
   if ('ok' in parsed && parsed.ok === false) return parsed;
-  const { deviceId, id, overrides = {} } = parsed as ReplayRequest & { overrides: ReplayOverrides };
+  const { deviceId, id, overrides = {}, credentials = 'strip' } = parsed as ReplayRequest & { overrides: ReplayOverrides };
 
   const original = store.entry(deviceId, id);
   if (!original) return { ok: false, code: 404, message: 'entry not found' };
 
   const method = (overrides.method ?? original.method).toUpperCase();
-  const url = overrides.url ?? original.url;
-  const headers = stripHeaders(overrides.headers ?? original.requestHeaders);
+  // Resolve the request line, then (default) drop captured credentials before the
+  // request leaves. Headers the caller passed explicitly are protected from the
+  // strip. Any credential the strip removes is recorded in `stripped` and echoed
+  // back on the result and the new entry's `replayOf`.
+  let url = overrides.url ?? original.url;
+  let resolvedHeaders = overrides.headers ?? original.requestHeaders;
+  const stripped: string[] = [];
+  if (credentials === 'strip') {
+    const protectedNames = new Set(Object.keys(overrides.headers ?? {}).map((k) => k.toLowerCase()));
+    const s = stripCredentials(resolvedHeaders, url, protectedNames);
+    resolvedHeaders = s.headers; url = s.url; stripped.push(...s.stripped);
+  }
+  const headers = stripHeaders(resolvedHeaders);
 
   // Resolve the request body to send. An override always wins. Otherwise the
   // original text body is reused — but if it was never captured as recoverable
@@ -139,9 +206,9 @@ export async function performReplay(
     responseBytes, responseBodySize: responseBytes?.length ?? 0,
     responseBodyOmitted: responseBytes && !isUtf8(responseBytes) ? 'binary' : null,
     durationMs, error,
-    replayOf: { id },
+    replayOf: { id, credentials, stripped },
   };
   store.addEntryInput(input);
 
-  return { ok: true, key: { deviceId, id: newId }, status: res ? res.status : null, durationMs, error };
+  return { ok: true, key: { deviceId, id: newId }, status: res ? res.status : null, durationMs, error, stripped };
 }

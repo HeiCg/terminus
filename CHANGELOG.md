@@ -90,7 +90,18 @@ All notable changes to this project are documented here. The format is based on
   captured under instead of a synthetic `har:<basename>` device. Linked WS/SSE
   sessions ride `_terminus.sessions`. A third-party HAR (no `_terminus`) still
   imports best-effort.
-
+- Replay now removes captured credentials by default before re-sending: the
+  `authorization`, `cookie`, `proxy-authorization`, `x-api-key`, `x-auth-token`
+  headers, any `x-*` header naming a token/secret/key/auth, and credential-bearing
+  query params (`token`, `access_token`, `api_key`, `apikey`, `key`, `auth`,
+  `signature`, `sig`) are stripped, and the removed names are reported as `stripped`.
+  `POST /api/replay` gains a `credentials: 'strip' | 'keep'` field (default `strip`)
+  and a `stripped` result; `terminus replay --with-credentials` and the UI's "Include
+  captured credentials" toggle (a confirming second click) restore the verbatim
+  re-send. Headers passed explicitly via `overrides.headers` are never stripped.
+- Every state-changing route now shares one Origin/CSRF gate (`requireMutation`):
+  a cookie session requires an exact loopback Origin, a bearer CLI caller is exempt,
+  and `DELETE /api/session` (cookie-only) always requires an Origin.
 - Pairing advertises the LAN IPv4 address instead of the unresolvable hostname, and
   rotates it when the DHCP-assigned address changes. Override it with
   `TERMINUS_PAIRING_HOST`; `terminus pair` surfaces the advertised host and warns on

@@ -26,11 +26,15 @@ key.
 The web UI, `/api/*`, exports, and the `/ui` socket bind `127.0.0.1:8787` only —
 never the LAN. On top of the bind, every request is checked with a DNS-rebinding
 defense: the `Host` header must be a loopback name on the real listening port, and
-an `Origin`, when present, must be a loopback page on that same port. Cookie-driven
-mutations (`DELETE /api/session`, `POST /api/clear`, `POST /api/pause`)
-additionally require an exact matching `Origin`. The `/ui` WebSocket, which
-bypasses same-origin protections, repeats the session and exact-`Origin` check on
-its upgrade. A mismatched `Host` is answered `421`, a bad `Origin` `403`.
+an `Origin`, when present, must be a loopback page on that same port. Every
+state-changing route goes through one gate (`requireMutation`): a cookie/session
+caller must present an exact matching `Origin` (the CSRF defense), while a bearer
+CLI caller — which has no ambient cookie to forge — is exempt. This covers
+`POST /api/clear`, `POST /api/pause`, `POST /api/replay`, and `DELETE /api/session`;
+the session-delete route is cookie-only, so it always requires an `Origin`. The
+`/ui` WebSocket, which bypasses same-origin protections, repeats the session and
+exact-`Origin` check on its upgrade. A mismatched `Host` is answered `421`, a bad
+`Origin` `403`.
 
 The result: a malicious web page the operator visits cannot script the collector
 through DNS rebinding, and a device on the LAN cannot reach the UI at all.
@@ -148,23 +152,36 @@ for the QA device that trusts its CA. Turning it on means:
 ## Replay re-sends captured requests
 
 `POST /api/replay` (and `terminus replay`) re-sends a captured request from the
-collector's machine to the **original host**, reusing the request's **captured
-credentials** — the `authorization`/`cookie` headers as they were sent, plus any
-overrides the caller supplies. This is a deliberate outbound request, distinct from
-passive capture:
+collector's machine to the **original host**. This is a deliberate outbound request,
+distinct from passive capture:
 
 - **It leaves the machine.** Unlike everything else the collector does (loopback UI,
   LAN-only ingest), a replay makes a real outbound request to the target host. It
   follows no redirects and times out at 30 s.
-- **It reuses captured auth.** The stored request headers are replayed verbatim
-  (only hop-by-hop and `host`/`content-length` are stripped and recomputed), so the
-  captured session token/cookie is sent again. Replaying a state-changing request
-  (POST/PUT/DELETE) repeats its side effect. Only replay what you intend to re-issue.
-- **It is authenticated and same-origin.** The route needs the same session-or-bearer
-  auth as every `/api/*` route, and a cookie-driven call needs a valid loopback
-  Origin (a bearer CLI does not) — so a web page cannot drive a replay via CSRF.
+- **Credentials are removed by default.** The request body's `credentials` field
+  defaults to `'strip'`: before the request leaves, the collector drops the
+  `authorization`, `cookie`, `proxy-authorization`, `x-api-key`, `x-auth-token`
+  headers and any `x-*` header naming a token/secret/key/auth, plus the
+  credential-bearing query params (`token`, `access_token`, `api_key`, `apikey`,
+  `key`, `auth`, `signature`, `sig`, and the same `x-*` pattern). The names removed
+  come back as `stripped`. Pass `credentials: 'keep'` (CLI `--with-credentials`, or
+  the UI's "Include captured credentials" toggle) to re-send them verbatim. Headers
+  the caller supplies explicitly via `overrides.headers` are never stripped — the
+  caller chose them.
+- **Hop-by-hop headers are always recomputed.** `host`/`content-length` and RFC 7230
+  hop-by-hop headers are stripped and recomputed regardless of the `credentials`
+  choice.
+- **It still repeats side effects.** Even with credentials stripped, replaying a
+  state-changing request (POST/PUT/DELETE) re-issues it against the target and repeats
+  its side effect. Only replay what you intend to re-issue.
+- **It is authenticated and same-origin.** The route goes through the shared mutation
+  gate: the same session-or-bearer auth as every `/api/*` route, and a cookie-driven
+  call needs a valid loopback Origin (a bearer CLI does not) — so a web page cannot
+  drive a replay via CSRF. In the UI, opting into credentials requires a confirming
+  second click before the request is sent.
 - **The result is a new record.** The response is stored as a fresh entry with
-  `source: replay` and a `replayOf` back-reference; the original is untouched.
+  `source: replay` and a `replayOf: { id, credentials, stripped }` back-reference; the
+  original is untouched.
 
 ## Residual risks
 

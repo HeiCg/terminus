@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { postJson } from '../http.js';
 import { line, jsonLine, type Ctx } from '../context.js';
-import { flagString, flagList } from '../args.js';
+import { flagString, flagList, flagBool } from '../args.js';
 import { generalError } from '../errors.js';
 import { duration } from '../format.js';
 
@@ -23,7 +23,7 @@ function parseHeaders(items: string[]): Record<string, string> {
   return out;
 }
 
-type ReplayResponse = { key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null };
+type ReplayResponse = { key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null; stripped: string[] };
 
 // POST /api/replay: re-send a captured request (with optional overrides) from the
 // collector's machine and print the outcome plus the new entry's key. --json emits
@@ -48,7 +48,10 @@ export async function runReplay(ctx: Ctx): Promise<number> {
     catch { throw generalError(`cannot read --body-file ${bodyFile}`); }
   }
 
-  const payload = { deviceId, id, ...(Object.keys(overrides).length ? { overrides } : {}) };
+  // Credentials are stripped by default; --with-credentials re-sends them verbatim.
+  const credentials = flagBool(ctx.flags, 'with-credentials') ? 'keep' : 'strip';
+
+  const payload = { deviceId, id, credentials, ...(Object.keys(overrides).length ? { overrides } : {}) };
   const res = await postJson<ReplayResponse>(ctx.config, '/api/replay', payload);
 
   if (ctx.json) { jsonLine(ctx, res); return 0; }
@@ -56,5 +59,6 @@ export async function runReplay(ctx: Ctx): Promise<number> {
   const outcome = res.error ? c.red(res.error) : String(res.status);
   line(ctx, `replayed ${deviceId}/${id} -> ${outcome} ${duration(res.durationMs)}`);
   line(ctx, `stored as ${res.key.deviceId}/${res.key.id}`);
+  if (res.stripped?.length) line(ctx, `stripped: ${res.stripped.join(', ')}`);
   return 0;
 }

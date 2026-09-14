@@ -66,8 +66,10 @@ export type Entry = {
   durationMs: number | null;
   error: string | null;
   // Set only on a replay entry (source 'replay'): the id of the entry this request
-  // was re-sent from. Optional and additive; absent on every captured entry.
-  replayOf?: { id: string };
+  // was re-sent from, whether captured credentials were kept or stripped (T8.1),
+  // and the names of the header/query credentials that were removed (`?name` marks
+  // a stripped query param). Optional and additive; absent on every captured entry.
+  replayOf?: { id: string; credentials?: 'strip' | 'keep'; stripped?: string[] };
 };
 
 // Ingest input for a captured exchange: everything of `Entry` except the text
