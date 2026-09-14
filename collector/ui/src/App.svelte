@@ -7,6 +7,7 @@
   import Topbar from './components/Topbar.svelte';
   import Banner from './components/Banner.svelte';
   import CommandPalette from './components/CommandPalette.svelte';
+  import ShortcutsSheet from './components/ShortcutsSheet.svelte';
   import EmptyState from './components/EmptyState.svelte';
   import Login from './views/Login.svelte';
   import CaptureView from './views/Capture/CaptureView.svelte';
@@ -30,6 +31,7 @@
   const placeholder = 'Settings — coming soon';
 
   let paletteOpen = $state(false);
+  let shortcutsOpen = $state(false);
 
   function focusSearch(): void {
     document.querySelector<HTMLElement>('[data-testid="search"]')?.focus();
@@ -66,6 +68,9 @@
     j: () => moveSelection(1),
     k: () => moveSelection(-1),
     '/': (e) => { e.preventDefault(); focusSearch(); },
+    // `?` / mod+/ toggles the shortcuts sheet. The sheet owns its own Escape, so
+    // this only ever opens (or re-toggles) it.
+    help: (e) => { e.preventDefault(); shortcutsOpen = !shortcutsOpen; },
   };
 
   // Picking a palette result selects the row and jumps to Capture, wherever the
@@ -110,7 +115,12 @@
         {selection}
         {cache}
         {onpick}
+        onshortcuts={() => { paletteOpen = false; shortcutsOpen = true; }}
       />
+    {/if}
+
+    {#if shortcutsOpen}
+      <ShortcutsSheet onclose={() => (shortcutsOpen = false)} />
     {/if}
   {/if}
 </div>

@@ -16,8 +16,11 @@
     selection: Selection;
     cache: BodyCache;
     onpick: (row: Row) => void;
+    // Optional "Actions" entry: opens the keyboard-shortcuts sheet. Absent (as in
+    // the component's own tests) → no Actions group renders at all.
+    onshortcuts?: () => void;
   };
-  let { open, onclose, filters, selection, cache, onpick }: Props = $props();
+  let { open, onclose, filters, selection, cache, onpick, onshortcuts }: Props = $props();
 
   const CAP = 50;
   const MIN_BODY_QUERY = 2; // below this, the (unbounded) body scan is skipped
@@ -84,17 +87,33 @@
     return out;
   });
 
-  // One flat, capped navigation order over both groups, then split back so every
+  // Actions group (only when the host wires `onshortcuts`): a single "Keyboard
+  // shortcuts" command, shown for an empty query or one that prefixes its keywords
+  // so it never clutters an unrelated search. Sits first in the flat order.
+  type FlatItem = { group: 'act'; label: string; run: () => void } | { group: 'req' | 'bod'; row: Row };
+  const actionItems = $derived.by((): FlatItem[] => {
+    if (!onshortcuts) return [];
+    const show = q === '' || 'keyboard shortcuts help'.includes(q);
+    return show ? [{ group: 'act', label: 'Keyboard shortcuts', run: onshortcuts }] : [];
+  });
+
+  // One flat, capped navigation order over every group, then split back so every
   // RENDERED option is within the navigable cap (and so one carries the active
-  // marker). req always precedes bod, so the flat indices line up below.
-  const flat = $derived.by((): { group: 'req' | 'bod'; row: Row }[] =>
+  // marker). act precedes req precedes bod, so the flat indices line up below.
+  const flat = $derived.by((): FlatItem[] =>
     [
-      ...requestMatches.map((row): { group: 'req' | 'bod'; row: Row } => ({ group: 'req', row })),
-      ...bodyMatches.map((row): { group: 'req' | 'bod'; row: Row } => ({ group: 'bod', row })),
+      ...actionItems,
+      ...requestMatches.map((row): FlatItem => ({ group: 'req', row })),
+      ...bodyMatches.map((row): FlatItem => ({ group: 'bod', row })),
     ].slice(0, CAP),
   );
-  const reqShown = $derived(flat.filter((f) => f.group === 'req').map((f) => f.row));
-  const bodShown = $derived(flat.filter((f) => f.group === 'bod').map((f) => f.row));
+  const actShown = $derived(flat.filter((f): f is Extract<FlatItem, { group: 'act' }> => f.group === 'act'));
+  const reqShown = $derived(flat.filter((f) => f.group === 'req').map((f) => (f as Extract<FlatItem, { group: 'req' | 'bod' }>).row));
+  const bodShown = $derived(flat.filter((f) => f.group === 'bod').map((f) => (f as Extract<FlatItem, { group: 'req' | 'bod' }>).row));
+  // Where each group starts in the flat index space, so option ids/active markers
+  // stay correct once the Actions group shifts requests/bodies down.
+  const reqBase = $derived(actShown.length);
+  const bodBase = $derived(actShown.length + reqShown.length);
 
   const activeIndex = $derived(flat.length === 0 ? 0 : Math.min(active, flat.length - 1));
   const optionId = (i: number): string => `cmdp-opt-${i}`;
@@ -108,6 +127,13 @@
     if (!row) return;
     onpick(row);
     onclose();
+  }
+
+  // Enter/click on the active flat item: run an action, or pick a request row.
+  function activate(item: FlatItem | undefined): void {
+    if (!item) return;
+    if (item.group === 'act') { item.run(); onclose(); return; }
+    pick(item.row);
   }
 
   function onInput(e: Event): void {
@@ -129,7 +155,7 @@
       case 'ArrowUp': e.preventDefault(); move(-1); break;
       // Flush first: reading `flat` after the state change recomputes it against
       // the current query, so ↵ picks from what is actually typed.
-      case 'Enter': e.preventDefault(); flushQuery(); pick(flat[activeIndex]?.row); break;
+      case 'Enter': e.preventDefault(); flushQuery(); activate(flat[activeIndex]); break;
       // Stop here so the App-root escape handler never also runs (which would
       // clear the table selection); the palette owns Escape while it is open.
       case 'Escape': e.preventDefault(); e.stopPropagation(); onclose(); break;
@@ -185,17 +211,37 @@
       {/if}
       <div class="list" id="cmdp-list" role="listbox" aria-label="Results">
         {#if flat.length > 0}
+          {#if actShown.length > 0}
+            <div class="grp" role="group" aria-label="Actions">
+              <div class="group" aria-hidden="true">Actions</div>
+              {#each actShown as act, a (act.label)}
+                <button
+                  type="button"
+                  class="option"
+                  class:active={activeIndex === a}
+                  id={optionId(a)}
+                  role="option"
+                  aria-selected={activeIndex === a}
+                  onclick={() => { act.run(); onclose(); }}
+                >
+                  <span class="url">{act.label}</span>
+                  <span class="status">?</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
           {#if reqShown.length > 0}
             <div class="grp" role="group" aria-label="Requests">
               <div class="group" aria-hidden="true">Requests</div>
               {#each reqShown as row, i (entityKey(row.deviceId, row.id))}
+                {@const idx = reqBase + i}
                 <button
                   type="button"
                   class="option"
-                  class:active={activeIndex === i}
-                  id={optionId(i)}
+                  class:active={activeIndex === idx}
+                  id={optionId(idx)}
                   role="option"
-                  aria-selected={activeIndex === i}
+                  aria-selected={activeIndex === idx}
                   onclick={() => pick(row)}
                 >
                   <span class="method">{row.method}</span>
@@ -209,7 +255,7 @@
             <div class="grp" role="group" aria-label="Bodies (loaded only)">
               <div class="group" aria-hidden="true">Bodies (loaded only)</div>
               {#each bodShown as row, j (entityKey(row.deviceId, row.id))}
-                {@const idx = reqShown.length + j}
+                {@const idx = bodBase + j}
                 <button
                   type="button"
                   class="option"

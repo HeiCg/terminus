@@ -151,6 +151,26 @@ describe('CommandPalette', () => {
     expect(screen.getByRole('combobox')).toHaveValue('');
   });
 
+  it('offers a "Keyboard shortcuts" action only when onshortcuts is wired, and runs it on Enter', async () => {
+    const onshortcuts = vi.fn();
+    const { onclose } = renderPalette(harness(), { onshortcuts });
+    const input = screen.getByRole('combobox');
+    await fireEvent.input(input, { target: { value: 'shortcuts' } });
+    // The Actions group surfaces the entry (no request row matches "shortcuts").
+    expect(await screen.findByText('Actions')).toBeInTheDocument();
+    expect(screen.getByText('Keyboard shortcuts')).toBeInTheDocument();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onshortcuts).toHaveBeenCalledTimes(1);
+    expect(onclose).toHaveBeenCalled();
+  });
+
+  it('renders no Actions group when onshortcuts is absent', async () => {
+    renderPalette();
+    await fireEvent.input(screen.getByRole('combobox'), { target: { value: 'shortcuts' } });
+    await waitFor(() => expect(screen.queryByText(/\/login|\/data/)).toBeNull());
+    expect(screen.queryByText('Actions')).toBeNull();
+  });
+
   it('restores focus to the opener when it closes (Esc → unmount)', async () => {
     const opener = document.createElement('button');
     opener.setAttribute('data-testid', 'opener');
