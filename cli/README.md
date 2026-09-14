@@ -67,11 +67,13 @@ With none of these you get:
 | `terminus tail [filters]` | Connect to /ui, print the last N entries (`--last 50`) then follow live traffic. One line per entry (time, device, method, status, duration, host+path); WebSocket/SSE frames as `WS ↑/↓`. Ctrl-C stops cleanly. `--json` emits NDJSON of every event. Reconnects automatically with exponential backoff after a dropped connection (`--no-reconnect` to disable). |
 | `terminus ls [filters]` | `GET /api/entries` (paged). `--limit N`, `--all`. Same columns as `tail`. With filters, `--limit N` pages through the store to gather up to N matches (not just the first page). |
 | `terminus show <deviceId>/<entryKey>` | One entry: request/response headers, timing, and bodies (pretty JSON when JSON, text when textual, `<binary N bytes>` otherwise). `--body request\|response\|none`, `--curl` prints a reproduction curl. |
+| `terminus replay <deviceId>/<entryKey>` | `POST /api/replay`: re-send a captured request from the collector's machine and store the result as a new `replay` entry. Overrides: `--method`, `--url`, `--header K:V` (repeatable), `--body <string>`, `--body-file <path>`. Prints the outcome status, duration and the new entry key; `--json` emits the endpoint response. **The request leaves your machine and reuses the captured credentials** — see the security note. |
 | `terminus export [--har\|--json] [-o file]` | Download the capture as HAR (default) or JSON; stdout unless `-o`. |
 | `terminus pause` / `terminus resume` | Toggle the live stream (`POST /api/pause` with `{paused}`). |
 | `terminus clear [--device <id>]` | Drop captured data, optionally for one device. |
 | `terminus devices` | List paired devices: id, platform, app version, build profile, last seen, dropped. |
 | `terminus pair [--qr] [--json]` | Show the pairing. `--json` prints the QrPairing blob to paste into the app; `--qr` renders it as a scannable QR (Unicode half-blocks) — the QR contains the device token, so it prints a red warning. |
+| `terminus completion <bash\|zsh\|fish>` | Print a shell completion script generated from the command/flag tables. Offline (no collector needed). |
 
 ### Help & version
 
@@ -93,10 +95,32 @@ on a dropped connection). Ctrl-C always exits cleanly.
 ### Common filters (`tail`, `ls`)
 
 `--device <id>` · `--method GET,POST` · `--status 4xx|5xx|200` · `--host <substr>`
-· `--path <substr>` · `--errors`
+· `--path <substr>` · `--source xhr|atlantis|proxy|replay` · `--errors`
 
 > In `tail` and `ls`, `--host` is the traffic host **filter**. Set a non-loopback
 > connection host for these two commands with `TERMINUS_HOST` instead.
+
+### Shell completion
+
+Generate and install completion for your shell (commands, per-command flags, and
+enum values like `--status`, `--source`, `--body`):
+
+```sh
+# bash: add to ~/.bashrc
+eval "$(terminus completion bash)"
+# zsh: add to ~/.zshrc
+eval "$(terminus completion zsh)"
+# fish
+terminus completion fish | source
+```
+
+### Replay is a real request
+
+`terminus replay` re-sends the captured request from the collector's machine to
+the original host, reusing the **captured credentials** (auth headers, cookies).
+The response is stored as a new entry with `source: replay` and a `replayOf`
+back-reference to the original — it is never merged into the original. Only replay
+what you intend to send again.
 
 ## Output
 
@@ -113,7 +137,9 @@ terminus status
 terminus ls --status 4xx,5xx --host api.example.com
 terminus tail --device pixel-8 --method POST --errors
 terminus show pixel-8/r1 --curl
+terminus replay pixel-8/r1 --header 'x-debug: 1'
 terminus export --har -o capture.har
+terminus completion zsh > ~/.terminus-completion.zsh
 terminus pair --qr
 ```
 

@@ -492,6 +492,39 @@ you have tried it. Sample fixtures live in `test/fixtures/har/`
 suite diffs them against a fresh export so they cannot silently drift. Use them for
 that manual DevTools trial.
 
+## Import a capture (`--load`)
+
+The collector can preload a previously exported capture at start:
+
+```sh
+node dist/main.js --load capture.har --load other.json
+```
+
+`--load` (repeatable) accepts a **Terminus JSON export** (`{ entries, ws }`) or a
+**HAR 1.2** log (including the `_terminus*` extensions above); a plain third-party
+HAR is imported best-effort too. A synthetic device is created for any device the
+file references. The JSON export is lossless for identity (each entry's `source`,
+`deviceId` and text bodies survive); a HAR **HTTP** entry carries neither `source`
+nor `deviceId`, so imported HAR HTTP entries land on a `har:<basename>` device with
+`source: xhr` (their bodies, including base64 binary, are still recovered), while
+HAR **sockets** keep the `source`/`deviceId` from their `_terminus` extension. Use
+the JSON export when exact round-tripping of source/device matters. `node dist/main.js
+--help` and `--version` are also accepted.
+
+## Replay a captured request
+
+`POST /api/replay` (and `terminus replay <device>/<id>`) reconstructs a stored
+request, applies any overrides (`method`, `url`, `headers`, `body`), strips
+hop-by-hop and `host`/`content-length` headers, and re-sends it from the Mac with a
+30 s timeout and no redirect following. The response is stored as a **new** entry
+with `source: replay`, a fresh id, and a `replayOf: { id }` back-reference — the
+original is never modified. A request whose body was omitted at capture (size,
+budget, binary, or never captured) returns `422` unless an override body is given.
+
+> **Security.** A replay leaves your machine and is sent to the original host **with
+> the credentials that were captured** (auth headers, cookies). Treat it like
+> re-issuing the request by hand. See [docs/security.md](../docs/security.md).
+
 ## Endpoints
 
 | Method | Path                     | Auth      | Description                              |
@@ -510,6 +543,7 @@ that manual DevTools trial.
 | GET    | `/api/status`            | session   | Operational status: `{ version, uptimeMs, paused, devices, retention, bodies, ingest }` — aggregate counters only, no capture payload. `ingest` is the ingest scheduler's `WorkStats` (or `null`). |
 | POST   | `/api/clear?device=`     | session   | Clear one device (or all); needs Origin  |
 | POST   | `/api/pause`             | session   | Pause/resume the live `/ui` stream. Body `{ "paused": true\|false }` (≤1 KiB, else `413`; non-boolean/malformed → `400`) → `200 { "paused": bool }`. Cookie mutation needs Origin. While paused the store keeps recording; resume replays a fresh snapshot. |
+| POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, overrides?: { method?, url?, headers?, body? } }` → `201 { key, status, durationMs, error }`; `404` unknown entry, `422` when the request body was not captured and no override is given, `400` malformed. Cookie mutation needs Origin (a bearer CLI does not). |
 | GET    | `/api/pairing`           | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store) |
 | GET    | `/export.har?device=`    | session   | HAR 1.2 download                         |
 | GET    | `/export.json?device=`   | session   | Raw JSON download                        |
