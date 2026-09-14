@@ -55,6 +55,19 @@ function originState(origin: string | undefined, port: string | null): OriginSta
   return 'invalid';
 }
 
+// T8.2: the single Origin gate for every state-changing route. A cookie/session
+// caller must present an exact loopback Origin (the CSRF defense — a forged cross-
+// origin page carries the ambient cookie but cannot set a valid Origin); a bearer
+// CLI caller has no ambient credential to forge, so it is exempt. `DELETE
+// /api/session` passes `auth: null`, which reads as cookie-driven and thus always
+// requires an Origin — that route only makes sense with a cookie. Returns true when
+// the request may proceed; otherwise it writes the 403 and returns false.
+function requireMutation(res: http.ServerResponse, origin: OriginState, auth: { kind: 'session' | 'bearer' } | null): boolean {
+  const cookieDriven = auth === null || auth.kind === 'session';
+  if (cookieDriven && origin !== 'valid') { res.writeHead(403); res.end('origin required'); return false; }
+  return true;
+}
+
 export function createHttpServer(
   store: Store,
   uiDir: string,
@@ -92,8 +105,9 @@ export function createHttpServer(
       if (u.pathname === '/api/session') {
         if (method === 'POST') return uiAuth.createSession(req, res);
         if (method === 'DELETE') {
-          // Cookie mutation: an exact Origin is mandatory.
-          if (origin !== 'valid') { res.writeHead(403); return res.end('origin required'); }
+          // Cookie mutation (session revoke is cookie-only): an exact Origin is
+          // mandatory. `auth: null` makes the unified gate treat it as cookie-driven.
+          if (!requireMutation(res, origin, null)) return;
           const sid = uiAuth.revokeSession(req);
           if (sid) broadcast.closeSession(sid);
           res.writeHead(204); return res.end();
@@ -203,8 +217,7 @@ export function createHttpServer(
         if (u.pathname === '/api/devices') { if (method !== 'GET') { res.writeHead(405); return res.end(); } return json(store.devicePage(cursor, parseLimit())); }
         if (u.pathname === '/api/clear') {
           if (method !== 'POST') { res.writeHead(405); return res.end(); }
-          // A cookie-driven mutation must carry an exact Origin; a bearer CLI need not.
-          if (auth.kind === 'session' && origin !== 'valid') { res.writeHead(403); return res.end('origin required'); }
+          if (!requireMutation(res, origin, auth)) return;
           store.clear(device); return json({ ok: true });
         }
         // Pause/resume the live UI stream. Like /api/clear, a cookie-driven
@@ -213,7 +226,7 @@ export function createHttpServer(
         // before parsing, and a malformed or non-boolean body is a 400.
         if (u.pathname === '/api/pause') {
           if (method !== 'POST') { res.writeHead(405); return res.end(); }
-          if (auth.kind === 'session' && origin !== 'valid') { res.writeHead(403); return res.end('origin required'); }
+          if (!requireMutation(res, origin, auth)) return;
           const chunks: Buffer[] = [];
           let size = 0;
           let aborted = false;
@@ -245,14 +258,16 @@ export function createHttpServer(
           return;
         }
         // Replay (T7.1): re-send a captured request to its original host from this
-        // machine and store the result as a NEW `replay` entry. Like /api/clear a
-        // cookie-driven mutation needs an exact Origin; a bearer CLI need not. The
+        // machine and store the result as a NEW `replay` entry. By default (T8.1)
+        // captured credentials are stripped before the request leaves; the names
+        // removed come back as `stripped`. Like /api/clear a cookie-driven mutation
+        // needs an exact Origin; a bearer CLI need not. The
         // JSON body is bounded (an override body can be sizeable, but not unbounded)
         // and read fully before the replay runs. Codes: 201 (key of the new entry),
         // 400 (malformed body), 404 (unknown entry), 422 (nothing replayable).
         if (u.pathname === '/api/replay') {
           if (method !== 'POST') { res.writeHead(405); return res.end(); }
-          if (auth.kind === 'session' && origin !== 'valid') { res.writeHead(403); return res.end('origin required'); }
+          if (!requireMutation(res, origin, auth)) return;
           const chunks: Buffer[] = [];
           let size = 0;
           let aborted = false;
@@ -275,7 +290,7 @@ export function createHttpServer(
                 return res.end(JSON.stringify({ error: result.message }));
               }
               res.writeHead(201, { 'content-type': 'application/json' });
-              res.end(JSON.stringify({ key: result.key, status: result.status, durationMs: result.durationMs, error: result.error }));
+              res.end(JSON.stringify({ key: result.key, status: result.status, durationMs: result.durationMs, error: result.error, stripped: result.stripped }));
             }).catch((e) => {
               log.warn('replay', String(e));
               if (!res.headersSent) { res.writeHead(500); res.end('replay failed'); }

@@ -280,3 +280,65 @@ describe('safeStaticPath', () => {
     expect(safeStaticPath(uiDir, '/../../etc/passwd')).toBeNull();
   });
 });
+
+// T8.2: one Origin gate (`requireMutation`) guards every state-changing route. The
+// rule: a cookie/session caller must present an exact loopback Origin; a bearer CLI
+// caller need not. `DELETE /api/session` is the exception — it is cookie-only, so it
+// always requires an Origin, even for a bearer with no cookie. A malformed Origin is
+// already rejected globally (`403 bad origin`) before the route runs.
+describe('unified mutation Origin gate (T8.2)', () => {
+  // A replay entry pointing at a refused port: replay fails fast (network error) but
+  // still stores a 201, so a passed gate is observable without a live target.
+  function seedReplay(store: import('../src/store.js').Store): void {
+    store.addEntry({
+      id: 'gate-r', deviceId: 'd1', source: 'xhr', startedAt: 1, method: 'GET', url: 'http://127.0.0.1:1/',
+      requestHeaders: {}, requestBody: null, requestBodySize: 0, requestBodyOmitted: null,
+      status: 200, statusText: 'OK', responseHeaders: {}, responseBody: null, responseBodySize: 0,
+      responseBodyOmitted: null, durationMs: 1, error: null,
+    });
+  }
+
+  type Cell = { name: string; auth: 'bearer' | 'cookie'; origin: 'none' | 'valid' | 'invalid'; expect: number };
+  // clear/pause/replay share the cookie-needs-Origin rule; a bearer is exempt.
+  const dataCells = (ok: number): Cell[] => [
+    { name: 'bearer, no Origin', auth: 'bearer', origin: 'none', expect: ok },
+    { name: 'cookie, valid Origin', auth: 'cookie', origin: 'valid', expect: ok },
+    { name: 'cookie, no Origin', auth: 'cookie', origin: 'none', expect: 403 },
+    { name: 'cookie, wrong Origin', auth: 'cookie', origin: 'invalid', expect: 403 },
+  ];
+
+  const routes: { path: string; method: string; ok: number; body?: string; cells: Cell[] }[] = [
+    { path: '/api/clear', method: 'POST', ok: 200, cells: dataCells(200) },
+    { path: '/api/pause', method: 'POST', ok: 200, body: JSON.stringify({ paused: false }), cells: dataCells(200) },
+    { path: '/api/replay', method: 'POST', ok: 201, body: JSON.stringify({ deviceId: 'd1', id: 'gate-r' }), cells: dataCells(201) },
+    // DELETE /api/session is cookie-only: an Origin is always required, so even a
+    // bearer-without-Origin caller is refused. Only cookie+valid Origin succeeds (204).
+    {
+      path: '/api/session', method: 'DELETE', ok: 204, cells: [
+        { name: 'bearer, no Origin', auth: 'bearer', origin: 'none', expect: 403 },
+        { name: 'cookie, valid Origin', auth: 'cookie', origin: 'valid', expect: 204 },
+        { name: 'cookie, no Origin', auth: 'cookie', origin: 'none', expect: 403 },
+        { name: 'cookie, wrong Origin', auth: 'cookie', origin: 'invalid', expect: 403 },
+      ],
+    },
+  ];
+
+  for (const route of routes) {
+    for (const cell of route.cells) {
+      it(`${route.method} ${route.path} — ${cell.name} → ${cell.expect}`, async () => {
+        const h = await createCollectorHarness();
+        try {
+          seed(h.store); seedReplay(h.store);
+          const cookie = cell.auth === 'cookie' ? await h.login() : null;
+          const headers: Record<string, string> = { 'content-type': 'application/json' };
+          if (cell.auth === 'bearer') headers.authorization = `Bearer ${h.adminToken}`;
+          if (cookie) headers.cookie = cookie;
+          if (cell.origin === 'valid') headers.origin = h.origin;
+          if (cell.origin === 'invalid') headers.origin = 'http://evil.test';
+          const res = await fetch(h.url + route.path, { method: route.method, headers, body: route.body });
+          expect(res.status).toBe(cell.expect);
+        } finally { await h.close(); }
+      });
+    }
+  }
+});

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import net from 'node:net';
 import { Store } from '../src/store.js';
-import { performReplay } from '../src/replay.js';
+import { performReplay, stripCredentials } from '../src/replay.js';
 import { createCollectorHarness, type CollectorHarness } from './fixtures/harness.js';
 import type { Entry } from '../src/types.js';
 
@@ -11,7 +11,7 @@ import type { Entry } from '../src/types.js';
 // what the collector re-sent. `/boom` closes the socket to force a network error.
 let target: http.Server;
 let targetUrl = '';
-const seen: { method: string; url: string; auth: string | null; body: string }[] = [];
+const seen: { method: string; url: string; auth: string | null; cookie: string | null; headers: http.IncomingHttpHeaders; body: string }[] = [];
 
 beforeAll(async () => {
   target = http.createServer((req, res) => {
@@ -20,7 +20,7 @@ beforeAll(async () => {
     req.on('data', (d) => chunks.push(d));
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8');
-      seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization ?? null, body });
+      seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization ?? null, cookie: req.headers.cookie ?? null, headers: req.headers, body });
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ method: req.method, url: req.url, echoed: body }));
     });
@@ -52,7 +52,9 @@ describe('performReplay (T7.1)', () => {
     const store = new Store();
     store.addEntry(entry());
     const before = seen.length;
-    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    // `keep` preserves the pre-T8.1 verbatim behaviour this test exercises; the
+    // default-strip path is covered by the credential-stripping suite below.
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1', credentials: 'keep' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.status).toBe(200);
@@ -71,7 +73,7 @@ describe('performReplay (T7.1)', () => {
     const rep = replayEntry(store, 'd1');
     expect(rep).toBeTruthy();
     expect(rep!.source).toBe('replay');
-    expect(rep!.replayOf).toEqual({ id: 'r1' });
+    expect(rep!.replayOf).toEqual({ id: 'r1', credentials: 'keep', stripped: [] });
     expect(rep!.status).toBe(200);
     expect(rep!.responseBody).toContain('"echoed":"{\\"a\\":1}"');
     // hop-by-hop and host/content-length were stripped from the outgoing request.
@@ -138,6 +140,104 @@ describe('performReplay (T7.1)', () => {
   });
 });
 
+// An entry carrying every kind of credential the strip must reach: two exact-name
+// headers, an `x-*`-pattern header, and two credential query params, plus a benign
+// header/param that must survive.
+function credentialEntry(over: Partial<Entry> = {}): Entry {
+  return entry({
+    url: `${targetUrl}/v1/items?token=abc&access_token=xyz&page=2`,
+    requestHeaders: {
+      'content-type': 'application/json',
+      authorization: 'Bearer secret',
+      cookie: 'session=deadbeef',
+      'x-refresh-token': 'r0tat3',
+      'x-request-id': 'keep-me',
+    },
+    ...over,
+  });
+}
+
+describe('stripCredentials (T8.1)', () => {
+  it('removes credential headers and query params, keeps benign ones, reports names', () => {
+    const r = stripCredentials(
+      { authorization: 'Bearer s', Cookie: 'a=b', 'X-Api-Key': 'k', 'x-signing-secret': 'z', 'content-type': 'application/json' },
+      'https://h.test/p?api_key=1&sig=2&keep=3&nested_key=4',
+      new Set(),
+    );
+    expect(r.headers).toEqual({ 'content-type': 'application/json' });
+    // Header names are reported lowercased; query params carry a `?` marker.
+    expect(new Set(r.stripped)).toEqual(new Set(['authorization', 'cookie', 'x-api-key', 'x-signing-secret', '?api_key', '?sig']));
+    const u = new URL(r.url);
+    expect(u.searchParams.get('keep')).toBe('3');
+    expect(u.searchParams.has('api_key')).toBe(false);
+    expect(u.searchParams.has('sig')).toBe(false);
+    // `nested_key` does not match the exact list nor the `x-*` pattern: it survives.
+    expect(u.searchParams.get('nested_key')).toBe('4');
+  });
+
+  it('never removes a name the caller protected (explicit override)', () => {
+    const r = stripCredentials({ authorization: 'Bearer keep' }, 'https://h.test/', new Set(['authorization']));
+    expect(r.headers.authorization).toBe('Bearer keep');
+    expect(r.stripped).toEqual([]);
+  });
+});
+
+describe('performReplay credential stripping (T8.1)', () => {
+  it('strips captured credentials by default and reports them', async () => {
+    const store = new Store();
+    store.addEntry(credentialEntry());
+    const before = seen.length;
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const hit = seen[before];
+    expect(hit.auth).toBeNull();
+    expect(hit.cookie).toBeNull();
+    expect(hit.headers['x-refresh-token']).toBeUndefined();
+    expect(hit.headers['x-request-id']).toBe('keep-me'); // benign header survives
+    // Credential query params are gone from the outgoing URL; `page` stays.
+    expect(hit.url).toBe('/v1/items?page=2');
+
+    expect(new Set(result.stripped)).toEqual(new Set(['authorization', 'cookie', 'x-refresh-token', '?token', '?access_token']));
+    const rep = replayEntry(store, 'd1');
+    expect(rep!.replayOf?.credentials).toBe('strip');
+    expect(new Set(rep!.replayOf?.stripped)).toEqual(new Set(result.stripped));
+    // The stored replay entry also has the credentials scrubbed from its URL/headers.
+    expect(rep!.requestHeaders).not.toHaveProperty('authorization');
+    expect(rep!.url).toBe(`${targetUrl}/v1/items?page=2`);
+  });
+
+  it('keep re-sends the captured credentials verbatim with an empty stripped list', async () => {
+    const store = new Store();
+    store.addEntry(credentialEntry());
+    const before = seen.length;
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1', credentials: 'keep' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const hit = seen[before];
+    expect(hit.auth).toBe('Bearer secret');
+    expect(hit.cookie).toBe('session=deadbeef');
+    expect(hit.url).toContain('token=abc');
+    expect(result.stripped).toEqual([]);
+    expect(replayEntry(store, 'd1')!.replayOf?.credentials).toBe('keep');
+  });
+
+  it('an explicit override header survives the default strip (the caller chose it)', async () => {
+    const store = new Store();
+    store.addEntry(credentialEntry());
+    const before = seen.length;
+    const result = await performReplay(store, {
+      deviceId: 'd1', id: 'r1',
+      overrides: { headers: { authorization: 'Bearer chosen', 'content-type': 'application/json' } },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(seen[before].auth).toBe('Bearer chosen');
+    expect(result.stripped).not.toContain('authorization');
+  });
+});
+
 describe('POST /api/replay route (T7.1)', () => {
   let h: CollectorHarness;
   beforeAll(async () => { h = await createCollectorHarness(); });
@@ -167,6 +267,18 @@ describe('POST /api/replay route (T7.1)', () => {
       body: JSON.stringify({ deviceId: 'd1', id: 'ghost' }),
     });
     expect(res.status).toBe(404);
+  });
+
+  it('201 response reports the stripped credential names (T8.1)', async () => {
+    h.store.addEntry(credentialEntry({ id: 'creds1' }));
+    const res = await fetch(`${h.url}/api/replay`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${h.adminToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: 'd1', id: 'creds1' }),
+    });
+    expect(res.status).toBe(201);
+    const json = await res.json() as { stripped: string[] };
+    expect(new Set(json.stripped)).toEqual(new Set(['authorization', 'cookie', 'x-refresh-token', '?token', '?access_token']));
   });
 
   it('403 for a cookie session without a valid Origin (CSRF guard)', async () => {
