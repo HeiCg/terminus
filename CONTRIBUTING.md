@@ -66,6 +66,40 @@ example:
 fix(collector): name exported captures terminus-<ts> instead of argo-<ts>
 ```
 
+## Distribution
+
+The packages are **not published to npm** — all three (`terminus-monorepo`,
+`terminus`, `@terminus/cli`) are marked `"private": true`. Terminus is installed
+from source:
+
+```bash
+git clone <repo-url> && cd terminus
+npm ci                       # installs both workspaces from the root lockfile
+npm start -w collector       # build + run the collector
+npm install -g ./cli         # put the `terminus` CLI on your PATH
+```
+
+See [Getting `terminus` on your PATH](cli/README.md#getting-terminus-on-your-path)
+for the CLI install options.
+
+## Releasing
+
+There is no npm publish step. A release is a git tag over the source, with the
+version bumped and the changelog rolled over:
+
+1. Bump `"version"` in all **three** `package.json` files to the new `x.y.z`:
+   `package.json` (root), `collector/package.json`, and `cli/package.json`.
+2. In `CHANGELOG.md`, rename the `## Unreleased` heading to `## x.y.z — YYYY-MM-DD`
+   (keep its `Added`/`Changed`/`Fixed` entries) and start a fresh empty
+   `## Unreleased` above it.
+3. Commit the bump (`chore(release): x.y.z`).
+4. Tag and push with tags:
+
+   ```bash
+   git tag vX.Y.Z
+   git push --follow-tags
+   ```
+
 ## Reporting security issues
 
 Please do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).

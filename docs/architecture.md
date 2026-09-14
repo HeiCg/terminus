@@ -22,11 +22,11 @@ them.
 | `8080`  | `0.0.0.0`   | HTTP proxy (MITM) | Optional proxy source — off unless `TERMINUS_PROXY=1`         |
 | `10910` | `127.0.0.1` | plaintext         | Optional legacy Atlantis loopback — off unless opted in      |
 
-Ports are overridable through the environment: `PORT`, `INGEST_PORT`,
-`ATLANTIS_PORT`, and `TERMINUS_CERT_PORT` (each `TERMINUS_*` variable also accepts
-a deprecated `NETCAPTURE_*` spelling with a one-time warning). Every listener is
-additive: a bind failure on the cert listener or the proxy is logged and never
-takes the capture channels down.
+Ports — and every other collector and CLI setting — are overridable through the
+environment; see the single [Configuration table](../collector/README.md#configuration)
+in the collector README for the full list, defaults, scope, and the deprecated
+`NETCAPTURE_*` aliases. Every listener is additive: a bind failure on the cert
+listener or the proxy is logged and never takes the capture channels down.
 
 The collector advertises only the TLS ingest over mDNS as `_terminus._tcp` on the
 WSS port. The TXT record carries non-secret coordinates (`v=2`, `transport=tls`,

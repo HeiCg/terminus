@@ -40,6 +40,18 @@ All notable changes to this project are documented here. The format is based on
 - Run as a macOS service: `collector/scripts/launchd/` ships a launchd plist template
   with `install.sh`/`uninstall.sh`, and the README gains a "Run as a service (macOS)"
   section.
+- `docs/ingest-protocol.md`: the WSS capture protocol (pairing, connection, message
+  types, back-pressure/close codes, and a minimal Node client) for instrumenting
+  your own app without the Atlantis SDK.
+- `docs/troubleshooting.md`: fixes for certificate/SHA mismatch, an unreachable LAN
+  IP, `EADDRINUSE`, a stale `admin-token`, missing OpenSSL, QR pairing on a
+  hardened QA build, and `terminus tail` reconnect behaviour.
+- A single **Configuration** table in the collector README documenting every
+  collector and CLI environment variable, with defaults, scope, and the deprecated
+  `NETCAPTURE_*` aliases; `docs/architecture.md` now points to it.
+- **Distribution** and **Releasing** sections in `CONTRIBUTING.md` (packages are
+  private; install from source; release is a git tag with a version bump and
+  changelog roll-over).
 
 ### Changed
 
@@ -53,6 +65,8 @@ All notable changes to this project are documented here. The format is based on
   (each with the deprecated `NETCAPTURE_*` fallback and a one-time warning); the bare
   `PORT`/`INGEST_PORT`/`ATLANTIS_PORT` spellings stay accepted as legacy. Invalid-port
   errors name the spelling actually read.
+- The `@terminus/cli` package now declares its license (`MIT`), matching the
+  collector package.
 
 ### Fixed
 

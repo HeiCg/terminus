@@ -4,10 +4,12 @@ The Terminus collector is a local Mac server that captures HTTP and WebSocket
 traffic from your devices on the LAN, shows it live in a web UI, and exports it as
 HAR 1.2. Device capture runs over **TLS with device-token auth** on the LAN, while
 the UI stays loopback-only. This README covers running and operating the collector;
-for the project overview see the [repository README](../README.md), and for the
+for the project overview see the [repository README](../README.md), for the
 design see [docs/architecture.md](../docs/architecture.md) and
-[docs/security.md](../docs/security.md). The collector accepts two capture
-protocols:
+[docs/security.md](../docs/security.md), for instrumenting your own app against the
+capture channel see [docs/ingest-protocol.md](../docs/ingest-protocol.md), and when
+something goes wrong see [docs/troubleshooting.md](../docs/troubleshooting.md). The
+collector accepts two capture protocols:
 
 - **Own protocol** over WSS (`wss://<host>:8788/ingest`) — the in-app instrumentation.
 - **Atlantis** over TLS (port `10909`) — the Atlantis iOS/Android forks. The device's
@@ -55,26 +57,60 @@ same full-access secret as the login link; because the token rotates every boot,
 stale file left by a crash authenticates nothing. See
 [docs/security.md](../docs/security.md#the-admin-token-file-for-the-local-cli).
 
-Environment overrides: `TERMINUS_PORT` (UI, default `8787`), `TERMINUS_INGEST_PORT`
-(WSS capture, default `8788`), `TERMINUS_ATLANTIS_PORT` (Atlantis TLS, default
-`10909`) — the bare `PORT`, `INGEST_PORT` and `ATLANTIS_PORT` spellings are still
-accepted as legacy, `TERMINUS_STATE_DIR` (identity storage, default
-`~/Library/Application Support/Terminus`), `TERMINUS_PAIRING_HOST` (the host the
-pairing blob/QR advertise — see [Device identity and pairing](#device-identity-and-pairing)),
-`TERMINUS_INGEST_PAUSE_MAX_MS` (back-pressure deadline, default `30000` — see
-[Ingest limits and back-pressure](#ingest-limits-and-back-pressure)),
-`TERMINUS_ATLANTIS_PING_MS` (Atlantis liveness ping interval, default `30000`, `0`
-disables — see [Using Atlantis](#using-atlantis-iosandroid)),
-`TERMINUS_LOG_LEVEL` (`debug|info|warn|error`, default `info`; an invalid value
-falls back to `info` with a warning), `TERMINUS_CRASH_THRESHOLD` (unhandled crashes
-within 60 s that trigger a clean shutdown, default `5`).
-Every `TERMINUS_*` variable also accepts its deprecated `NETCAPTURE_*` spelling as a
-fallback with a one-time warning.
+Every port, path, and tuning knob is an environment variable — see
+[Configuration](#configuration) for the single table of all of them, their
+defaults and scope, and the deprecated `NETCAPTURE_*` aliases.
 
-`TERMINUS_PASSCODE` (and the legacy `NETCAPTURE_PASSCODE`) is **no longer used** — the
-old plaintext passcode was sent in
-the clear and is never reused as a v2 credential. If it is set, the collector prints
-a migration notice; unset it and pair devices from the authenticated UI instead.
+## Configuration
+
+Every collector and CLI setting is an environment variable. Ports, the state
+directory, and the ingest/proxy tuning knobs are read at process start.
+
+| Variable | Default | Scope | Description | Deprecated alias |
+| --- | --- | --- | --- | --- |
+| `TERMINUS_PORT` | `8787` | collector | Loopback UI / `/api/*` / exports HTTP port. The bare `PORT` spelling is still accepted as legacy. | `NETCAPTURE_PORT` |
+| `TERMINUS_INGEST_PORT` | `8788` | collector | WSS device-capture ingest port (`/ingest`, TLS on the LAN). Bare `INGEST_PORT` accepted as legacy. | `NETCAPTURE_INGEST_PORT` |
+| `TERMINUS_ATLANTIS_PORT` | `10909` | collector | Atlantis TLS capture ingest port. Bare `ATLANTIS_PORT` accepted as legacy. | `NETCAPTURE_ATLANTIS_PORT` |
+| `TERMINUS_CERT_PORT` | `8789` | collector | Public cert endpoint port (`GET /api/cert`, plain HTTP on the LAN) for QR pairing. | `NETCAPTURE_CERT_PORT` |
+| `TERMINUS_STATE_DIR` | `~/Library/Application Support/Terminus` (macOS) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` file. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
+| `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
+| `TERMINUS_INGEST_PAUSE_MAX_MS` | `30000` | collector | Max time a back-pressured (read-paused) WSS ingest connection may stay paused before it is closed with `1013` (overload). | `NETCAPTURE_INGEST_PAUSE_MAX_MS` |
+| `TERMINUS_ATLANTIS_PING_MS` | `30000` | collector | Interval between server→client Atlantis `ping` control frames on an authenticated connection; `0` disables pinging. | `NETCAPTURE_ATLANTIS_PING_MS` |
+| `TERMINUS_PROXY` | off | collector | `=1` turns on the additive MITM proxy source (off by default). | `NETCAPTURE_PROXY` |
+| `TERMINUS_PROXY_PORT` | `8080` | collector | Proxy listener port (when the proxy is on). | `NETCAPTURE_PROXY_PORT` |
+| `TERMINUS_PROXY_ALLOW` | empty (rejects every client) | collector | Comma-separated device-IP allowlist for the proxy. An empty allowlist rejects every client, so there is no open relay. | `NETCAPTURE_PROXY_ALLOW` |
+| `TERMINUS_ALLOW_LEGACY_LOOPBACK` | off | collector | `=1` opens a plaintext Atlantis listener on `127.0.0.1:10910` (loopback only, testing). | `NETCAPTURE_ALLOW_LEGACY_LOOPBACK` |
+| `TERMINUS_LOG_LEVEL` | `info` | collector | Log verbosity (`debug`\|`info`\|`warn`\|`error`); an invalid value falls back to `info` with a warning. Every line carries an ISO-8601 timestamp and the level. | `NETCAPTURE_LOG_LEVEL` |
+| `TERMINUS_CRASH_THRESHOLD` | `5` | collector | Number of `uncaughtException`/`unhandledRejection` events within 60 s that trigger a clean shutdown with exit 1 (state lock released, `admin-token` removed). | `NETCAPTURE_CRASH_THRESHOLD` |
+| `TERMINUS_HOST` | `127.0.0.1` | cli | Collector host the CLI connects to. In `tail`/`ls`, `--host` is the traffic filter, so the connection host is taken from this variable instead of the flag. | — |
+| `TERMINUS_PORT` | `8787` | cli | Collector port the CLI connects to. | — |
+| `TERMINUS_TOKEN` | — | cli | Admin bearer token for the CLI. Used after `--token` and before the `admin-token` file fallback. | — |
+| `TERMINUS_RECONNECT_MIN_MS` | `1000` | cli | `terminus tail` reconnect backoff floor. Internal, for tests. | — |
+| `TERMINUS_RECONNECT_MAX_MS` | `15000` | cli | `terminus tail` reconnect backoff cap. Internal, for tests. | — |
+| `TERMINUS_LS_PAGE_SIZE` | `200` | cli | `terminus ls` per-page fetch size. Internal, for tests. | — |
+| `TERMINUS_LS_MAX_PAGES` | `50` | cli | `terminus ls` page ceiling for filtered scans. Internal, for tests. | — |
+
+Notes:
+
+- **Deprecated aliases.** Every variable the collector reads through its `env()`
+  helper also accepts the deprecated `NETCAPTURE_*` spelling as a fallback, with a
+  one-time warning per name. The port variables additionally accept the bare
+  legacy spellings (`PORT`, `INGEST_PORT`, `ATLANTIS_PORT`) after both prefixed
+  forms, silently. Note that `TERMINUS_PORT` means the UI port for the collector
+  and the connection port for the CLI — the same number on one machine. The CLI
+  variables are read directly from the environment and have no `NETCAPTURE_*`
+  alias (`TERMINUS_STATE_DIR` is the exception — the CLI resolves it through the
+  collector's helper, so its alias applies).
+- **`TERMINUS_PASSCODE` / `NETCAPTURE_PASSCODE` are no longer used.** The old
+  plaintext passcode was sent in the clear and is never reused as a v2 credential.
+  If either is set, the collector prints a migration notice; unset it and pair
+  devices from the authenticated UI instead.
+- **Body budget is fixed at 64 MiB.** The body-store retention budget is a
+  compiled default (`STORE_DEFAULT_LIMITS.bodyBytes`) and is not configurable via
+  an environment variable in the current collector. (The UI's omission hint refers
+  to a `TERMINUS_BODY_BUDGET`, but the collector does not read it today.)
+- **`TERMINUS_PROXY_CA`** is read on the **device / M-agent** side (where to load
+  the proxy CA), not by the collector.
 
 ## Run as a service (macOS)
 
@@ -500,6 +536,12 @@ its own plain-HTTP LAN listener (`8789`), also not on this loopback server.
   `ws:? (resumed)` for a frame whose session has no url yet. An orphan frame that
   carries no device id (so no session can be attributed) is still dropped and
   logged once per socket at `warn`.
+
+## Troubleshooting
+
+Certificate mismatches, an unreachable LAN IP, `EADDRINUSE`, a stale `admin-token`,
+missing OpenSSL, QR pairing on a hardened QA build, and `terminus tail` reconnect
+behaviour are covered in [docs/troubleshooting.md](../docs/troubleshooting.md).
 
 ## Development
 

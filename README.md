@@ -50,6 +50,11 @@ npm run build -w @terminus/cli    # emits cli/dist/cli/src/cli.js
 node cli/dist/cli/src/cli.js status
 ```
 
+The examples below use the bare `terminus` command, which assumes it is on your
+`PATH` — see [Getting `terminus` on your PATH](cli/README.md#getting-terminus-on-your-path)
+in the CLI README (`npm install -g ./cli`, `npm link`, or run the built entry
+directly). Until then, substitute `node cli/dist/cli/src/cli.js` for `terminus`:
+
 ```bash
 terminus tail --status 4xx,5xx    # follow failing traffic live (Ctrl-C to stop)
 terminus ls --device pixel-8      # list captured entries
@@ -69,6 +74,10 @@ See the [cli/README.md](cli/README.md) for every command, filter, and exit code.
   state, and the optional proxy
 - [docs/security.md](docs/security.md) — trust model, authentication, redaction,
   and residual risks
+- [docs/ingest-protocol.md](docs/ingest-protocol.md) — the WSS capture protocol,
+  for instrumenting your own app without the Atlantis SDK
+- [docs/troubleshooting.md](docs/troubleshooting.md) — pairing, network, port, and
+  auth failures and their fixes
 
 ## Attribution
 
