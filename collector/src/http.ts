@@ -68,6 +68,23 @@ function requireMutation(res: http.ServerResponse, origin: OriginState, auth: { 
   return true;
 }
 
+// P3: the reader token's whole scope, GET only. This is an ALLOWLIST on purpose:
+// a route added later is admin-only until it is listed here. `/api/entries/` and
+// `/api/ws/` cover every sub-route (detail, body, frames, a future `wait`).
+const READER_EXACT = new Set(['/health', '/api/status', '/api/devices', '/api/entries', '/api/ws']);
+const READER_PREFIXES = ['/api/entries/', '/api/ws/'];
+export function readerAllowed(method: string, pathname: string): boolean {
+  if (method !== 'GET') return false;
+  return READER_EXACT.has(pathname) || READER_PREFIXES.some((p) => pathname.startsWith(p));
+}
+
+// The 403 a reader gets outside its scope (HTTP routes and the /ui upgrade alike).
+const FORBIDDEN_SCOPE = JSON.stringify({ error: 'forbidden_scope', required: 'admin' });
+function forbiddenScope(res: http.ServerResponse): void {
+  res.writeHead(403, { 'content-type': 'application/json' });
+  res.end(FORBIDDEN_SCOPE);
+}
+
 // GET /api/entries?afterSeq=<n> | ?last=<n> (P1): the server-sequence read.
 // Malformed values and mixing it with the opaque `cursor` (or `last` with
 // `afterSeq`) are 400; an `epoch` other than this Store's, or an `afterSeq` past
@@ -144,7 +161,11 @@ export function createHttpServer(
       }
 
       // Session lifecycle. Login trades an admin bearer for a cookie; logout revokes.
+      // A reader bearer gets the scope 403 for both (the route is not in its
+      // allowlist); every other caller keeps the original behaviour below.
       if (u.pathname === '/api/session') {
+        const auth = uiAuth.authorize(req);
+        if (auth.ok && auth.role === 'reader' && !readerAllowed(method, u.pathname)) return forbiddenScope(res);
         if (method === 'POST') return uiAuth.createSession(req, res);
         if (method === 'DELETE') {
           // Cookie mutation (session revoke is cookie-only): an exact Origin is
@@ -157,11 +178,14 @@ export function createHttpServer(
         res.writeHead(405); return res.end();
       }
 
-      // Everything touching capture data or exports requires a session or bearer.
+      // Everything touching capture data or exports requires a session or bearer;
+      // the role it resolves to (P3) is checked against the reader allowlist.
       const dataRoute = u.pathname.startsWith('/api/') || u.pathname === '/export.har' || u.pathname === '/export.json';
       if (dataRoute) {
         const auth = uiAuth.authorize(req);
         if (!auth.ok) { res.writeHead(auth.status); return res.end(); }
+        // P3: a reader passes only its allowlist; anything else, known or not, is 403.
+        if (auth.role === 'reader' && !readerAllowed(method, u.pathname)) return forbiddenScope(res);
 
         // Device pairing blob: certificate + deviceToken, copied by the authenticated
         // UI into the QA screen. Never cached; the terminal shows only the adminToken.
@@ -405,6 +429,13 @@ export function createHttpServer(
     if (originState(req.headers.origin, port) !== 'valid') return sock.destroy();
     const auth = uiAuth.authorize(req);
     if (!auth.ok) return sock.destroy();
+    // P3: the live socket is admin-only; a reader gets a real 403 (with the scope
+    // body) instead of a dropped socket, so a client can tell it apart from a bad token.
+    if (auth.role === 'reader' && !readerAllowed(req.method ?? 'GET', p)) {
+      sock.once('finish', () => sock.destroy());
+      sock.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(FORBIDDEN_SCOPE)}\r\nConnection: close\r\n\r\n${FORBIDDEN_SCOPE}`);
+      return;
+    }
     const sid: string | null = auth.kind === 'session' ? auth.sid : null;
 
     wss.handleUpgrade(req, sock, head, (ws) => {

@@ -6,7 +6,7 @@ import { Store } from './store.js';
 import { createHttpServer } from './http.js';
 import { createUiAuth } from './security/uiAuth.js';
 import { loadOrCreateIdentity, toPairingImport, defaultStateDir, migrateLegacyStateDir, acquireStateLock, lanAddresses, pairingHost, pairingHostWarning, logPairingHostDrift, certExpiryWarning } from './security/identity.js';
-import { writeAdminTokenFile, removeAdminTokenFile } from './security/adminToken.js';
+import { writeAdminTokenFile, removeAdminTokenFile, writeReaderTokenFile, removeReaderTokenFile } from './security/adminToken.js';
 import { createCertServer } from './security/certServer.js';
 import { createDeviceServer, createIngestShared } from './deviceServer.js';
 import { startAtlantisServer, startLegacyLoopback } from './atlantis/server.js';
@@ -61,6 +61,9 @@ const CERT_PORT = checkPort(envName('CERT_PORT'), env('CERT_PORT'), 8789);
 // regenerated every start, so a restart invalidates outstanding UI sessions and
 // old login links while keeping the device pairing intact.
 const adminToken = randomBytes(32).toString('base64url');
+// P3: the read-only reader credential for local automation, generated the same way
+// and on the same per-boot lifecycle; the HTTP gate limits it to GET reads.
+const readerToken = randomBytes(32).toString('base64url');
 
 // The old plaintext passcode was sent in the clear; it is never reused as a v2
 // credential. Point the operator at the pairing flow instead.
@@ -89,12 +92,14 @@ async function boot() {
   await migrateLegacyStateDir(stateDir);
   // Hold the state-dir lock while running so `identity:rotate` refuses to race us.
   const releaseLock = await acquireStateLock(stateDir);
-  // Publish this boot's admin token (0600, atomic) so a same-machine CLI can
-  // authenticate without the operator copying a token; removed by shutdown().
+  // Publish this boot's admin and reader tokens (0600, atomic) so a same-machine CLI
+  // or automation can authenticate without the operator copying a token; both are
+  // removed by shutdown().
   writeAdminTokenFile(adminToken, stateDir);
+  writeReaderTokenFile(readerToken, stateDir);
 
   // Listeners are assigned as each starts; shutdown() closes whatever exists and
-  // always removes the admin-token file, then exits. One path for every stop:
+  // always removes the admin- and reader-token files, then exits. One path for every stop:
   // SIGINT, SIGTERM, a fatal HTTP bind error, and a boot failure after the token
   // was written. A second signal exits immediately.
   let httpHandle: ReturnType<typeof createHttpServer> | null = null;
@@ -112,6 +117,7 @@ async function boot() {
     const timer = setTimeout(() => process.exit(code), 2000); // hard backstop
     timer.unref?.();
     removeAdminTokenFile(stateDir);
+    removeReaderTokenFile(stateDir);
     try { httpHandle?.close(); } catch (e) { log.warn('http close failed', String(e)); }
     try { certServer?.close(); } catch (e) { log.warn('cert close failed', String(e)); }
     try { device?.close(); } catch (e) { log.warn('device close failed', String(e)); }
@@ -160,7 +166,7 @@ async function boot() {
       const { entries, sessions, frames } = loadCaptureFile(store, file);
       log.info(`loaded ${file}: ${entries} entries, ${sessions} sessions, ${frames} frames`);
     }
-    const uiAuth = createUiAuth({ adminToken });
+    const uiAuth = createUiAuth({ adminToken, readerToken });
     // Shared ingest machinery (budget, scheduler, connection slots) across both LAN
     // capture channels. Built before the HTTP server so GET /api/status can report
     // its live scheduler stats and connected-device count.

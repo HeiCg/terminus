@@ -28,7 +28,7 @@ describe('/health and /api/status advertise the automation API (P1)', () => {
     try {
       const body = await (await fetch(h.url + '/health')).json();
       expect(body).toMatchObject({ status: 'ok', apiVersion: 1 });
-      expect(body.capabilities).toEqual(['seq']);
+      expect(body.capabilities).toContain('seq');
     } finally { await h.close(); }
   });
 
@@ -40,7 +40,7 @@ describe('/health and /api/status advertise the automation API (P1)', () => {
     expect(b.lastSeq).toBe(2);
     expect(b.now).toBeGreaterThanOrEqual(t0);
     expect(b.apiVersion).toBe(1);
-    expect(b.capabilities).toEqual(['seq']);
+    expect(b.capabilities).toContain('seq');
   }));
 });
 

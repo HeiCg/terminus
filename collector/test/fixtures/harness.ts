@@ -22,6 +22,8 @@ export interface CollectorHarness {
   origin: string;
   store: Store;
   adminToken: string;
+  // P3: the read-only reader bearer this collector accepts.
+  readerToken: string;
   // Exchange the admin bearer for a session and return the `nc_session=…` cookie
   // string, ready to pass as a `cookie` header from Node tests.
   login(): Promise<string>;
@@ -37,12 +39,13 @@ export interface CollectorHarness {
 // is bound to 127.0.0.1 and torn down by close(); callers must await close() in a
 // finally/afterEach so no socket leaks between tests.
 export async function createCollectorHarness(
-  opts: { adminToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null } = {},
+  opts: { adminToken?: string; readerToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null } = {},
 ): Promise<CollectorHarness> {
   const adminToken = opts.adminToken ?? randomBytes(32).toString('base64url');
+  const readerToken = opts.readerToken ?? randomBytes(32).toString('base64url');
   const uiDir = opts.uiDir ?? '/nonexistent-ui';
   const store = new Store();
-  const uiAuth = createUiAuth({ adminToken, now: opts.now });
+  const uiAuth = createUiAuth({ adminToken, readerToken, now: opts.now });
   const shared = createIngestShared();
   const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort, ingest: shared });
 
@@ -70,6 +73,7 @@ export async function createCollectorHarness(
     origin,
     store,
     adminToken,
+    readerToken,
     login,
     async snapshot() {
       const c = await auth();
