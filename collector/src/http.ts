@@ -8,7 +8,7 @@ import type { UiAuth } from './security/uiAuth.js';
 import type { PairingImport } from './security/types.js';
 import { writeHar, writeJson } from './har.js';
 import { createUiBroadcast } from './uiBroadcast.js';
-import { VERSION } from './version.js';
+import { VERSION, API_VERSION, CAPABILITIES } from './version.js';
 import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 import { performReplay } from './replay.js';
@@ -68,6 +68,48 @@ function requireMutation(res: http.ServerResponse, origin: OriginState, auth: { 
   return true;
 }
 
+// GET /api/entries?afterSeq=<n> | ?last=<n> (P1): the server-sequence read.
+// Malformed values and mixing it with the opaque `cursor` (or `last` with
+// `afterSeq`) are 400; an `epoch` other than this Store's, or an `afterSeq` past
+// `lastSeq` (a cursor from another boot), is 409 `stale_cursor` so the client
+// re-baselines. Unlike the lenient legacy `limit`, every value here is strict.
+function seqEntries(store: Store, q: URLSearchParams, device: string | undefined): { status: number; body: unknown } {
+  const bad = (message: string) => ({ status: 400, body: { error: 'bad_request', message } });
+  const nonNegInt = (name: string): number | null => {
+    const raw = q.get(name) ?? '';
+    const n = Number(raw);
+    return /^\d+$/.test(raw) && Number.isSafeInteger(n) ? n : null;
+  };
+  const isLast = q.has('last');
+  if (q.has('cursor')) return bad('afterSeq/last cannot be combined with cursor');
+  if (isLast && q.has('afterSeq')) return bad('last cannot be combined with afterSeq');
+
+  let newOnly = false;
+  if (q.has('newOnly')) {
+    const raw = q.get('newOnly');
+    if (raw !== 'true' && raw !== 'false') return bad('newOnly must be true or false');
+    if (isLast) return bad('newOnly requires afterSeq');
+    newOnly = raw === 'true';
+  }
+  let limit: number | undefined;
+  if (q.has('limit')) {
+    if (isLast) return bad('limit cannot be combined with last');
+    const n = nonNegInt('limit');
+    if (n === null || n < 1) return bad('limit must be a positive integer');
+    limit = n;
+  }
+  const n = nonNegInt(isLast ? 'last' : 'afterSeq');
+  if (n === null) return bad(`${isLast ? 'last' : 'afterSeq'} must be a non-negative integer`);
+  if (isLast && (n < 1 || n > 200)) return bad('last must be between 1 and 200');
+
+  const { epoch, lastSeq } = store.seqState();
+  const stale = { status: 409, body: { error: 'stale_cursor', epoch, lastSeq } };
+  if (q.has('epoch') && q.get('epoch') !== epoch) return stale;
+  if (isLast) return { status: 200, body: store.lastEntries(n, { deviceId: device }) };
+  if (n > lastSeq) return stale;
+  return { status: 200, body: store.entriesAfterSeq(n, { deviceId: device, limit, newOnly }) };
+}
+
 export function createHttpServer(
   store: Store,
   uiDir: string,
@@ -98,7 +140,7 @@ export function createHttpServer(
       // Anonymous: liveness only, never capture data.
       if (u.pathname === '/health') {
         if (method !== 'GET') { res.writeHead(405); return res.end(); }
-        return json({ status: 'ok', version: VERSION });
+        return json({ status: 'ok', version: VERSION, apiVersion: API_VERSION, capabilities: CAPABILITIES });
       }
 
       // Session lifecycle. Login trades an admin bearer for a cookie; logout revokes.
@@ -154,6 +196,8 @@ export function createHttpServer(
             retention: store.retentionCounters(),
             bodies: store.bodyStats(),
             ingest: ingest ? ingest.scheduler.stats() : null,
+            // P1: where the server sequence stands, on the collector clock.
+            ...store.seqState(), now: Date.now(), apiVersion: API_VERSION, capabilities: CAPABILITIES,
           });
         }
         // Parsed path segments for the parametric metadata/body routes below.
@@ -178,8 +222,16 @@ export function createHttpServer(
 
         if (seg[1] === 'entries') {
           if (method !== 'GET') { res.writeHead(405); return res.end(); }
-          // /api/entries — paged summaries (identity + BodyRefs, no bodies).
-          if (seg.length === 2) return json(store.entrySummaryPage(cursor, device, parseLimit()));
+          // /api/entries — paged summaries (identity + BodyRefs, no bodies). With
+          // `afterSeq` or `last` it is the server-sequence read instead (P1).
+          if (seg.length === 2) {
+            if (u.searchParams.has('afterSeq') || u.searchParams.has('last')) {
+              const r = seqEntries(store, u.searchParams, device || undefined);
+              res.writeHead(r.status, { 'content-type': 'application/json' });
+              return res.end(JSON.stringify(r.body));
+            }
+            return json(store.entrySummaryPage(cursor, device, parseLimit()));
+          }
           // /api/entries/:device/:id — detail (headers + BodyRefs); …/body — bytes.
           if (seg.length === 4) {
             const detail = store.entryDetail(seg[2], seg[3]);

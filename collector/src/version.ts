@@ -19,3 +19,9 @@ function readVersion(): string {
 }
 
 export const VERSION: string = readVersion();
+
+// The automation API (0.2.0): its version and the capabilities this collector
+// serves, advertised on `/health` and `/api/status` so a client can feature-detect
+// instead of parsing VERSION. Each capability is appended by the change that ships it.
+export const API_VERSION = 1;
+export const CAPABILITIES: readonly string[] = ['seq'];
