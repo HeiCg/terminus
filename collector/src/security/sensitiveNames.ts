@@ -86,6 +86,21 @@ function isLegacy(lower: string, kind: NameKind): boolean {
   return LEGACY_BODY.test(lower);
 }
 
+// The built-in verdict is static, and a JSON body repeats the same keys many times,
+// so it is memoized; the map is simply dropped when it reaches MEMO_MAX names.
+const MEMO_MAX = 4096;
+const memo = new Map<string, boolean>();
+function builtIn(name: string, lower: string, kind: NameKind): boolean {
+  const k = `${kind}\u0000${name}`;
+  let v = memo.get(k);
+  if (v === undefined) {
+    v = isLegacy(lower, kind) || hasSensitiveWord(name);
+    if (memo.size >= MEMO_MAX) memo.clear();
+    memo.set(k, v);
+  }
+  return v;
+}
+
 // Whether a header name, query parameter name or body key names a credential whose
 // value must be masked. Precedence: NEVER_EXEMPT > allow > extra > built-in rules.
 export function isSensitiveName(name: string, kind: NameKind): boolean {
@@ -93,5 +108,5 @@ export function isSensitiveName(name: string, kind: NameKind): boolean {
   if (NEVER_EXEMPT.has(lower)) return true;
   if (allow.has(lower)) return false;
   if (extra.has(lower)) return true;
-  return isLegacy(lower, kind) || hasSensitiveWord(name);
+  return builtIn(name, lower, kind);
 }

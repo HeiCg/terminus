@@ -18,6 +18,7 @@ import { env, envName, envWithBare, parseByteSize } from './env.js';
 import { createCrashGuard } from './crashGuard.js';
 import { parseCollectorArgs, COLLECTOR_USAGE } from './mainArgs.js';
 import { loadCaptureFile } from './loadCapture.js';
+import { configureRedaction, redactionConfigFromEnv } from './security/sensitiveNames.js';
 
 // Resolve a port from `TERMINUS_<name>` first, then the deprecated `NETCAPTURE_<name>`
 // (warns once via env()), and finally the bare unprefixed `<name>` (e.g. `PORT`),
@@ -77,6 +78,10 @@ const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '
 
 // How many unhandled crashes inside 60 s trip the loop guard (see below).
 const CRASH_THRESHOLD = Math.max(1, Math.floor(Number(env('CRASH_THRESHOLD') ?? 5) || 5));
+
+// P5: operator-tuned ingest redaction (TERMINUS_REDACT_EXTRA adds names,
+// TERMINUS_REDACT_ALLOW exempts names), comma-separated, read once here.
+configureRedaction(redactionConfigFromEnv());
 
 // Command-line options (T7.3). `--help`/`--version` short-circuit before any state
 // is touched; `--load` paths are imported into the store during boot.

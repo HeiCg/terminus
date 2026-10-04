@@ -74,6 +74,10 @@ export type Entry = {
   // and the names of the header/query credentials that were removed (`?name` marks
   // a stripped query param). Optional and additive; absent on every captured entry.
   replayOf?: { id: string; credentials?: 'strip' | 'keep'; stripped?: string[] };
+  // P5: which side had a value masked at ingest (request = URL query, request
+  // headers and body; response = response headers and body). Absent when nothing
+  // was masked; the summary DTO normalizes it to two booleans.
+  redacted?: { request: boolean; response: boolean };
 };
 
 // Ingest input for a captured exchange: everything of `Entry` except the text
