@@ -251,6 +251,18 @@ export function certSanIps(certPem: string): string[] {
   return ips;
 }
 
+// Whether `host` is one of the certificate's SAN targets (GET /api/pairing?host=):
+// an IP must match an `IP Address` entry, a name a `DNS` entry (exact, ignoring
+// case; the collector never issues wildcards, and the subject CN is not consulted).
+// A value that is not a plain hostname/IP, or an unparsable certificate, is false.
+export function sanCoversHost(certDerBase64: string, host: string): boolean {
+  const ip = isIp(host);
+  if (!ip && !isHostname(host)) return false;
+  let cert: X509Certificate;
+  try { cert = new X509Certificate(Buffer.from(certDerBase64, 'base64')); } catch { return false; }
+  return ip ? cert.checkIP(host) !== undefined : cert.checkHost(host, { subject: 'never', wildcards: false }) !== undefined;
+}
+
 // LAN IPv4s a device could actually dial: drop loopback and every IPv6 form.
 function lanIpv4(lan: () => string[]): string[] {
   return lan().filter((ip) => ip.includes('.') && !ip.includes(':') && ip !== '127.0.0.1');

@@ -12,6 +12,7 @@ import { VERSION, API_VERSION, CAPABILITIES } from './version.js';
 import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 import { performReplay } from './replay.js';
+import { sanCoversHost } from './security/identity.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -206,6 +207,14 @@ export function createHttpServer(
           if (method !== 'GET') { res.writeHead(405); return res.end(); }
           const pairing = getPairing?.() ?? null;
           if (!pairing) { res.writeHead(503); return res.end('pairing unavailable'); }
+          // `?host=` (P2) overrides the advertised host for this response only (a
+          // simulator/emulator dials 127.0.0.1), but only to a name or IP the
+          // certificate SAN covers: any other host would fail the device's TLS check.
+          const hostOverride = u.searchParams.get('host');
+          if (hostOverride !== null && !sanCoversHost(pairing.certificateDerBase64, hostOverride)) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'bad_request', message: 'host is not covered by the certificate SAN' }));
+          }
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
           // Additive fields; older clients ignore them. `certPort` lets the UI build
           // the QR's QrPairing (the app fetches the DER from the LAN cert listener's
@@ -214,6 +223,7 @@ export function createHttpServer(
           // it. `pairing.host` is already the advertised LAN IPv4 (resolved by the
           // caller's pairingHost), not the meta hostname.
           const body: Record<string, unknown> = { ...pairing };
+          if (hostOverride !== null) body.host = hostOverride;
           if (certPort != null) body.certPort = certPort;
           body.pairingHostWarning = getPairingWarning?.() ?? null;
           return res.end(JSON.stringify(body));

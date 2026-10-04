@@ -29,6 +29,8 @@ const MATRIX: Row[] = [
   { method: 'POST', path: '/api/session', expect: { admin: 204, reader: 403, cookie: 401, none: 401 } },
   { method: 'DELETE', path: '/api/session', expect: { admin: 204, reader: 403, cookie: 204, none: 204 } },
   { method: 'GET', path: '/api/pairing', expect: adminOnly(200) },
+  // P2 host override: still admin-only; a host outside the SAN is the admin's 400.
+  { method: 'GET', path: '/api/pairing?host=bogus.example', expect: adminOnly(400) },
   { method: 'GET', path: '/api/status', expect: ok200 },
   { method: 'GET', path: '/api/devices', expect: ok200 },
   { method: 'GET', path: '/api/devices?bundleId=b&externalId=x', expect: ok200 },
