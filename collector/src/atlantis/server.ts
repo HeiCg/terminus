@@ -8,12 +8,37 @@ import { tlsServerOptions } from '../security/deviceAuth.js';
 import type { CollectorIdentity } from '../security/types.js';
 import { createIngestShared, type IngestShared } from '../deviceServer.js';
 import type { Store } from '../store.js';
+import { identityField } from '../types.js';
 import { log } from '../log.js';
 import { env } from '../env.js';
 
 // A device.model like "Google Pixel 7 (Android 14)" marks an Android client; the
 // iOS fork sends no such suffix.
 const platformOf = (model?: string): 'android' | 'ios' => (model && model.includes('(Android') ? 'android' : 'ios');
+
+// Live authenticated connections per announced envelope id (P2). Two at once
+// under one id means two apps/devices share it: the device is marked `ambiguous`.
+// A reconnect after the old socket closed never overlaps, so it does not mark.
+export function createEnvelopeRegistry(store: Store) {
+  const live = new Map<string, Set<string>>();
+  return {
+    open(envelopeId: string, connId: string): void {
+      let set = live.get(envelopeId);
+      if (!set) { set = new Set(); live.set(envelopeId, set); }
+      set.add(connId);
+      if (set.size > 1) {
+        log.warn(`atlantis: ${set.size} live connections announce envelope id ${envelopeId}; marking the device ambiguous`);
+        store.markDevice(envelopeId, 'ambiguous');
+      }
+    },
+    close(envelopeId: string, connId: string): void {
+      const set = live.get(envelopeId);
+      if (!set) return;
+      set.delete(connId);
+      if (set.size === 0) live.delete(envelopeId);
+    },
+  };
+}
 
 const PREAUTH_FRAME_MAX = 64 * 1024;
 const AUTH_TIMEOUT_MS = 5_000;      // ConnectionPackage/ACK deadline
@@ -44,11 +69,22 @@ export function applyAtlantisEvent(store: Store, ev: AtlantisEvent, generation: 
   // and ignore it, never touching the store or counting it as traffic.
   if (ev.kind === 'control') return;
   if (ev.kind === 'connection') {
-    const platform = platformOf(ev.device?.model);
-    store.touchDevice({ deviceId: ev.deviceKey, platform, appVersion: ev.appVersion ?? ev.project?.name ?? '', buildProfile: 'atlantis', dropped: 0, lastSeen: Date.now() }, 'atlantis');
+    // Identity (P2) from the ConnectionPackage; each value is validated, an
+    // invalid one is simply absent (and so never erases a known one).
+    const model = identityField(ev.device?.model);
+    const appName = identityField(ev.project?.name);
+    store.touchDevice({ deviceId: ev.deviceKey, platform: platformOf(model), appVersion: ev.appVersion ?? appName ?? '', buildProfile: 'atlantis', dropped: 0, lastSeen: Date.now(),
+      bundleId: identityField(ev.project?.bundleIdentifier), appName, deviceName: identityField(ev.device?.name), model, externalId: identityField(ev.device?.externalId) }, 'atlantis');
     return;
   }
   if (ev.kind === 'traffic') {
+    if (ev.isStart) {
+      // A request-START packet (P2). It tells us this device emits starts; but one
+      // arriving for an entry that is already completed is a stale replay from the
+      // offline queue (out of order) and is dropped whole: no overwrite, no seq.
+      store.markDevice(ev.deviceKey, 'startEvents');
+      if (store.isEntryCompleted(ev.entry.deviceId, ev.entry.id)) return;
+    }
     store.addEntryInput(ev.entry);
     if (ev.isWebsocket || ev.isSse) {
       // The traffic package IS the handshake for its session (via 'open'). SSE is
@@ -108,6 +144,7 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
   const pauseDeadlineMs = opts.pauseDeadlineMs ?? DEFAULT_PAUSE_DEADLINE_MS;
   const progressDeadlineMs = opts.progressDeadlineMs ?? FRAME_PROGRESS_MS;
   const pingMs = resolvePingMs(opts.pingMs);
+  const envelopes = createEnvelopeRegistry(store);
 
   const server = tls.createServer(tlsServerOptions(identity), (sock) => {
     if (!slots.tryAcquire()) { log.warn('atlantis: connection slots full, rejecting'); sock.destroy(); return; }
@@ -117,6 +154,7 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
     // the v2 8 MiB ceiling only after the token handshake succeeds.
     const acc = new FrameAccumulator(PREAUTH_FRAME_MAX, budget);
     let key = `${sock.remoteAddress}`;
+    let announced: string | null = null; // envelope id registered with `envelopes`
     let authorized = false;
     let released = false;
     let paused = false;
@@ -187,6 +225,7 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
       clearTimeout(authTimer); clearProgress(); stopResumeTimer(); stopPauseTimer(); stopPing();
       if (held) { budget.release(held.length); held = null; }
       slots.release(); scheduler.close(connId); store.closeWsGeneration(connId); acc.dispose();
+      if (announced !== null) envelopes.close(announced, connId);
     };
 
     const authError = () => {
@@ -205,6 +244,8 @@ export function startAtlantisServer(store: Store, port = 10909, opts: AtlantisOp
         authorized = true; clearTimeout(authTimer); acc.setMaxFrame(MAX_FRAME_V2);
         key = ev.deviceKey;
         applyAtlantisEvent(store, ev, connId);
+        // After the device record exists, so an overlap can flag it.
+        if (!released) { announced = ev.deviceKey; envelopes.open(announced, connId); }
         // Send `ready`, then start the liveness ping (never before auth succeeds). If
         // the socket is already gone, skip the ping — release() runs on close.
         try { sock.write(encodeControlFrame(identity.collectorId, { type: 'ready', protocolVersion: 2 })); startPing(); } catch { /* gone */ }

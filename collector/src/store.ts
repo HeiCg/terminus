@@ -2,8 +2,9 @@ import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import type {
   DeviceMessage, Entry, EntryInput, EntrySeq, StoredEntry, StoredFrame, WsSession, WsSessionInput,
-  Device, DeviceChannels, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot, Source,
+  Device, DeviceChannels, DeviceIdentity, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot, Source,
 } from './types.js';
+import { DEVICE_IDENTITY_FIELDS, identityField } from './types.js';
 import { createBodyStore, type BodyStore } from './bodyStore.js';
 import { createSessionAdmission, type SessionAdmission, type AdmissionOutcome } from './sessionAdmission.js';
 import { SortedKeyIndex, SeqIndex, serializedBytes, type RetentionLimits, type SortKey } from './retention.js';
@@ -247,6 +248,14 @@ export class Store extends EventEmitter {
     this.flushRetention();
   }
 
+  // Whether the stored entry (alias-resolved) is already completed, i.e. carries
+  // a status or an error. A request-START packet for such an entry is stale (the
+  // offline queue replayed it after the completion) and must not overwrite it.
+  isEntryCompleted(deviceId: string, id: string): boolean {
+    const s = this.entriesByKey.get(keyOf(this.resolveDeviceKey(deviceId), id));
+    return s != null && (s.status != null || s.error != null);
+  }
+
   updateEntry(id: string, patch: Partial<Entry>): void {
     // Legacy id-only signature (kept for compatibility). Prefer patchEntry with a
     // deviceId on the hot ingest path; this scans as a fallback.
@@ -479,7 +488,10 @@ export class Store extends EventEmitter {
   // default) and 'atlantis' (the SDK channel marker) are placeholders that only
   // fill an empty/placeholder slot, while any real value always wins; an empty
   // `appVersion` likewise never overwrites a known one. So a hello carrying the
-  // build profile survives a later Atlantis connection, whatever the order.
+  // build profile survives a later Atlantis connection, whatever the order. The
+  // P2 identity strings follow the same rule (an absent or blank value keeps the
+  // known one), and the sticky `ambiguous`/`startEvents` flags are never lowered
+  // by a touch.
   touchDevice(d: Device, channel?: 'ingest' | 'atlantis'): void {
     const id = this.resolveDeviceKey(d.deviceId);
     const existing = this.devs.get(id);
@@ -489,6 +501,27 @@ export class Store extends EventEmitter {
     const buildProfile = existing ? pickBuildProfile(d.buildProfile, existing.buildProfile) : d.buildProfile;
     const appVersion = existing && d.appVersion === '' ? existing.appVersion : d.appVersion;
     const merged: Device = { ...d, deviceId: id, appVersion, buildProfile, lastSeen, channels };
+    for (const f of DEVICE_IDENTITY_FIELDS) {
+      const v = identityField(d[f]) ?? existing?.[f];
+      if (v !== undefined) merged[f] = v; else delete merged[f];
+    }
+    if (d.ambiguous || existing?.ambiguous) merged.ambiguous = true; else delete merged.ambiguous;
+    if (d.startEvents || existing?.startEvents) merged.startEvents = true; else delete merged.startEvents;
+    this.putDevice(merged);
+  }
+
+  // Raise a sticky device flag (P2). A no-op, with no `device` delta, when the
+  // device is unknown or already flagged, so the per-packet `startEvents` call on
+  // the hot ingest path costs one lookup.
+  markDevice(deviceId: string, flag: 'ambiguous' | 'startEvents'): void {
+    const d = this.devs.get(this.resolveDeviceKey(deviceId));
+    if (!d || d[flag]) return;
+    this.putDevice({ ...d, [flag]: true });
+  }
+
+  // Store a device record, keep its metadata accounting, and emit the delta.
+  private putDevice(merged: Device): void {
+    const id = merged.deviceId;
     this.metadataBytes -= this.deviceMeta.get(id) ?? 0;
     this.devs.set(id, merged);
     const mb = serializedBytes(merged);
@@ -511,11 +544,17 @@ export class Store extends EventEmitter {
     // redacted as text (redactText only touches text).
     switch (m.type) {
       case 'hello': {
-        this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts }, 'ingest');
+        // The P2 identity fields are optional and device-supplied: an invalid one
+        // is dropped here (touchDevice re-validates), the hello itself still applies.
+        const identity: DeviceIdentity = { bundleId: identityField(m.bundleId), deviceName: identityField(m.deviceName), model: identityField(m.model), externalId: identityField(m.externalId) };
+        this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts, ...identity }, 'ingest');
         if (m.atlantisDeviceKey) this.recordAlias(m.atlantisDeviceKey, m.deviceId);
         return;
       }
-      case 'request': return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url),
+      case 'request':
+        // An XHR `request` marks the START of an exchange (its `response` patches it).
+        this.markDevice(deviceId, 'startEvents');
+        return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url),
         requestHeaders: redactHeaders(m.headers), requestBody: redactText(m.body), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
         status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null });
       case 'response': return this.patchEntryResponse(deviceId, m.id, { status: m.status, statusText: m.statusText, responseHeaders: redactHeaders(m.headers),
@@ -896,6 +935,13 @@ export class Store extends EventEmitter {
     }
     this.retentionDirty = true;
     this.emit('clear', deviceId ?? null);
+    // `ambiguous` holds until a clear (P2): lower it on the cleared device(s),
+    // after the clear delta so the UI applies the device update on top of it.
+    for (const d of deviceId ? [this.devs.get(this.resolveDeviceKey(deviceId))] : [...this.devs.values()]) {
+      if (!d?.ambiguous) continue;
+      const { ambiguous: _a, ...rest } = d;
+      this.putDevice(rest);
+    }
     this.flushRetention();
   }
 

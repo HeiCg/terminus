@@ -25,9 +25,14 @@ type Traffic = { id: string; startAt: number; endAt?: number | null; packageType
 // carry their raw `bytes` (decoded once from `dataValue`, never discarded after
 // measuring). `size` is the real byte length.
 export type WsFrameDecoded = { id: string; createdAt: number; messageType: string; text: string | null; bytes: Uint8Array | null; size: number; binary: boolean };
+// `device`/`project` are the ConnectionPackage objects as sent (device-supplied
+// JSON, possibly absent or mistyped): consumers validate each field before use.
+// The Terminus forks add `device.externalId` (absent when not configured).
 export type AtlantisEvent =
-  | { kind: 'connection'; deviceKey: string; buildVersion: string | null; appVersion: string | null; passcode: string | null; device: { name: string; model: string }; project: { name: string; bundleIdentifier: string } }
-  | { kind: 'traffic'; deviceKey: string; isWebsocket: boolean; isSse: boolean; entry: EntryInput }
+  | { kind: 'connection'; deviceKey: string; buildVersion: string | null; appVersion: string | null; passcode: string | null; device: { name?: unknown; model?: unknown; externalId?: unknown } | undefined; project: { name?: unknown; bundleIdentifier?: unknown } | undefined }
+  // `isStart`: a request-START packet (fork `emitRequestStart`): an HTTP package
+  // with no response, no endAt and no error; its completion follows under the same id.
+  | { kind: 'traffic'; deviceKey: string; isWebsocket: boolean; isSse: boolean; isStart: boolean; entry: EntryInput }
   | { kind: 'ws'; deviceKey: string; trafficId: string; url: string; msg: WsFrameDecoded }
   // A control frame from the client (e.g. a `pong` replying to a server ping). The
   // type is not inspected: any control message decodes to this no-op event so it is
@@ -103,7 +108,9 @@ function parseEnvelope(raw: Buffer, limits: DecodeLimits): AtlantisEvent | null 
   if (contentBuf.length > limits.maxInnerJson) throw new Error(`atlantis inner content too large: ${contentBuf.length}`);
   const inner = JSON.parse(contentBuf.toString('utf8'));
   if (env.messageType === 'connection') return { kind: 'connection', deviceKey: env.id, buildVersion: env.buildVersion ?? null,
-    appVersion: inner.appVersion ?? null, passcode: typeof inner.passcode === 'string' ? inner.passcode : null, device: inner.device, project: inner.project };
+    appVersion: inner.appVersion ?? null, passcode: typeof inner.passcode === 'string' ? inner.passcode : null,
+    device: inner.device && typeof inner.device === 'object' ? inner.device : undefined,
+    project: inner.project && typeof inner.project === 'object' ? inner.project : undefined };
   if (env.messageType === 'websocket') {
     // inner is a full TrafficPackage snapshot carrying one websocketMessagePackage.
     const t = inner as Traffic;
@@ -135,7 +142,8 @@ function parseEnvelope(raw: Buffer, limits: DecodeLimits): AtlantisEvent | null 
   // SSE is detected by response Content-Type on an HTTP exchange, not by a
   // generic package name; it is tunnelled over the same session machinery.
   const isSse = !isWebsocket && contentType(t.response?.headers).startsWith('text/event-stream');
-  return { kind: 'traffic', deviceKey: env.id, isWebsocket, isSse, entry: toEntryInput(t, env.id, limits.maxBody) };
+  const isStart = !isWebsocket && t.response == null && t.endAt == null && t.error == null;
+  return { kind: 'traffic', deviceKey: env.id, isWebsocket, isSse, isStart, entry: toEntryInput(t, env.id, limits.maxBody) };
 }
 
 // Synchronous decode (legacy loopback + unit tests). Uses the historical 64 MiB
