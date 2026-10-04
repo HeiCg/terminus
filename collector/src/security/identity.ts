@@ -83,13 +83,19 @@ export async function migrateLegacyStateDir(
 }
 
 // Fail before opening any listener if OpenSSL 3+ is unavailable; the message names
-// the fix rather than surfacing a raw ENOENT deep in cert generation.
+// the fix rather than surfacing a raw ENOENT deep in cert generation. The hint
+// covers both supported platforms (stock macOS ships LibreSSL, which fails the
+// version check; Homebrew's openssl@3 is keg-only, hence the PATH step).
+const OPENSSL_HINT = 'Install OpenSSL 3 and put it on PATH before starting the collector. '
+  + 'macOS: `brew install openssl@3`, then add `$(brew --prefix openssl@3)/bin` to PATH. '
+  + 'Linux: install your distribution\'s OpenSSL 3 package (e.g. `apt install openssl` or `dnf install openssl`).';
+
 export async function ensureOpenSSL(): Promise<void> {
   let out: string;
   try { out = (await exec('openssl', ['version'])).stdout; }
-  catch { throw new Error('OpenSSL 3 not found on PATH. Install it (e.g. `brew install openssl@3`) before starting the collector.'); }
+  catch { throw new Error(`OpenSSL 3 not found on PATH. ${OPENSSL_HINT}`); }
   const m = /OpenSSL\s+(\d+)\./.exec(out);
-  if (!m || Number(m[1]) < 3) throw new Error(`OpenSSL 3 required, found: ${out.trim()}`);
+  if (!m || Number(m[1]) < 3) throw new Error(`OpenSSL 3 required, found: ${out.trim()}. ${OPENSSL_HINT}`);
 }
 
 // LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. Filtered

@@ -100,18 +100,29 @@ The CLI resolves the token as `--token`, then `TERMINUS_TOKEN`, then the
 ## OpenSSL missing at startup
 
 **Symptom.** The collector refuses to start with *"OpenSSL 3 not found on PATH.
-Install it (e.g. `brew install openssl@3`) …"* or *"OpenSSL 3 required, found: …"*.
+Install OpenSSL 3 and put it on PATH …"* or *"OpenSSL 3 required, found: …"*.
 
 OpenSSL 3+ is required once, to generate the collector's identity certificate; the
-check runs **before** any listener opens.
+check runs **before** any listener opens. Stock macOS ships LibreSSL as
+`/usr/bin/openssl`, which fails the version check.
 
-**Fix.** Install OpenSSL 3 and make it available on `PATH`:
+**Fix.** Install OpenSSL 3 and make it available on `PATH`.
+
+macOS (Homebrew's `openssl@3` is keg-only, so add it to `PATH` yourself):
 
 ```bash
 brew install openssl@3
+export PATH="$(brew --prefix openssl@3)/bin:$PATH"
 ```
 
-Then restart the collector.
+Linux (most current distributions already ship OpenSSL 3):
+
+```bash
+sudo apt install openssl     # Debian, Ubuntu
+sudo dnf install openssl     # Fedora, RHEL
+```
+
+Check with `openssl version`, then restart the collector.
 
 ## QR pairing fails on a hardened QA build (paste works)
 
