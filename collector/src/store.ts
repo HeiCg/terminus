@@ -1,16 +1,17 @@
 import { EventEmitter } from 'node:events';
+import { randomBytes } from 'node:crypto';
 import type {
-  DeviceMessage, Entry, EntryInput, StoredEntry, StoredFrame, WsSession, WsSessionInput,
+  DeviceMessage, Entry, EntryInput, EntrySeq, StoredEntry, StoredFrame, WsSession, WsSessionInput,
   Device, DeviceChannels, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot, Source,
 } from './types.js';
 import { createBodyStore, type BodyStore } from './bodyStore.js';
 import { createSessionAdmission, type SessionAdmission, type AdmissionOutcome } from './sessionAdmission.js';
-import { SortedKeyIndex, serializedBytes, type RetentionLimits, type SortKey } from './retention.js';
+import { SortedKeyIndex, SeqIndex, serializedBytes, type RetentionLimits, type SortKey } from './retention.js';
 import {
   makeBodyRef, releaseBodyRef, storedToEntry, legacyEntryToInput,
   storedToEntrySummary, storedToEntryDetail, storedFrameToSummary, readBodyBytes, type BodyBytes,
 } from './captureDto.js';
-import type { UiDevice, EntrySummary, EntryDetail, WsSummary, FrameSummary, Page } from './uiProtocol.js';
+import type { UiDevice, EntrySummary, EntryDetail, WsSummary, FrameSummary, Page, SeqPage } from './uiProtocol.js';
 import { redactUrl, redactHeaders, redactText } from './redactor.js';
 import { log } from './log.js';
 
@@ -110,6 +111,12 @@ type StoredSession = {
 
 export type StoreOptions = { limits?: Partial<RetentionLimits>; bodies?: BodyStore };
 
+// A server-sequence read (P1). `deviceId` scopes to one device's index; `limit`
+// lowers the page cap; `newOnly` keeps only entries created after the cursor
+// (`firstSeq > afterSeq`); `match` is an extra predicate over the summary, the
+// hook the later filters (and a long-poll re-check) plug into.
+export type SeqQuery = { deviceId?: string; limit?: number; newOnly?: boolean; match?: (e: EntrySummary) => boolean };
+
 // In-memory capture store with bounded retention on every axis (R6/O03/O04/O05).
 // Bodies are held once in the content-addressed BodyStore; records hold only
 // references. The external API still speaks the legacy text `Entry`/`WsSession`
@@ -126,6 +133,20 @@ export class Store extends EventEmitter {
   private entryDevice = new Map<string, Set<string>>();   // deviceId -> keys (insertion order)
   private entryIndexGlobal = new SortedKeyIndex();
   private entryIndexByDevice = new Map<string, SortedKeyIndex>();
+
+  // Server sequence (P1). Every HTTP entry write takes the next value; the stamp
+  // lives beside the record (key -> EntrySeq) and in its own seq-ordered indexes,
+  // leaving the insertion-ordered maps above to eviction. `evictedMaxSeq` (global
+  // and per device) is the highest seq of an entry removed by retention or clear,
+  // so a reader whose cursor is below it knows it missed records (`gap`). `epoch`
+  // names this Store instance: a cursor from another epoch is meaningless.
+  readonly epoch = randomBytes(16).toString('base64url');
+  private lastSeq = 0;
+  private entrySeq = new Map<string, EntrySeq>();
+  private seqIndexGlobal = new SeqIndex();
+  private seqIndexByDevice = new Map<string, SeqIndex>();
+  private evictedMaxSeq = 0;
+  private evictedMaxSeqByDevice = new Map<string, number>();
 
   private sessionsByKey = new Map<string, StoredSession>();
   private wsIdToKey = new Map<string, string>(); // wsId -> composite key (last writer wins, as before)
@@ -192,6 +213,7 @@ export class Store extends EventEmitter {
       return;
     }
 
+    const q = this.stampSeq(key, stored.deviceId);
     if (existing) {
       // Upsert: release the old bodies (acquire/release nets to zero when a body
       // is unchanged, so an identical re-send does not raise the blob refcount),
@@ -221,7 +243,7 @@ export class Store extends EventEmitter {
     this.evictMetadata();
     // Incremental delta carries a SUMMARY (BodyRef, no body text): a live entry
     // never materializes retained bytes out of the BodyStore onto the wire.
-    this.emit('entry', storedToEntrySummary(this.entriesByKey.get(key)!));
+    this.emit('entry', storedToEntrySummary(this.entriesByKey.get(key)!, q));
     this.flushRetention();
   }
 
@@ -265,8 +287,9 @@ export class Store extends EventEmitter {
     this.entriesByKey.set(key, merged);
     this.entryMeta.set(key, recBytes);
     this.metadataBytes += recBytes;
+    const q = this.stampSeq(key, deviceId);
     this.evictMetadata();
-    this.emit('entry', storedToEntrySummary(merged));
+    this.emit('entry', storedToEntrySummary(merged, q));
     this.flushRetention();
   }
 
@@ -612,8 +635,9 @@ export class Store extends EventEmitter {
     const { keys } = this.entryIndexGlobal.page(null, this.entriesByKey.size);
     const out: EntrySummary[] = [];
     for (let i = keys.length - 1; i >= 0 && out.length < max; i--) {
-      const s = this.entriesByKey.get(keyOf(keys[i].deviceId, keys[i].id));
-      if (s) out.push(storedToEntrySummary(s));
+      const key = keyOf(keys[i].deviceId, keys[i].id);
+      const s = this.entriesByKey.get(key);
+      if (s) out.push(storedToEntrySummary(s, this.entrySeq.get(key)!));
     }
     return out;
   }
@@ -664,9 +688,79 @@ export class Store extends EventEmitter {
   entrySummaryPage(cursorRaw?: string | null, deviceId?: string, limit = PAGE_MAX_RECORDS): Page<EntrySummary> {
     const index = deviceId ? this.entryIndexByDevice.get(deviceId) : this.entryIndexGlobal;
     return this.pageIndex<EntrySummary>(index, cursorRaw, limit, (k) => {
-      const s = this.entriesByKey.get(keyOf(k.deviceId, k.id));
-      return s ? { sk: this.entrySk(s), item: storedToEntrySummary(s) } : undefined;
+      const key = keyOf(k.deviceId, k.id);
+      const s = this.entriesByKey.get(key);
+      return s ? { sk: this.entrySk(s), item: storedToEntrySummary(s, this.entrySeq.get(key)!) } : undefined;
     });
+  }
+
+  // ---- P1 server-sequence reads -------------------------------------------
+
+  // The current epoch and newest assigned seq (0 before any write).
+  seqState(): { epoch: string; lastSeq: number } { return { epoch: this.epoch, lastSeq: this.lastSeq }; }
+
+  // Entries whose current `seq` is strictly greater than `afterSeq`, ascending,
+  // bounded by 200 records / 1 MiB serialized (or a lower `limit`). Each entry
+  // appears at most once, at its latest seq. A binary search plus a walk over the
+  // seq index; `newOnly`/`match` skip entries without counting them toward the
+  // cap. `hasMore` is exact: it is set only when a further MATCHING entry did not
+  // fit. The caller validates `afterSeq` against `seqState()` (stale cursor).
+  entriesAfterSeq(afterSeq: number, opts: SeqQuery = {}): SeqPage {
+    const index = opts.deviceId ? this.seqIndexByDevice.get(opts.deviceId) : this.seqIndexGlobal;
+    const cap = Math.min(Math.max(1, opts.limit ?? PAGE_MAX_RECORDS), PAGE_MAX_RECORDS);
+    const items: EntrySummary[] = [];
+    let used = 2; // "[]"
+    let nextSeq = afterSeq;
+    let hasMore = false;
+    for (const { seq, key } of index ? index.after(afterSeq) : []) {
+      const item = this.seqSummary(key, afterSeq, opts);
+      if (!item) continue;
+      const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+      if (items.length >= cap || (items.length > 0 && used + size > PAGE_MAX_BYTES)) { hasMore = true; break; }
+      items.push(item); used += size; nextSeq = seq;
+    }
+    return { items, nextSeq, ...this.seqEnvelope(), gap: this.seqGap(afterSeq, opts.deviceId), hasMore };
+  }
+
+  // The `n` (1..200) most recent entries by seq that match, returned ascending,
+  // bounded by the same 1 MiB page budget (the newest are kept). `newOnly` has no
+  // meaning without a cursor and is ignored. `nextSeq` is the newest item's seq,
+  // or `lastSeq` when nothing matched; there is no cursor, so `gap` is false.
+  lastEntries(n: number, opts: Omit<SeqQuery, 'limit' | 'newOnly'> = {}): SeqPage {
+    const index = opts.deviceId ? this.seqIndexByDevice.get(opts.deviceId) : this.seqIndexGlobal;
+    const cap = Math.min(Math.max(1, n), PAGE_MAX_RECORDS);
+    const items: EntrySummary[] = [];
+    let used = 2;
+    let nextSeq: number | null = null;
+    for (const { seq, key } of index ? index.descending() : []) {
+      const item = this.seqSummary(key, 0, opts);
+      if (!item) continue;
+      const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+      if (items.length >= cap || (items.length > 0 && used + size > PAGE_MAX_BYTES)) break;
+      items.push(item); used += size; nextSeq ??= seq;
+    }
+    items.reverse();
+    return { items, nextSeq: nextSeq ?? this.lastSeq, ...this.seqEnvelope(), gap: false, hasMore: false };
+  }
+
+  private seqSummary(key: string, afterSeq: number, opts: SeqQuery): EntrySummary | null {
+    const s = this.entriesByKey.get(key);
+    const q = this.entrySeq.get(key);
+    if (!s || !q) return null;
+    if (opts.newOnly && q.firstSeq <= afterSeq) return null;
+    const item = storedToEntrySummary(s, q);
+    return opts.match && !opts.match(item) ? null : item;
+  }
+
+  private seqEnvelope(): { lastSeq: number; epoch: string; now: number } {
+    return { lastSeq: this.lastSeq, epoch: this.epoch, now: Date.now() };
+  }
+
+  // `gap`: an entry with a seq above the cursor was evicted or cleared (per device
+  // when the read is device-scoped), so the reader cannot have seen everything.
+  private seqGap(afterSeq: number, deviceId?: string): boolean {
+    const evicted = deviceId ? (this.evictedMaxSeqByDevice.get(deviceId) ?? 0) : this.evictedMaxSeq;
+    return evicted > afterSeq;
   }
 
   // GET /api/ws — paged session summaries; the frame ARRAY is replaced by counts.
@@ -699,8 +793,9 @@ export class Store extends EventEmitter {
 
   // GET /api/entries/:device/:id — full detail (headers + BodyRefs), no body bytes.
   entryDetail(deviceId: string, id: string): EntryDetail | null {
-    const s = this.entriesByKey.get(keyOf(deviceId, id));
-    return s ? storedToEntryDetail(s) : null;
+    const key = keyOf(deviceId, id);
+    const s = this.entriesByKey.get(key);
+    return s ? storedToEntryDetail(s, this.entrySeq.get(key)!) : null;
   }
 
   // The full legacy `Entry` DTO (text bodies materialized) for one record, or null
@@ -778,6 +873,7 @@ export class Store extends EventEmitter {
       for (const k of [...(this.sessionDevice.get(deviceId) ?? [])]) { this.dropSessionKey(k, removedSessions); }
       this.entryDevice.delete(deviceId); this.sessionDevice.delete(deviceId);
       this.entryIndexByDevice.delete(deviceId); this.sessionIndexByDevice.delete(deviceId);
+      this.seqIndexByDevice.delete(deviceId);
       // Reclaim this device's admission capacity so a long-lived connection is not
       // wedged in permanent overload after the UI clears it.
       this.admission.resetDevice(deviceId);
@@ -785,9 +881,14 @@ export class Store extends EventEmitter {
       if (removedSessions.length) this.emit('sessions_removed', { keys: removedSessions });
     } else {
       for (const ss of this.sessionsByKey.values()) for (const fr of ss.frames) releaseBodyRef(fr.body, this.bodies);
-      for (const e of this.entriesByKey.values()) { releaseBodyRef(e.requestBody, this.bodies); releaseBodyRef(e.responseBody, this.bodies); }
+      for (const [key, e] of this.entriesByKey) {
+        releaseBodyRef(e.requestBody, this.bodies); releaseBodyRef(e.responseBody, this.bodies);
+        const q = this.entrySeq.get(key);
+        if (q) this.noteEvictedSeq(e.deviceId, q.seq);
+      }
       this.entriesByKey.clear(); this.entryMeta.clear(); this.entryDevice.clear();
       this.entryIndexGlobal.clear(); this.entryIndexByDevice.clear();
+      this.entrySeq.clear(); this.seqIndexGlobal.clear(); this.seqIndexByDevice.clear();
       this.sessionsByKey.clear(); this.wsIdToKey.clear(); this.sessionDevice.clear();
       this.sessionIndexGlobal.clear(); this.sessionIndexByDevice.clear(); this.totalFrames = 0;
       this.metadataBytes = 0; this.capped = false;
@@ -803,9 +904,32 @@ export class Store extends EventEmitter {
   private entrySk(e: { startedAt: number; deviceId: string; id: string }): SortKey { return [e.startedAt, e.deviceId, e.id]; }
   private sessionSk(s: { openedAt: number; deviceId: string; wsId: string }): SortKey { return [s.openedAt, s.deviceId, s.wsId]; }
   private deviceEntries(d: string): Set<string> { let s = this.entryDevice.get(d); if (!s) { s = new Set(); this.entryDevice.set(d, s); } return s; }
+  private deviceSeqIndex(d: string): SeqIndex { let i = this.seqIndexByDevice.get(d); if (!i) { i = new SeqIndex(); this.seqIndexByDevice.set(d, i); } return i; }
   private deviceEntryIndex(d: string): SortedKeyIndex { let i = this.entryIndexByDevice.get(d); if (!i) { i = new SortedKeyIndex(); this.entryIndexByDevice.set(d, i); } return i; }
   private deviceSessions(d: string): Set<string> { let s = this.sessionDevice.get(d); if (!s) { s = new Set(); this.sessionDevice.set(d, s); } return s; }
   private deviceSessionIndex(d: string): SortedKeyIndex { let i = this.sessionIndexByDevice.get(d); if (!i) { i = new SortedKeyIndex(); this.sessionIndexByDevice.set(d, i); } return i; }
+
+  // Give the entry at `key` the next seq (P1): its previous seq leaves the seq
+  // indexes (a superseded seq is NOT an eviction) and the new one is appended.
+  // `firstSeq` and `receivedAt` are fixed by the first write and kept afterwards.
+  private stampSeq(key: string, deviceId: string): EntrySeq {
+    const prev = this.entrySeq.get(key);
+    if (prev) {
+      this.seqIndexGlobal.remove(prev.seq);
+      this.seqIndexByDevice.get(deviceId)?.remove(prev.seq);
+    }
+    const seq = ++this.lastSeq;
+    const q: EntrySeq = { seq, firstSeq: prev?.firstSeq ?? seq, receivedAt: prev?.receivedAt ?? Date.now() };
+    this.entrySeq.set(key, q);
+    this.seqIndexGlobal.insert(seq, key);
+    this.deviceSeqIndex(deviceId).insert(seq, key);
+    return q;
+  }
+
+  private noteEvictedSeq(deviceId: string, seq: number): void {
+    if (seq > this.evictedMaxSeq) this.evictedMaxSeq = seq;
+    if (seq > (this.evictedMaxSeqByDevice.get(deviceId) ?? 0)) this.evictedMaxSeqByDevice.set(deviceId, seq);
+  }
 
   private countOmission(ref: BodyRef): void { if (ref.state === 'omitted') { this.counters.omittedBodies++; this.retentionDirty = true; } }
 
@@ -892,6 +1016,13 @@ export class Store extends EventEmitter {
     const sk = this.entrySk(stored);
     this.entryIndexGlobal.remove(sk);
     this.entryIndexByDevice.get(stored.deviceId)?.remove(sk);
+    const q = this.entrySeq.get(key);
+    if (q) {
+      this.seqIndexGlobal.remove(q.seq);
+      this.seqIndexByDevice.get(stored.deviceId)?.remove(q.seq);
+      this.entrySeq.delete(key);
+      this.noteEvictedSeq(stored.deviceId, q.seq);
+    }
     this.counters.droppedEntries++;
     this.retentionDirty = true;
     removed.push({ deviceId: stored.deviceId, id: stored.id });

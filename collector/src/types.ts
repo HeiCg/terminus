@@ -91,6 +91,13 @@ export type WsKey = { deviceId: string; wsId: string };
 // frame eviction (so gaps are visible) and is the cursor for paged frame reads.
 export type StoredFrame = { sequence: number; ts: number; direction: 'in' | 'out'; size: number; binary: boolean; body: BodyRef };
 
+// Server-sequence stamp of one stored HTTP exchange (P1), kept by the store beside
+// the record (not inside it, so the legacy DTO, exports and metadata accounting
+// are unchanged). `seq` is the store-wide counter value of the entry's latest
+// write, `firstSeq` the value at its creation; `receivedAt` is the collector's
+// clock (ms) when it was created. An upsert or patch moves `seq` only.
+export type EntrySeq = { seq: number; firstSeq: number; receivedAt: number };
+
 // A stored HTTP exchange, holding body references rather than text.
 export type StoredEntry = Omit<Entry, 'requestBody' | 'responseBody' |
   'requestBodySize' | 'responseBodySize' | 'requestBodyOmitted' | 'responseBodyOmitted'> & {
