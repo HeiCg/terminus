@@ -156,7 +156,11 @@ Announces the device. Must be first.
   "buildProfile": "debug",
   "dropped": 0,
   "ts": 1726300000000,
-  "atlantisDeviceKey": "optional-sdk-key"
+  "atlantisDeviceKey": "optional-sdk-key",
+  "bundleId": "com.acme.app",
+  "deviceName": "Pixel 8",
+  "model": "Pixel 8 (Android 14)",
+  "externalId": "emulator-5554"
 }
 ```
 
@@ -169,7 +173,16 @@ Announces the device. Must be first.
 | `buildProfile`      | yes  | string                | e.g. `"debug"`, `"release"`.                                 |
 | `dropped`           | yes  | number                | Count of events the client dropped locally before sending.   |
 | `ts`                | yes  | number                | Epoch ms.                                                    |
-| `atlantisDeviceKey` | no   | string                | The key the Atlantis SDK will present under, if known, so the collector can attribute Atlantis traffic to this same `deviceId`. Send the `hello` **before** starting the Atlantis SDK for the alias to take effect. |
+| `atlantisDeviceKey` | no   | string                | The key the Atlantis SDK will present under, if known, so the collector can attribute Atlantis traffic to this same `deviceId`. Send the `hello` **before** starting the Atlantis SDK for the alias to take effect: an alias for a key that already has stored entries is refused, and the two channels stay two devices. |
+| `bundleId`          | no   | string                | The app's bundle id / application id. Shown on the device record and usable as the `bundleId=` read filter. |
+| `deviceName`        | no   | string                | Human-readable device name.                                  |
+| `model`             | no   | string                | Device model.                                                |
+| `externalId`        | no   | string                | An id the automation side knows this device by (simulator UDID, adb serial, device UDID). Usable as the `externalId=` read filter. |
+
+The four identity fields are optional and additive. Each is trimmed; a value that
+is not a string, is blank, or is longer than 256 characters is dropped (the `hello`
+itself is still accepted). A later `hello` without a field keeps the value already
+known. See [read-api.md](read-api.md#get-apidevices) for how they surface.
 
 ### `request`
 
@@ -196,7 +209,7 @@ One captured HTTP request.
 | `ts`          | yes  | number                  | Epoch ms.                                                            |
 | `method`      | yes  | string                  |                                                                      |
 | `url`         | yes  | string                  |                                                                      |
-| `headers`     | —    | object of string→string | Sent already redacted (see below).                                   |
+| `headers`     | —    | object of string→string | Redacted by the collector on receipt (see below).                    |
 | `body`        | —    | string \| null          | UTF-8 text body, or `null` when omitted/absent.                      |
 | `bodyOmitted` | no   | `"size"` \| `"binary"`  | Present when the body was dropped: too large (`size`) or non-text (`binary`). |
 | `bodySize`    | yes  | number                  | Original body length in bytes.                                       |
@@ -318,10 +331,15 @@ Closes a session.
 - `bodySize`/`size` always carry the **original** byte length even when the body
   itself is omitted, so the UI can show how large the dropped body was.
 - A body too large to send should be set to `null` with `bodyOmitted: "size"`.
-- **Redaction is the client's job on this channel.** The collector applies its own
-  redaction to Atlantis and proxy traffic, but treats the in-app WSS protocol as
-  **already redacted at the source** — it does not re-scrub what you send. Strip
-  auth-bearing headers, query parameters, and body fields **before** sending.
+- **The collector redacts what you send.** URL query parameters, headers, text
+  bodies and text WebSocket frames from this channel go through the same redaction
+  as Atlantis and proxy traffic, at the collector, before anything is stored or
+  hashed (see [security.md](security.md#auth-material-is-redacted-before-storage)).
+  The values still cross the TLS connection to the collector; if a secret must not
+  leave the device at all, strip it before sending.
+- **Ordering.** A `request` followed later by its `response` gives the collector a
+  start event: the entry exists from the `request` on, and the device record gets
+  `startEvents: true` (see [read-api.md](read-api.md#when-an-entry-reaches-the-collector)).
 
 ## 5. Back-pressure and reconnection
 
@@ -373,6 +391,67 @@ authenticated connection the collector also sends a periodic `ping` control fram
 dead-connection detection. If you are instrumenting your own app, prefer the WSS
 ingest above; the Atlantis channel exists for the existing SDK forks. See
 [Using Atlantis](../collector/README.md#using-atlantis-iosandroid).
+
+Every Atlantis frame is an 8-byte little-endian length followed by a (possibly
+gzipped) JSON envelope `{ "id", "messageType", "content", "buildVersion" }`, where
+`id` is the device's envelope id (the `deviceId` its traffic is stored under unless
+aliased), `messageType` is `connection`, `traffic`, `websocket` or `control`, and
+`content` is the base64 of an inner JSON document.
+
+### ConnectionPackage identity
+
+The inner document of the `connection` message carries the identity the collector
+copies onto the device record. The Terminus forks add `device.externalId`
+(absent when not configured):
+
+```json
+{
+  "passcode": "<deviceToken>",
+  "device": { "name": "Pixel", "model": "sdk_gphone64 (Android 14)", "externalId": "emulator-5554" },
+  "project": { "name": "Acme", "bundleIdentifier": "com.acme.app" }
+}
+```
+
+| Inner field | Device field |
+| --- | --- |
+| `project.bundleIdentifier` | `bundleId` |
+| `project.name` | `appName` (and `appVersion` when no `appVersion` is sent) |
+| `device.name` | `deviceName` |
+| `device.model` | `model`; a model containing `(Android` sets `platform: "android"`, otherwise `ios` |
+| `device.externalId` | `externalId` |
+
+The same validation as the `hello` identity fields applies: trimmed, dropped when
+blank, not a string, or longer than 256 characters. Two authenticated connections
+that are open at the same time and announce the same envelope id mark the device
+`ambiguous`.
+
+### Request-start packets
+
+By default the forks send one `traffic` message per HTTP exchange, when it
+completes. With the forks' `emitRequestStart` option on, they also send a
+**request-start packet** when the request begins: a `traffic` message whose inner
+`TrafficPackage` has the same `id` the completion will use, a `request`, and no
+`response`, no `endAt` and no `error`:
+
+```json
+{
+  "id": "t1",
+  "startAt": 10,
+  "packageType": "http",
+  "request": { "url": "https://api.example/t1", "method": "POST", "headers": [], "body": "cmVx" },
+  "responseBodyData": ""
+}
+```
+
+As in every Atlantis `TrafficPackage`, `startAt` is epoch **seconds** on the device
+clock, headers are a list of `{ "key", "value" }` pairs, and bodies are base64.
+The collector stores it as an in-flight entry (no `status`, no `error`) and marks
+the device `startEvents: true`; the completion with the same `id` then updates that
+entry. A start packet for an entry that is already completed (an out-of-order
+replay from the SDK's offline queue) is dropped. Packages with
+`packageType: "websocket"` are never treated as start packets. See
+[read-api.md](read-api.md#when-an-entry-reaches-the-collector) for what this changes
+for readers.
 
 ## 7. Minimal Node example
 
