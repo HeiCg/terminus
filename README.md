@@ -76,6 +76,8 @@ See the [cli/README.md](cli/README.md) for every command, filter, and exit code.
   and residual risks
 - [docs/ingest-protocol.md](docs/ingest-protocol.md) — the WSS capture protocol,
   for instrumenting your own app without the Atlantis SDK
+- [docs/read-api.md](docs/read-api.md): the HTTP read API for automation
+  clients (server sequence, filters, the wait long-poll, the reader token)
 - [docs/troubleshooting.md](docs/troubleshooting.md) — pairing, network, port, and
   auth failures and their fixes
 

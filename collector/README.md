@@ -7,8 +7,10 @@ the UI stays loopback-only. This README covers running and operating the collect
 for the project overview see the [repository README](../README.md), for the
 design see [docs/architecture.md](../docs/architecture.md) and
 [docs/security.md](../docs/security.md), for instrumenting your own app against the
-capture channel see [docs/ingest-protocol.md](../docs/ingest-protocol.md), and when
-something goes wrong see [docs/troubleshooting.md](../docs/troubleshooting.md). The
+capture channel see [docs/ingest-protocol.md](../docs/ingest-protocol.md), for
+reading captured traffic from a script or test runner see
+[docs/read-api.md](../docs/read-api.md), and when something goes wrong see
+[docs/troubleshooting.md](../docs/troubleshooting.md). The
 collector accepts two capture protocols:
 
 - **Own protocol** over WSS (`wss://<host>:8788/ingest`) — the in-app instrumentation.
@@ -84,7 +86,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_INGEST_PORT` | `8788` | collector | WSS device-capture ingest port (`/ingest`, TLS on the LAN). Bare `INGEST_PORT` accepted as legacy. | `NETCAPTURE_INGEST_PORT` |
 | `TERMINUS_ATLANTIS_PORT` | `10909` | collector | Atlantis TLS capture ingest port. Bare `ATLANTIS_PORT` accepted as legacy. | `NETCAPTURE_ATLANTIS_PORT` |
 | `TERMINUS_CERT_PORT` | `8789` | collector | Public cert endpoint port (`GET /api/cert`, plain HTTP on the LAN) for QR pairing. | `NETCAPTURE_CERT_PORT` |
-| `TERMINUS_STATE_DIR` | `~/Library/Application Support/Terminus` (macOS) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` file. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
+| `TERMINUS_STATE_DIR` | `~/Library/Application Support/Terminus` (macOS) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
 | `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
 | `TERMINUS_INGEST_PAUSE_MAX_MS` | `30000` | collector | Max time a back-pressured (read-paused) WSS ingest connection may stay paused before it is closed with `1013` (overload). | `NETCAPTURE_INGEST_PAUSE_MAX_MS` |
 | `TERMINUS_ATLANTIS_PING_MS` | `30000` | collector | Interval between server→client Atlantis `ping` control frames on an authenticated connection; `0` disables pinging. | `NETCAPTURE_ATLANTIS_PING_MS` |
@@ -99,7 +101,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_REDACT_ALLOW` | empty | collector | Comma-separated names exempt from ingest redaction and from the replay strip's shared-name check (e.g. `nextPageToken`), matched as whole names, case-insensitively. Wins over `TERMINUS_REDACT_EXTRA` and the built-in names, except `authorization`, `cookie`, `set-cookie` and `proxy-authorization`, which are always masked. | `NETCAPTURE_REDACT_ALLOW` |
 | `TERMINUS_HOST` | `127.0.0.1` | cli | Collector host the CLI connects to. In `tail`/`ls`, `--host` is the traffic filter, so the connection host is taken from this variable instead of the flag. | — |
 | `TERMINUS_PORT` | `8787` | cli | Collector port the CLI connects to. | — |
-| `TERMINUS_TOKEN` | — | cli | Admin bearer token for the CLI. Used after `--token` and before the `admin-token` file fallback. | — |
+| `TERMINUS_TOKEN` | — | cli | Bearer token for the CLI. Used after `--token` and before the `admin-token` file fallback. May hold the read-only reader token, which works for `status` and `ls` only. | — |
 | `TERMINUS_RECONNECT_MIN_MS` | `1000` | cli | `terminus tail` reconnect backoff floor. Internal, for tests. | — |
 | `TERMINUS_RECONNECT_MAX_MS` | `15000` | cli | `terminus tail` reconnect backoff cap. Internal, for tests. | — |
 | `TERMINUS_LS_PAGE_SIZE` | `200` | cli | `terminus ls` per-page fetch size. Internal, for tests. | — |
@@ -265,6 +267,12 @@ replaces the files atomically.
   loopback needs no `Origin` (for CLI use). No token is ever accepted in a query
   string. `GET /health` (status + version) and the login-screen static assets are
   the only anonymous surfaces and carry no capture data.
+- A second per-boot bearer, the **reader token**, is written to `reader-token` in
+  the state dir beside `admin-token` (same `0600`, atomic, removed on shutdown). It
+  is limited to `GET` reads (`/api/status`, `/api/devices`, `/api/entries/*`,
+  `/api/ws/*`) and gets `403 forbidden_scope` everywhere else. Use it for local
+  automation; see [docs/read-api.md](../docs/read-api.md) and
+  [docs/security.md](../docs/security.md#the-reader-token-for-local-automation).
 
 ## Ports
 
@@ -316,8 +324,9 @@ Atlantis app build must declare the **same** service in its `NSBonjourServices`:
 </array>
 ```
 
-The collector applies header/query redaction to Atlantis traffic (the in-app
-protocol is already redacted at the source). Redaction is never undone.
+The collector redacts Atlantis traffic (URL query, headers, text bodies and text
+frames) before it is stored, as it does for every other source. Redaction is never
+undone; see [docs/security.md](../docs/security.md#auth-material-is-redacted-before-storage).
 
 ### Liveness ping
 
@@ -552,6 +561,12 @@ pass explicitly in `overrides.headers` are never stripped.
 
 ## Endpoints
 
+The table lists the routes the UI and CLI use. The automation read contract (the
+server sequence with `afterSeq`/`last`, `epoch`, device-scope and entry filters,
+the `GET /api/entries/wait` long-poll, the reader token, `apiVersion` and
+`capabilities` on `/health` and `/api/status`) is specified in
+[docs/read-api.md](../docs/read-api.md).
+
 | Method | Path                     | Auth      | Description                              |
 | ------ | ------------------------ | --------- | ---------------------------------------- |
 | GET    | `/health`                | anonymous | `{ status, version }` liveness           |
@@ -569,7 +584,7 @@ pass explicitly in `overrides.headers` are never stripped.
 | POST   | `/api/clear?device=`     | session   | Clear one device (or all); needs Origin  |
 | POST   | `/api/pause`             | session   | Pause/resume the live `/ui` stream. Body `{ "paused": true\|false }` (≤1 KiB, else `413`; non-boolean/malformed → `400`) → `200 { "paused": bool }`. Cookie mutation needs Origin. While paused the store keeps recording; resume replays a fresh snapshot. |
 | POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, credentials?: 'strip'\|'keep', overrides?: { method?, url?, headers?, body? } }` → `201 { key, status, durationMs, error, stripped }`; `404` unknown entry, `422` when the request body was not captured and no override is given, `400` malformed. `credentials` defaults to `'strip'` (removes captured auth headers/cookies and token query params; `stripped` lists what went). Cookie mutation needs Origin (a bearer CLI does not). |
-| GET    | `/api/pairing`           | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store) |
+| GET    | `/api/pairing?host=`     | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store). `host` overrides the advertised host for this response (for a simulator or emulator on `127.0.0.1`); a host the certificate SAN does not cover is `400`. |
 | GET    | `/export.har?device=`    | session   | HAR 1.2 download                         |
 | GET    | `/export.json?device=`   | session   | Raw JSON download                        |
 | WS     | `/ui`                    | session   | Live UI stream: an initial `snapshot` (carries `paused`, protocol v3) then incremental deltas, including `{ type: 'paused', paused }` on toggle. |
@@ -585,8 +600,9 @@ its own plain-HTTP LAN listener (`8789`), also not on this loopback server.
 ## Limitations
 
 - Loopback only; not meant to be exposed to the internet or the LAN.
-- Redaction at the collector applies to **Atlantis** and **proxy** traffic (the
-  in-app WSS protocol is redacted at the source).
+- Redaction at the collector applies to every source (Atlantis, the in-app WSS
+  protocol, the proxy, and stored replay results). It is name-based: binary bodies
+  and frames, and secrets under unrecognised names, are stored as captured.
 - The proxy is not total coverage: a client may ignore it, use its own trust store,
   pin its own certificate, or use QUIC. It never disables Atlantis/WSS.
 - In-memory store: data is lost on restart, and old entries are dropped past the
