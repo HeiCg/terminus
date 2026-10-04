@@ -44,8 +44,8 @@ const MATRIX: Row[] = [
   { method: 'GET', path: '/api/entries/d1/seed-1', expect: ok200 },
   { method: 'GET', path: '/api/entries/d1/seed-1/body', expect: ok200 },
   { method: 'GET', path: '/api/entries/d1/seed-1/body?side=request', expect: ok200 },
-  // Not served yet (P4): the reader passes the gate and reaches the router's 404.
-  { method: 'GET', path: '/api/entries/wait?afterSeq=0', expect: { admin: 404, reader: 404, cookie: 404, none: 401 } },
+  // The P4 long-poll is a reader route too (the seeded entry answers it at once).
+  { method: 'GET', path: '/api/entries/wait?afterSeq=0', expect: ok200 },
   { method: 'POST', path: '/api/entries', expect: adminOnly(405) },
   { method: 'GET', path: '/api/ws', expect: ok200 },
   { method: 'GET', path: '/api/ws/d1/w1/frames', expect: ok200 },

@@ -14,6 +14,7 @@ import { log } from './log.js';
 import { performReplay } from './replay.js';
 import { sanCoversHost } from './security/identity.js';
 import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters } from './entryFilters.js';
+import { createEntryWaits } from './entryWait.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -152,6 +153,11 @@ export function createHttpServer(
   // shared serialization and byte budget, and lets logout close a session's
   // sockets by id.
   const broadcast = createUiBroadcast(store);
+  // The long-poll `GET /api/entries/wait` (P4): one dispatcher for every pending
+  // wait, capped collector-wide. Node's server timeouts leave a 30 s hold alone:
+  // requestTimeout/headersTimeout bound only the receipt of the request,
+  // keepAliveTimeout only idle time between requests, and `timeout` is 0.
+  const waits = createEntryWaits(store);
 
   const server = http.createServer((req, res) => {
     try {
@@ -284,6 +290,10 @@ export function createHttpServer(
             // Cursor mode keeps its response shape: no `devices` echo.
             return json(store.entrySummaryPage(cursor, scope ?? undefined, parseLimit()));
           }
+          // /api/entries/wait — the long-poll (P4). Matched on the RAW path, so a
+          // device literally named `wait` keeps its /api/entries/wait/:id routes
+          // and an encoded `wai%74` is not taken for it.
+          if (u.pathname === '/api/entries/wait') return waits.handle(res, u.searchParams);
           // /api/entries/:device/:id — detail (headers + BodyRefs); …/body — bytes.
           if (seg.length === 4) {
             const detail = store.entryDetail(seg[2], seg[3]);
@@ -488,7 +498,9 @@ export function createHttpServer(
   beat.unref?.();
   server.on('close', () => clearInterval(beat));
 
-  return { server, wss, close: () => { clearInterval(beat); broadcast.close(); wss.close(); server.close(); } };
+  // Pending waits are answered (timeout shape, `Connection: close`) before the
+  // server closes, so shutdown never hangs on a held long-poll.
+  return { server, wss, waits, close: () => { clearInterval(beat); waits.close(); broadcast.close(); wss.close(); server.close(); } };
 }
 
 function markAlive(ws: WebSocket): void {

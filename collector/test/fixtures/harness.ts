@@ -32,6 +32,8 @@ export interface CollectorHarness {
   // Authenticated body fetch for one entry side; returns the decoded text (empty
   // string for an absent/empty body). Throws on a 404 (missing) or 410 (omitted).
   getEntryBody(key: { deviceId: string; id: string; side: 'request' | 'response' }): Promise<string>;
+  // P4: pending `GET /api/entries/wait` long-polls held by this server.
+  activeWaits(): number;
   close(): Promise<void>;
 }
 
@@ -91,6 +93,7 @@ export async function createCollectorHarness(
       if (r.status !== 200) throw new Error(`body ${deviceId}/${id}/${side} -> ${r.status}`);
       return r.text();
     },
+    activeWaits: () => handle.waits.size(),
     async close() {
       handle.close();
       await new Promise<void>((r) => handle.server.close(() => r()));

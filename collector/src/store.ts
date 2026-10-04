@@ -783,13 +783,16 @@ export class Store extends EventEmitter {
   // bounded by the same 1 MiB page budget (the newest are kept). `newOnly` has no
   // meaning without a cursor and is ignored. `nextSeq` is the newest item's seq,
   // or `lastSeq` when nothing matched; there is no cursor, so `gap` is false.
-  lastEntries(n: number, opts: Omit<SeqQuery, 'limit' | 'newOnly'> = {}): SeqPage {
+  // `floorSeq` stops the walk at entries whose seq is at or below it (the
+  // long-poll's `nearMisses` look only above the waiter's cursor).
+  lastEntries(n: number, opts: Omit<SeqQuery, 'limit' | 'newOnly'> & { floorSeq?: number } = {}): SeqPage {
     const { index, members } = this.seqScope(opts);
     const cap = Math.min(Math.max(1, n), PAGE_MAX_RECORDS);
     const items: EntrySummary[] = [];
     let used = 2;
     let nextSeq: number | null = null;
     for (const { seq, key } of index ? index.descending() : []) {
+      if (opts.floorSeq != null && seq <= opts.floorSeq) break;
       const item = this.seqSummary(key, 0, opts, members);
       if (!item) continue;
       const size = Buffer.byteLength(JSON.stringify(item)) + 1;
