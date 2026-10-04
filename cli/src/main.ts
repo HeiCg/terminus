@@ -161,6 +161,7 @@ Common filters (tail, ls): --device <id> --method GET,POST --status 4xx|5xx|200
 
 Connection: --host <h> (default 127.0.0.1) --port <p> (default 8787)
 Auth:       --token <t> | TERMINUS_TOKEN | admin-token file in the state dir
+            (the read-only reader-token works for status and ls only)
 Output:     --json for machine-readable output; NO_COLOR disables colour
 Help:       terminus <command> --help for a command's flags
 Version:    terminus --version | -V

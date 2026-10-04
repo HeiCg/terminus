@@ -59,6 +59,15 @@ The admin token is resolved in this order:
 With none of these you get:
 `no token: pass --token, set TERMINUS_TOKEN, or run the collector on this machine`.
 
+`--token` or `TERMINUS_TOKEN` may instead hold the read-only **reader token**, which
+the collector writes to `reader-token` in the same state dir. With it, `status` and
+`ls` work (`status` then reports from `GET /api/status` only, since the live `/ui`
+socket is admin-only, and `--json` carries `snapshot: null`). Commands that need
+admin (`tail`, `clear`, `pause`, `resume`, `pair`, `replay`, `export`) exit `2` with
+`this command needs the admin token (reader token given)`. The file fallback always
+reads `admin-token`. See
+[docs/read-api.md](../docs/read-api.md#authentication).
+
 ## Commands
 
 | Command | What it does |
