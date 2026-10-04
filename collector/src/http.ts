@@ -13,6 +13,7 @@ import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 import { performReplay } from './replay.js';
 import { sanCoversHost } from './security/identity.js';
+import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters } from './entryFilters.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -93,14 +94,10 @@ function forbiddenScope(res: http.ServerResponse): void {
 // re-baselines. Unlike the lenient legacy `limit`, every value here is strict.
 // `scope` is the resolved device set (null: unscoped). When the caller named
 // `externalId` or `bundleId` the response echoes it as `devices` (P2), so a client
-// can see which devices its filter selected, an empty list included.
+// can see which devices its filter selected, an empty list included. The P4
+// filters (method, urlContains, status, source, completed) AND with all of it.
 function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): { status: number; body: unknown } {
   const bad = (message: string) => ({ status: 400, body: { error: 'bad_request', message } });
-  const nonNegInt = (name: string): number | null => {
-    const raw = q.get(name) ?? '';
-    const n = Number(raw);
-    return /^\d+$/.test(raw) && Number.isSafeInteger(n) ? n : null;
-  };
   const isLast = q.has('last');
   if (q.has('cursor')) return bad('afterSeq/last cannot be combined with cursor');
   if (isLast && q.has('afterSeq')) return bad('last cannot be combined with afterSeq');
@@ -115,30 +112,30 @@ function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): {
   let limit: number | undefined;
   if (q.has('limit')) {
     if (isLast) return bad('limit cannot be combined with last');
-    const n = nonNegInt('limit');
+    const n = nonNegIntParam(q, 'limit');
     if (n === null || n < 1) return bad('limit must be a positive integer');
     limit = n;
   }
-  const n = nonNegInt(isLast ? 'last' : 'afterSeq');
+  const n = nonNegIntParam(q, isLast ? 'last' : 'afterSeq');
   if (n === null) return bad(`${isLast ? 'last' : 'afterSeq'} must be a non-negative integer`);
   if (isLast && (n < 1 || n > 200)) return bad('last must be between 1 and 200');
+  const filters = parseEntryFilters(q);
+  if (!filters.ok) return bad(filters.message);
+  const match = filters.value;
 
   const { epoch, lastSeq } = store.seqState();
   const stale = { status: 409, body: { error: 'stale_cursor', epoch, lastSeq } };
   if (q.has('epoch') && q.get('epoch') !== epoch) return stale;
   if (!isLast && n > lastSeq) return stale;
   const deviceIds = scope ?? undefined;
-  const page = isLast ? store.lastEntries(n, { deviceIds }) : store.entriesAfterSeq(n, { deviceIds, limit, newOnly });
+  const page = isLast ? store.lastEntries(n, { deviceIds, match }) : store.entriesAfterSeq(n, { deviceIds, limit, newOnly, match });
   const echo = q.get('externalId') || q.get('bundleId');
   return { status: 200, body: echo && scope ? { ...page, devices: scope } : page };
 }
 
-// The device-scope filters (P2) shared by /api/entries and /api/devices. An empty
-// value is treated as absent, like the legacy `device=`.
+// The device-scope filters (P2) shared by /api/entries and /api/devices.
 function deviceScope(store: Store, q: URLSearchParams): string[] | null {
-  return store.resolveDeviceScope({
-    device: q.get('device') || undefined, externalId: q.get('externalId') || undefined, bundleId: q.get('bundleId') || undefined,
-  });
+  return store.resolveDeviceScope(deviceScopeFilter(q));
 }
 
 export function createHttpServer(
@@ -277,6 +274,12 @@ export function createHttpServer(
               const r = seqEntries(store, u.searchParams, scope);
               res.writeHead(r.status, { 'content-type': 'application/json' });
               return res.end(JSON.stringify(r.body));
+            }
+            // The P4 filters exist only in the seq modes: refuse them here rather
+            // than return an unfiltered page the caller would take as filtered.
+            if (hasEntryFilters(u.searchParams)) {
+              res.writeHead(400, { 'content-type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'bad_request', message: 'filters require afterSeq or last' }));
             }
             // Cursor mode keeps its response shape: no `devices` echo.
             return json(store.entrySummaryPage(cursor, scope ?? undefined, parseLimit()));
