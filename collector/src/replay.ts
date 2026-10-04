@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Store } from './store.js';
 import type { EntryInput } from './types.js';
+import { isSensitiveName } from './security/sensitiveNames.js';
 
 // T7.1 request replay. The collector re-sends a captured request to its original
 // host from the operator's Mac and stores the result as a NEW entry
@@ -22,7 +23,10 @@ export type ReplayResult =
   | { ok: true; key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null; stripped: string[] }
   | { ok: false; code: 400 | 404 | 422; message: string };
 
-// Single source of truth for what counts as a credential when stripping (T8.1).
+// What counts as a credential when stripping: the shared P5 matcher
+// (security/sensitiveNames.ts, also used by the ingest redactor, honouring
+// TERMINUS_REDACT_EXTRA/ALLOW) plus the T8.1 replay list below, kept verbatim and
+// unconditional so the strip never removes less than it did before P5.
 // Header names: an exact match, or any `x-*` header naming a token/secret/key/auth.
 const SENSITIVE_HEADER_NAMES = new Set(['authorization', 'cookie', 'proxy-authorization', 'x-api-key', 'x-auth-token']);
 const SENSITIVE_HEADER_PATTERN = /^x-.*(token|secret|key|auth)/i;
@@ -32,11 +36,11 @@ const SENSITIVE_QUERY_NAMES = new Set(['token', 'access_token', 'api_key', 'apik
 
 function isSensitiveHeaderName(name: string): boolean {
   const n = name.toLowerCase();
-  return SENSITIVE_HEADER_NAMES.has(n) || SENSITIVE_HEADER_PATTERN.test(n);
+  return SENSITIVE_HEADER_NAMES.has(n) || SENSITIVE_HEADER_PATTERN.test(n) || isSensitiveName(name, 'header');
 }
 function isSensitiveQueryName(name: string): boolean {
   const n = name.toLowerCase();
-  return SENSITIVE_QUERY_NAMES.has(n) || SENSITIVE_HEADER_PATTERN.test(n);
+  return SENSITIVE_QUERY_NAMES.has(n) || SENSITIVE_HEADER_PATTERN.test(n) || isSensitiveName(name, 'query');
 }
 
 // Remove credential-bearing headers and query params, returning the cleaned

@@ -3,6 +3,7 @@ import http from 'node:http';
 import net from 'node:net';
 import { Store } from '../src/store.js';
 import { performReplay, stripCredentials } from '../src/replay.js';
+import { configureRedaction } from '../src/security/sensitiveNames.js';
 import { createCollectorHarness, type CollectorHarness } from './fixtures/harness.js';
 import type { Entry } from '../src/types.js';
 
@@ -173,6 +174,35 @@ describe('stripCredentials (T8.1)', () => {
     expect(u.searchParams.has('sig')).toBe(false);
     // `nested_key` does not match the exact list nor the `x-*` pattern: it survives.
     expect(u.searchParams.get('nested_key')).toBe('4');
+  });
+
+  it('still strips everything the pre-P5 replay list stripped (pin)', () => {
+    const oldHeaders = ['authorization', 'cookie', 'proxy-authorization', 'x-api-key', 'x-auth-token',
+      'x-monkey', 'x-author', 'x-signing-secret', 'X-Refresh-Token'];
+    const oldQuery = ['token', 'access_token', 'api_key', 'apikey', 'key', 'auth', 'signature', 'sig', 'x-monkey', 'KEY'];
+    configureRedaction({ allow: [...oldHeaders, ...oldQuery] }); // the old list ignores the allow config
+    try {
+      const r = stripCredentials(Object.fromEntries(oldHeaders.map((h) => [h, 'v'])),
+        `https://h.test/p?${oldQuery.map((q) => `${q}=v`).join('&')}`, new Set());
+      expect(r.headers).toEqual({});
+      expect(new URL(r.url).search).toBe('');
+    } finally { configureRedaction({}); }
+  });
+
+  it('also strips the shared P5 names (word matcher and legacy client/uid)', () => {
+    const r = stripCredentials({ 'X-Session-Id': 's', client: 'c', uid: 'u', accept: 'json' },
+      'https://h.test/p?nextPageToken=t&client_id=c&page=2', new Set());
+    expect(r.headers).toEqual({ accept: 'json' });
+    expect(new Set(r.stripped)).toEqual(new Set(['x-session-id', 'client', 'uid', '?nextpagetoken', '?client_id']));
+    expect(new URL(r.url).search).toBe('?page=2');
+  });
+
+  it('TERMINUS_REDACT_ALLOW exempts a shared-matcher name from the strip', () => {
+    configureRedaction({ allow: ['nextPageToken'] });
+    try {
+      const r = stripCredentials({}, 'https://h.test/p?nextPageToken=t', new Set());
+      expect(r.stripped).toEqual([]);
+    } finally { configureRedaction({}); }
   });
 
   it('never removes a name the caller protected (explicit override)', () => {
