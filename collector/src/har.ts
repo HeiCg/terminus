@@ -46,6 +46,8 @@ type TerminusHttpExt = {
   deviceId: string; id: string; source: string;
   ts?: number;
   replayOf?: Entry['replayOf'];
+  // P5: present only when a value was masked at ingest on either side.
+  redacted?: Entry['redacted'];
   sessions?: TerminusWsExt[];
 };
 
@@ -160,6 +162,7 @@ function httpExt(e: StoredEntry, linked: ExportSession[]): TerminusHttpExt {
   return {
     deviceId: e.deviceId, id: e.id, source: e.source,
     ...(e.replayOf ? { replayOf: e.replayOf } : {}),
+    ...(e.redacted ? { redacted: e.redacted } : {}),
     ...(linked.length ? { sessions: linked.map((s) => wsExt(s)) } : {}),
   };
 }

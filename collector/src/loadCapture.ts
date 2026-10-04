@@ -92,7 +92,7 @@ function bodyBytes(
 // third-party HAR carries none of this; a Terminus HAR carries device/id/source so
 // the entry lands exactly where it was captured, with its replay back-reference and
 // linked sockets (`sessions`) preserved.
-type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; sessions?: WsExt[] };
+type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; redacted?: Entry['redacted']; sessions?: WsExt[] };
 
 function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fallbackDevice: string, seen: Set<string>): void {
   const startedAt = (http?.ts ?? Date.parse(he.startedDateTime)) || Date.now();
@@ -110,6 +110,8 @@ function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fal
     durationMs: he.time >= 0 ? he.time : null,
     error: he.comment?.startsWith('error: ') ? he.comment.slice('error: '.length) : null,
     ...(http?.replayOf ? { replayOf: http.replayOf } : {}),
+    // The store ORs and normalizes the marker to booleans (mergeRedacted).
+    ...(http?.redacted ? { redacted: http.redacted } : {}),
   };
   store.addEntryInput(input);
 }

@@ -92,6 +92,7 @@ export function storedToEntrySummary(s: StoredEntry, q: EntrySeq): EntrySummary 
     method: s.method, url: s.url, status: s.status, durationMs: s.durationMs, error: s.error,
     requestBody: s.requestBody, responseBody: s.responseBody,
     seq: q.seq, firstSeq: q.firstSeq, receivedAt: q.receivedAt,
+    redacted: { request: s.redacted?.request === true, response: s.redacted?.response === true },
   };
 }
 

@@ -1,7 +1,7 @@
 import { gunzipSync, gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import type { EntryInput, BodyOmitted } from '../types.js';
-import { redactHeaders, redactUrl, redactText } from '../redactor.js';
+import { redactHeaders, redactUrl, redactText, contentTypeOf, redactionMarker, type RedactMark } from '../redactor.js';
 const gunzipAsync = promisify(gunzip);
 const MAX_GUNZIP = 64 * 1024 * 1024;
 
@@ -63,7 +63,8 @@ type DecodedBody = { bytes: Uint8Array | null; size: number; omitted: BodyOmitte
 // it is handed on to be hashed and stored. Oversize is rejected before any text
 // materialization; binary bytes are preserved (encoding marked via `omitted:
 // 'binary'` with bytes present); a fork's skip sentinel maps to `omitted: 'size'`.
-function decodeBody(s: string | null | undefined, maxBody: number): DecodedBody {
+// `contentType` picks the body pass (JSON/form/text); `mark` records a masking.
+function decodeBody(s: string | null | undefined, maxBody: number, contentType: string | null, mark: RedactMark): DecodedBody {
   if (s == null) return { bytes: null, size: 0, omitted: null }; // absent
   const buf = Buffer.from(s, 'base64');
   // Reject an oversized body before converting/materializing anything.
@@ -74,7 +75,7 @@ function decodeBody(s: string | null | undefined, maxBody: number): DecodedBody 
   let text: string | null = null;
   if (!buf.includes(0)) { try { text = strictUtf8.decode(buf); } catch { text = null; } }
   if (text == null) return { bytes: new Uint8Array(buf), size: buf.length, omitted: 'binary' };
-  const redacted = redactText(text) ?? text;
+  const redacted = redactText(text, contentType, mark) ?? text;
   const redBytes = Buffer.from(redacted, 'utf8');
   return { bytes: new Uint8Array(redBytes), size: redBytes.length, omitted: null };
 }
@@ -86,16 +87,20 @@ function contentType(h?: Kv[]): string {
 }
 
 function toEntryInput(t: Traffic, deviceKey: string, maxBody: number): EntryInput {
-  const req = decodeBody(t.request.body, maxBody);
-  const res = decodeBody(t.responseBodyData, maxBody);
+  // One sink per side feeds the entry's `redacted` marker (P5).
+  const reqMark: RedactMark = { hit: false }; const resMark: RedactMark = { hit: false };
+  const reqHeaders = headers(t.request.headers); const resHeaders = headers(t.response?.headers);
+  const req = decodeBody(t.request.body, maxBody, contentTypeOf(reqHeaders), reqMark);
+  const res = decodeBody(t.responseBodyData, maxBody, contentTypeOf(resHeaders), resMark);
   return {
     id: t.id, deviceId: deviceKey, source: 'atlantis', startedAt: Math.round(t.startAt * 1000),
-    method: t.request.method, url: redactUrl(t.request.url), requestHeaders: redactHeaders(headers(t.request.headers)),
+    method: t.request.method, url: redactUrl(t.request.url, reqMark), requestHeaders: redactHeaders(reqHeaders, reqMark),
     requestBytes: req.bytes, requestBodySize: req.size, requestBodyOmitted: req.omitted,
-    status: t.response?.statusCode ?? null, statusText: '', responseHeaders: redactHeaders(headers(t.response?.headers)),
+    status: t.response?.statusCode ?? null, statusText: '', responseHeaders: redactHeaders(resHeaders, resMark),
     responseBytes: res.bytes, responseBodySize: res.size, responseBodyOmitted: res.omitted,
     durationMs: t.endAt ? Math.round((t.endAt - t.startAt) * 1000) : null,
     error: t.error ? `${t.error.code} ${t.error.message}` : null,
+    ...redactionMarker(reqMark, resMark),
   };
 }
 

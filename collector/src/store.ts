@@ -13,7 +13,7 @@ import {
   storedToEntrySummary, storedToEntryDetail, storedFrameToSummary, readBodyBytes, type BodyBytes,
 } from './captureDto.js';
 import type { UiDevice, EntrySummary, EntryDetail, WsSummary, FrameSummary, Page, SeqPage } from './uiProtocol.js';
-import { redactUrl, redactHeaders, redactText } from './redactor.js';
+import { redactUrl, redactHeaders, redactText, contentTypeOf, redactionMarker, mergeRedacted, type RedactMark } from './redactor.js';
 import { log } from './log.js';
 
 // Metadata-page ceilings shared by the summary endpoints (SPEC): a page carries
@@ -213,8 +213,11 @@ export class Store extends EventEmitter {
     const resRef = this.admitEntryBody(input.responseBytes, input.responseBodyOmitted, input.responseBodySize, key);
     this.countOmission(reqRef); this.countOmission(resRef);
 
-    const { requestBytes: _rb, responseBytes: _sb, requestBodySize: _rs, responseBodySize: _ss, requestBodyOmitted: _ro, responseBodyOmitted: _so, ...meta } = input;
-    const stored: StoredEntry = { ...meta, requestBody: reqRef, responseBody: resRef };
+    const { requestBytes: _rb, responseBytes: _sb, requestBodySize: _rs, responseBodySize: _ss, requestBodyOmitted: _ro, responseBodyOmitted: _so, redacted: _rd, ...meta } = input;
+    // P5: an upsert (start packet then completion) ORs the redaction marker, so an
+    // earlier `true` on either side is never lost.
+    const redacted = mergeRedacted(existing?.redacted, input.redacted);
+    const stored: StoredEntry = { ...meta, ...(redacted ? { redacted } : {}), requestBody: reqRef, responseBody: resRef };
     const recBytes = serializedBytes(stored);
 
     if (recBytes > this.limits.maxRecordBytes) {
@@ -284,6 +287,8 @@ export class Store extends EventEmitter {
     status: number | null; statusText: string; responseHeaders: Record<string, string>;
     responseBody: string | null; responseBodySize: number; responseBodyOmitted: BodyOmitted;
     durationMs: number | null; error: string | null;
+    // Whether the response headers/body had a value masked (P5 marker).
+    responseRedacted: boolean;
   }): void {
     deviceId = this.resolveDeviceKey(deviceId);
     const key = keyOf(deviceId, id);
@@ -292,9 +297,10 @@ export class Store extends EventEmitter {
     const bytes = r.responseBody != null && r.responseBodyOmitted == null ? Buffer.from(r.responseBody, 'utf8') : null;
     const resRef = this.admitEntryBody(bytes, r.responseBodyOmitted, r.responseBodySize, key);
     this.countOmission(resRef);
+    const redacted = mergeRedacted(existing.redacted, r.responseRedacted ? { request: false, response: true } : undefined);
     const merged: StoredEntry = {
       ...existing, status: r.status, statusText: r.statusText, responseHeaders: r.responseHeaders,
-      durationMs: r.durationMs, error: r.error, responseBody: resRef,
+      durationMs: r.durationMs, error: r.error, responseBody: resRef, ...(redacted ? { redacted } : {}),
     };
     const recBytes = serializedBytes(merged);
     if (recBytes > this.limits.maxRecordBytes) {
@@ -563,14 +569,23 @@ export class Store extends EventEmitter {
         if (m.atlantisDeviceKey) this.recordAlias(m.atlantisDeviceKey, m.deviceId);
         return;
       }
-      case 'request':
+      case 'request': {
         // An XHR `request` marks the START of an exchange (its `response` patches it).
         this.markDevice(deviceId, 'startEvents');
-        return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url),
-        requestHeaders: redactHeaders(m.headers), requestBody: redactText(m.body), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
-        status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null });
-      case 'response': return this.patchEntryResponse(deviceId, m.id, { status: m.status, statusText: m.statusText, responseHeaders: redactHeaders(m.headers),
-        responseBody: redactText(m.body), responseBodySize: m.bodySize, responseBodyOmitted: m.bodyOmitted ?? null, durationMs: m.durationMs, error: m.error ?? null });
+        const mark: RedactMark = { hit: false };
+        return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url, mark),
+        requestHeaders: redactHeaders(m.headers, mark), requestBody: redactText(m.body, contentTypeOf(m.headers), mark), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
+        status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null,
+        ...redactionMarker(mark, { hit: false }) });
+      }
+      case 'response': {
+        const mark: RedactMark = { hit: false };
+        const responseHeaders = redactHeaders(m.headers, mark);
+        const responseBody = redactText(m.body, contentTypeOf(m.headers), mark);
+        return this.patchEntryResponse(deviceId, m.id, { status: m.status, statusText: m.statusText, responseHeaders,
+          responseBody, responseBodySize: m.bodySize, responseBodyOmitted: m.bodyOmitted ?? null, durationMs: m.durationMs, error: m.error ?? null,
+          responseRedacted: mark.hit });
+      }
       case 'ws_open': {
         // A resumed ws_open (the app replays it for a socket still open across a
         // generation) back-fills a synthesized session or is a no-op for a known

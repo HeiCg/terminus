@@ -27,6 +27,10 @@ export type EntrySummary = Pick<Entry, 'id' | 'deviceId' | 'source' | 'startedAt
   // the ORIGIN clock (the device's for Atlantis/XHR). Always set by the server;
   // optional only so pre-0.2 fixtures still type-check.
   seq?: number; firstSeq?: number; receivedAt?: number;
+  // P5: whether a value was masked at ingest on the request side (URL query,
+  // request headers/body) and on the response side (response headers/body).
+  // Always set by the server; optional only so pre-0.2 fixtures still type-check.
+  redacted?: { request: boolean; response: boolean };
   // Set by the fanout when a device-supplied identity string (id/url/…) exceeded
   // the message cap and was clipped; the record is otherwise intact.
   identityClipped?: true;

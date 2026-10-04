@@ -8,7 +8,7 @@
 // session/client id namespacing; it feeds decoded buffers in and pushes the
 // results into the store.
 import type { EntryInput, BodyOmitted } from '../types.js';
-import { redactHeaders, redactUrl, redactText } from '../redactor.js';
+import { redactHeaders, redactUrl, redactText, contentTypeOf, redactionMarker, type RedactMark } from '../redactor.js';
 
 // Same ceilings the Atlantis path enforces (see atlantis/decode.ts): 1 MiB per
 // HTTP body, 256 KiB per WebSocket message. A proxy body/frame is held to the
@@ -34,14 +34,15 @@ export type DecodedBody = { bytes: Uint8Array | null; size: number; omitted: Bod
 // handed on to be hashed and stored. Oversize is rejected before any text is
 // materialized (`omitted: 'size'`); binary bytes are preserved verbatim
 // (`omitted: 'binary'`, bytes present); text is redacted and re-encoded.
-export function classifyBody(buf: Uint8Array | null | undefined, maxBody = PROXY_PER_BODY_MAX): DecodedBody {
+// `contentType` picks the body pass (JSON/form/text); `mark` records a masking.
+export function classifyBody(buf: Uint8Array | null | undefined, maxBody = PROXY_PER_BODY_MAX, contentType: string | null = null, mark?: RedactMark): DecodedBody {
   if (buf == null) return { bytes: null, size: 0, omitted: null }; // absent
   if (buf.length > maxBody) return { bytes: null, size: buf.length, omitted: 'size' };
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
   let text: string | null = null;
   if (!b.includes(0)) { try { text = strictUtf8.decode(b); } catch { text = null; } }
   if (text == null) return { bytes: new Uint8Array(b), size: b.length, omitted: 'binary' };
-  const redacted = redactText(text) ?? text;
+  const redacted = redactText(text, contentType, mark) ?? text;
   const redBytes = Buffer.from(redacted, 'utf8');
   return { bytes: new Uint8Array(redBytes), size: redBytes.length, omitted: null };
 }
@@ -79,16 +80,20 @@ export type EntryParams = {
 // bodies are redacted here — redaction happens before the bytes are stored/hashed.
 export function buildEntryInput(p: EntryParams): EntryInput {
   const maxBody = p.maxBody ?? PROXY_PER_BODY_MAX;
-  const req = classifyBody(p.requestBuf, maxBody);
-  const res = classifyBody(p.responseBuf, maxBody);
+  // One sink per side feeds the entry's `redacted` marker (P5).
+  const reqMark: RedactMark = { hit: false }; const resMark: RedactMark = { hit: false };
+  const reqHeaders = normalizeHeaders(p.requestHeaders); const resHeaders = normalizeHeaders(p.responseHeaders);
+  const req = classifyBody(p.requestBuf, maxBody, contentTypeOf(reqHeaders), reqMark);
+  const res = classifyBody(p.responseBuf, maxBody, contentTypeOf(resHeaders), resMark);
   return {
     id: p.ids.id, deviceId: p.ids.deviceId, source: 'proxy', startedAt: p.startedAt,
-    method: p.method, url: redactUrl(p.url), requestHeaders: redactHeaders(normalizeHeaders(p.requestHeaders)),
+    method: p.method, url: redactUrl(p.url, reqMark), requestHeaders: redactHeaders(reqHeaders, reqMark),
     requestBytes: req.bytes, requestBodySize: req.size, requestBodyOmitted: req.omitted,
-    status: p.status ?? null, statusText: p.statusText ?? '', responseHeaders: redactHeaders(normalizeHeaders(p.responseHeaders)),
+    status: p.status ?? null, statusText: p.statusText ?? '', responseHeaders: redactHeaders(resHeaders, resMark),
     responseBytes: res.bytes, responseBodySize: res.size, responseBodyOmitted: res.omitted,
     durationMs: p.durationMs ?? null,
     error: p.error ?? null,
+    ...redactionMarker(reqMark, resMark),
   };
 }
 
