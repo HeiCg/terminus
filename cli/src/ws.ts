@@ -1,7 +1,8 @@
 import { WebSocket } from 'ws';
+import type { IncomingMessage } from 'node:http';
 import type { UiMessage, SnapshotMessage } from '../../collector/src/uiProtocol.js';
 import type { Config } from './config.js';
-import { authError, generalError, unreachableError, CliError } from './errors.js';
+import { authError, generalError, unreachableError, scopeError, isForbiddenScopeBody, CliError } from './errors.js';
 
 // The /ui WebSocket the dashboard uses. The collector's upgrade handler requires a
 // valid bearer (or session) AND a loopback Origin on its own port — a browser sends
@@ -21,6 +22,19 @@ function mapUpgrade(status: number | undefined, config: Config): Error {
   return generalError(`/ui upgrade -> ${status}`);
 }
 
+// A refused upgrade: read the (small) response body so a 403 `forbidden_scope` (a
+// reader token; the /ui socket is admin-only) gets its own message, then map it.
+function onRefused(res: IncomingMessage, config: Config, fail: (e: Error) => void, done: () => void): void {
+  if (res.statusCode !== 403) { fail(mapUpgrade(res.statusCode, config)); done(); return; }
+  const chunks: Buffer[] = [];
+  res.on('data', (d: Buffer) => { if (chunks.length < 16) chunks.push(d); });
+  res.once('end', () => {
+    fail(isForbiddenScopeBody(Buffer.concat(chunks).toString('utf8')) ? scopeError() : mapUpgrade(403, config));
+    done();
+  });
+  res.once('error', () => { fail(mapUpgrade(403, config)); done(); });
+}
+
 // Connect, wait for the initial snapshot the broadcaster sends on add, then close.
 // The message handler is attached at socket creation (before `open`) because the
 // server sends the snapshot immediately on upgrade — attaching it after `open` would
@@ -36,7 +50,7 @@ export function firstSnapshot(config: Config): Promise<SnapshotMessage> {
       catch { finish(() => reject(generalError('malformed frame from collector'))); ws.close(); return; }
       if (m.type === 'snapshot') { finish(() => resolve(m)); ws.close(); }
     });
-    ws.once('unexpected-response', (_req, res) => { finish(() => reject(mapUpgrade(res.statusCode, config))); ws.terminate(); });
+    ws.once('unexpected-response', (_req, res) => onRefused(res, config, (e) => finish(() => reject(e)), () => ws.terminate()));
     ws.once('error', () => finish(() => reject(unreachableError(config.host, config.port))));
     ws.once('close', () => finish(() => reject(generalError('socket closed before snapshot'))));
   });
@@ -76,7 +90,7 @@ export function streamUi(config: Config, { onMessage, onOpen, signal }: StreamOp
       catch { return; } // never crash the stream on one bad frame
       onMessage(m);
     });
-    ws.once('unexpected-response', (_req, res) => { fail(mapUpgrade(res.statusCode, config)); ws.terminate(); });
+    ws.once('unexpected-response', (_req, res) => onRefused(res, config, fail, () => ws.terminate()));
     // Before the socket opened, an error means we never reached the collector; after,
     // it is a mid-stream drop. Both exit 3, but the message differs.
     ws.once('error', () => fail(opened ? new CliError('connection lost', 3) : unreachableError(config.host, config.port)));

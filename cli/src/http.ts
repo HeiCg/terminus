@@ -1,11 +1,12 @@
 import type { Config } from './config.js';
-import { authError, generalError, unreachableError, CliError } from './errors.js';
+import { authError, generalError, unreachableError, scopeError, isForbiddenScopeBody, CliError } from './errors.js';
 
-// The HTTP surface the commands use. Every call carries the admin bearer; the
+// The HTTP surface the commands use. Every call carries the configured bearer; the
 // collector accepts a bearer without an Origin on loopback, so GETs and the small
 // POST mutations need no Origin (only the /ui socket does). A transport failure
 // (the collector is not listening) becomes an exit-3 CliError with the run hint; a
-// 401/403 becomes exit 2; any other non-2xx becomes exit 1.
+// 401/403 becomes exit 2 (a 403 `forbidden_scope`, a reader token on an admin
+// route, says so); any other non-2xx becomes exit 1.
 
 function authHeader(config: Config): Record<string, string> {
   return { authorization: `Bearer ${config.token}` };
@@ -23,6 +24,7 @@ async function request(config: Config, pathAndQuery: string, init?: RequestInit)
     // reachable at this host/port.
     throw unreachableError(config.host, config.port);
   }
+  if (res.status === 403 && isForbiddenScopeBody(await res.text().catch(() => ''))) throw scopeError();
   if (res.status === 401 || res.status === 403) {
     throw authError('authentication failed — check --token / TERMINUS_TOKEN, or restart the collector');
   }
