@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Store, EXPORT_LEASE_MS } from '../src/store.js';
 import { writeHar, writeJson } from '../src/har.js';
 import type { EntryInput } from '../src/types.js';
+import { VERSION } from '../src/version.js';
 import { scenarios, renderHar } from './fixtures/har/scenarios.js';
 
 // A collecting Writable with a tiny highWaterMark so a multi-chunk stream forces
@@ -351,6 +352,13 @@ function harErrors(har: any): string[] {
   return errs;
 }
 
+// `log.creator.version` is the package version, which moves on every release; the
+// drift check compares everything else, and the rendered value is pinned to VERSION.
+function withoutCreatorVersion(har: any): any {
+  const { version: _version, ...creator } = har.log.creator;
+  return { ...har, log: { ...har.log, creator } };
+}
+
 describe('HAR fixtures — no silent drift (R5 manual-import artifact)', () => {
   for (const sc of scenarios) {
     it(`${sc.file} matches the exporter output and is HAR 1.2 valid`, async () => {
@@ -359,7 +367,9 @@ describe('HAR fixtures — no silent drift (R5 manual-import artifact)', () => {
       const committed = JSON.parse(readFileSync(committedPath, 'utf8'));
       // The committed artifact must equal a fresh render of its seed — an exporter
       // change that would alter the fixture fails here instead of drifting.
-      expect(rendered).toEqual(committed);
+      expect(rendered.log.creator.version).toBe(VERSION);
+      expect(typeof committed.log.creator.version).toBe('string');
+      expect(withoutCreatorVersion(rendered)).toEqual(withoutCreatorVersion(committed));
       expect(harErrors(committed)).toEqual([]);
     });
   }
