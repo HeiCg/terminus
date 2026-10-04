@@ -112,11 +112,23 @@ type StoredSession = {
 
 export type StoreOptions = { limits?: Partial<RetentionLimits>; bodies?: BodyStore };
 
-// A server-sequence read (P1). `deviceId` scopes to one device's index; `limit`
-// lowers the page cap; `newOnly` keeps only entries created after the cursor
-// (`firstSeq > afterSeq`); `match` is an extra predicate over the summary, the
-// hook the later filters (and a long-poll re-check) plug into.
-export type SeqQuery = { deviceId?: string; limit?: number; newOnly?: boolean; match?: (e: EntrySummary) => boolean };
+// A server-sequence read (P1). `deviceId` scopes to one device's index;
+// `deviceIds` (P2) scopes to a SET of devices and wins over `deviceId` when both
+// are given: empty matches nothing, one id takes the per-device index, several walk
+// the global index keeping only members. `limit` lowers the page cap; `newOnly`
+// keeps only entries created after the cursor (`firstSeq > afterSeq`); `match` is
+// an extra predicate over the summary, the hook the later filters (and a long-poll
+// re-check) plug into.
+export type SeqQuery = { deviceId?: string; deviceIds?: readonly string[]; limit?: number; newOnly?: boolean; match?: (e: EntrySummary) => boolean };
+
+// The device-scope filters of the read API (P2). `device` names one device (an
+// alias resolves to its canonical id); `externalId`/`bundleId` select every device
+// record announcing that value. Absent filters do not narrow.
+export type DeviceScopeFilter = { device?: string; externalId?: string; bundleId?: string };
+
+// One of a few seq indexes to walk, plus the member set when the walk is over the
+// global index on behalf of several devices.
+type SeqScope = { index: SeqIndex | undefined; members: Set<string> | null; ids: readonly string[] | null };
 
 // In-memory capture store with bounded retention on every axis (R6/O03/O04/O05).
 // Bodies are held once in the content-addressed BodyStore; records hold only
@@ -724,9 +736,15 @@ export class Store extends EventEmitter {
   }
 
   // GET /api/entries — paged entry summaries (identity + BodyRefs, no headers/bytes).
-  entrySummaryPage(cursorRaw?: string | null, deviceId?: string, limit = PAGE_MAX_RECORDS): Page<EntrySummary> {
-    const index = deviceId ? this.entryIndexByDevice.get(deviceId) : this.entryIndexGlobal;
+  // `device` is one id (its own index) or a set (P2): an empty set matches nothing,
+  // one id takes that device's index, several walk the global index (same sort key,
+  // so the cursor means the same thing) keeping only members.
+  entrySummaryPage(cursorRaw?: string | null, device?: string | readonly string[], limit = PAGE_MAX_RECORDS): Page<EntrySummary> {
+    const ids = typeof device === 'string' ? [device] : device;
+    const members = ids && ids.length > 1 ? new Set(ids) : null;
+    const index = !ids || members ? this.entryIndexGlobal : ids.length === 1 ? this.entryIndexByDevice.get(ids[0]) : undefined;
     return this.pageIndex<EntrySummary>(index, cursorRaw, limit, (k) => {
+      if (members && !members.has(k.deviceId)) return undefined;
       const key = keyOf(k.deviceId, k.id);
       const s = this.entriesByKey.get(key);
       return s ? { sk: this.entrySk(s), item: storedToEntrySummary(s, this.entrySeq.get(key)!) } : undefined;
@@ -745,20 +763,20 @@ export class Store extends EventEmitter {
   // cap. `hasMore` is exact: it is set only when a further MATCHING entry did not
   // fit. The caller validates `afterSeq` against `seqState()` (stale cursor).
   entriesAfterSeq(afterSeq: number, opts: SeqQuery = {}): SeqPage {
-    const index = opts.deviceId ? this.seqIndexByDevice.get(opts.deviceId) : this.seqIndexGlobal;
+    const { index, members, ids } = this.seqScope(opts);
     const cap = Math.min(Math.max(1, opts.limit ?? PAGE_MAX_RECORDS), PAGE_MAX_RECORDS);
     const items: EntrySummary[] = [];
     let used = 2; // "[]"
     let nextSeq = afterSeq;
     let hasMore = false;
     for (const { seq, key } of index ? index.after(afterSeq) : []) {
-      const item = this.seqSummary(key, afterSeq, opts);
+      const item = this.seqSummary(key, afterSeq, opts, members);
       if (!item) continue;
       const size = Buffer.byteLength(JSON.stringify(item)) + 1;
       if (items.length >= cap || (items.length > 0 && used + size > PAGE_MAX_BYTES)) { hasMore = true; break; }
       items.push(item); used += size; nextSeq = seq;
     }
-    return { items, nextSeq, ...this.seqEnvelope(), gap: this.seqGap(afterSeq, opts.deviceId), hasMore };
+    return { items, nextSeq, ...this.seqEnvelope(), gap: this.seqGap(afterSeq, ids), hasMore };
   }
 
   // The `n` (1..200) most recent entries by seq that match, returned ascending,
@@ -766,13 +784,13 @@ export class Store extends EventEmitter {
   // meaning without a cursor and is ignored. `nextSeq` is the newest item's seq,
   // or `lastSeq` when nothing matched; there is no cursor, so `gap` is false.
   lastEntries(n: number, opts: Omit<SeqQuery, 'limit' | 'newOnly'> = {}): SeqPage {
-    const index = opts.deviceId ? this.seqIndexByDevice.get(opts.deviceId) : this.seqIndexGlobal;
+    const { index, members } = this.seqScope(opts);
     const cap = Math.min(Math.max(1, n), PAGE_MAX_RECORDS);
     const items: EntrySummary[] = [];
     let used = 2;
     let nextSeq: number | null = null;
     for (const { seq, key } of index ? index.descending() : []) {
-      const item = this.seqSummary(key, 0, opts);
+      const item = this.seqSummary(key, 0, opts, members);
       if (!item) continue;
       const size = Buffer.byteLength(JSON.stringify(item)) + 1;
       if (items.length >= cap || (items.length > 0 && used + size > PAGE_MAX_BYTES)) break;
@@ -782,10 +800,20 @@ export class Store extends EventEmitter {
     return { items, nextSeq: nextSeq ?? this.lastSeq, ...this.seqEnvelope(), gap: false, hasMore: false };
   }
 
-  private seqSummary(key: string, afterSeq: number, opts: SeqQuery): EntrySummary | null {
+  // Which seq index a read walks (P2): one device's own index, the global one
+  // (unscoped, or several devices filtered by `members`), or none (empty set).
+  private seqScope(opts: Pick<SeqQuery, 'deviceId' | 'deviceIds'>): SeqScope {
+    const ids = opts.deviceIds ?? (opts.deviceId ? [opts.deviceId] : null);
+    if (!ids) return { index: this.seqIndexGlobal, members: null, ids: null };
+    if (ids.length === 1) return { index: this.seqIndexByDevice.get(ids[0]), members: null, ids };
+    return { index: ids.length > 1 ? this.seqIndexGlobal : undefined, members: new Set(ids), ids };
+  }
+
+  private seqSummary(key: string, afterSeq: number, opts: SeqQuery, members: Set<string> | null): EntrySummary | null {
     const s = this.entriesByKey.get(key);
     const q = this.entrySeq.get(key);
     if (!s || !q) return null;
+    if (members && !members.has(s.deviceId)) return null;
     if (opts.newOnly && q.firstSeq <= afterSeq) return null;
     const item = storedToEntrySummary(s, q);
     return opts.match && !opts.match(item) ? null : item;
@@ -796,10 +824,26 @@ export class Store extends EventEmitter {
   }
 
   // `gap`: an entry with a seq above the cursor was evicted or cleared (per device
-  // when the read is device-scoped), so the reader cannot have seen everything.
-  private seqGap(afterSeq: number, deviceId?: string): boolean {
-    const evicted = deviceId ? (this.evictedMaxSeqByDevice.get(deviceId) ?? 0) : this.evictedMaxSeq;
-    return evicted > afterSeq;
+  // when the read is device-scoped, true if ANY device of a set has one), so the
+  // reader cannot have seen everything.
+  private seqGap(afterSeq: number, ids: readonly string[] | null): boolean {
+    if (!ids) return this.evictedMaxSeq > afterSeq;
+    return ids.some((d) => (this.evictedMaxSeqByDevice.get(d) ?? 0) > afterSeq);
+  }
+
+  // Resolve the device-scope filters (P2) to the canonical deviceIds they select,
+  // or null when none is given (no narrowing). `device` resolves an alias;
+  // `externalId`/`bundleId` select the device records announcing that value; the
+  // filters given intersect. The result is sorted for a stable `devices` echo.
+  resolveDeviceScope(f: DeviceScopeFilter): string[] | null {
+    const sets: string[][] = [];
+    if (f.device) sets.push([this.resolveDeviceKey(f.device)]);
+    for (const field of ['externalId', 'bundleId'] as const) {
+      const want = f[field];
+      if (want) sets.push([...this.devs.values()].filter((d) => d[field] === want).map((d) => d.deviceId));
+    }
+    if (sets.length === 0) return null;
+    return sets.reduce((acc, next) => acc.filter((d) => next.includes(d))).sort();
   }
 
   // GET /api/ws — paged session summaries; the frame ARRAY is replaced by counts.
@@ -813,9 +857,10 @@ export class Store extends EventEmitter {
 
   // GET /api/devices — devices paged lexicographically by id (opaque cursor is the
   // last id returned), bounded by the same record/byte budget.
-  devicePage(cursorRaw?: string | null, limit = PAGE_MAX_RECORDS): Page<UiDevice> {
+  // `only` (P2) restricts the listing to those device ids (the resolved scope).
+  devicePage(cursorRaw?: string | null, limit = PAGE_MAX_RECORDS, only?: readonly string[] | null): Page<UiDevice> {
     const after = cursorRaw ? (() => { try { return Buffer.from(cursorRaw, 'base64url').toString('utf8'); } catch { return null; } })() : null;
-    const ids = [...this.devs.keys()].sort();
+    const ids = (only ? [...new Set(only)].filter((id) => this.devs.has(id)) : [...this.devs.keys()]).sort();
     const items: UiDevice[] = [];
     let used = 2; let last: string | null = null;
     const cap = Math.min(limit, PAGE_MAX_RECORDS);

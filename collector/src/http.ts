@@ -90,7 +90,10 @@ function forbiddenScope(res: http.ServerResponse): void {
 // `afterSeq`) are 400; an `epoch` other than this Store's, or an `afterSeq` past
 // `lastSeq` (a cursor from another boot), is 409 `stale_cursor` so the client
 // re-baselines. Unlike the lenient legacy `limit`, every value here is strict.
-function seqEntries(store: Store, q: URLSearchParams, device: string | undefined): { status: number; body: unknown } {
+// `scope` is the resolved device set (null: unscoped). When the caller named
+// `externalId` or `bundleId` the response echoes it as `devices` (P2), so a client
+// can see which devices its filter selected, an empty list included.
+function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): { status: number; body: unknown } {
   const bad = (message: string) => ({ status: 400, body: { error: 'bad_request', message } });
   const nonNegInt = (name: string): number | null => {
     const raw = q.get(name) ?? '';
@@ -122,9 +125,19 @@ function seqEntries(store: Store, q: URLSearchParams, device: string | undefined
   const { epoch, lastSeq } = store.seqState();
   const stale = { status: 409, body: { error: 'stale_cursor', epoch, lastSeq } };
   if (q.has('epoch') && q.get('epoch') !== epoch) return stale;
-  if (isLast) return { status: 200, body: store.lastEntries(n, { deviceId: device }) };
-  if (n > lastSeq) return stale;
-  return { status: 200, body: store.entriesAfterSeq(n, { deviceId: device, limit, newOnly }) };
+  if (!isLast && n > lastSeq) return stale;
+  const deviceIds = scope ?? undefined;
+  const page = isLast ? store.lastEntries(n, { deviceIds }) : store.entriesAfterSeq(n, { deviceIds, limit, newOnly });
+  const echo = q.get('externalId') || q.get('bundleId');
+  return { status: 200, body: echo && scope ? { ...page, devices: scope } : page };
+}
+
+// The device-scope filters (P2) shared by /api/entries and /api/devices. An empty
+// value is treated as absent, like the legacy `device=`.
+function deviceScope(store: Store, q: URLSearchParams): string[] | null {
+  return store.resolveDeviceScope({
+    device: q.get('device') || undefined, externalId: q.get('externalId') || undefined, bundleId: q.get('bundleId') || undefined,
+  });
 }
 
 export function createHttpServer(
@@ -249,12 +262,14 @@ export function createHttpServer(
           // /api/entries — paged summaries (identity + BodyRefs, no bodies). With
           // `afterSeq` or `last` it is the server-sequence read instead (P1).
           if (seg.length === 2) {
+            const scope = deviceScope(store, u.searchParams);
             if (u.searchParams.has('afterSeq') || u.searchParams.has('last')) {
-              const r = seqEntries(store, u.searchParams, device || undefined);
+              const r = seqEntries(store, u.searchParams, scope);
               res.writeHead(r.status, { 'content-type': 'application/json' });
               return res.end(JSON.stringify(r.body));
             }
-            return json(store.entrySummaryPage(cursor, device, parseLimit()));
+            // Cursor mode keeps its response shape: no `devices` echo.
+            return json(store.entrySummaryPage(cursor, scope ?? undefined, parseLimit()));
           }
           // /api/entries/:device/:id — detail (headers + BodyRefs); …/body — bytes.
           if (seg.length === 4) {
@@ -290,7 +305,10 @@ export function createHttpServer(
           res.writeHead(404); return res.end('not found');
         }
 
-        if (u.pathname === '/api/devices') { if (method !== 'GET') { res.writeHead(405); return res.end(); } return json(store.devicePage(cursor, parseLimit())); }
+        if (u.pathname === '/api/devices') {
+          if (method !== 'GET') { res.writeHead(405); return res.end(); }
+          return json(store.devicePage(cursor, parseLimit(), deviceScope(store, u.searchParams)));
+        }
         if (u.pathname === '/api/clear') {
           if (method !== 'POST') { res.writeHead(405); return res.end(); }
           if (!requireMutation(res, origin, auth)) return;
