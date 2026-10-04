@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Store } from './store.js';
 import type { EntryInput } from './types.js';
 import { isSensitiveName } from './security/sensitiveNames.js';
+import { redactHeaders, redactUrl, redactText, contentTypeOf, redactionMarker, type RedactMark } from './redactor.js';
 
 // T7.1 request replay. The collector re-sends a captured request to its original
 // host from the operator's Mac and stores the result as a NEW entry
@@ -14,6 +15,9 @@ import { isSensitiveName } from './security/sensitiveNames.js';
 // Headers the caller supplies explicitly via `overrides.headers` are never stripped
 // (the caller chose them). The names removed are reported back so the operator sees
 // what was dropped.
+//
+// T6: the stored replay entry (both sides) is redacted like every other source
+// before it reaches the store; redaction never changes the request that is sent.
 
 export type ReplayCredentials = 'strip' | 'keep';
 export type ReplayOverrides = { method?: string; url?: string; headers?: Record<string, string>; body?: string };
@@ -197,20 +201,32 @@ export async function performReplay(
   }
   const durationMs = Date.now() - startedAt;
 
-  const responseBytes = res ? new Uint8Array(await res.arrayBuffer().catch(() => new ArrayBuffer(0))) : null;
-  const requestBytes = sendBody != null ? Buffer.from(sendBody, 'utf8') : null;
+  const rawResponse = res ? new Uint8Array(await res.arrayBuffer().catch(() => new ArrayBuffer(0))) : null;
+  const responseHeaders = res ? collectHeaders(res) : {};
   const newId = `replay-${randomBytes(8).toString('hex')}`;
+
+  // T6: what is STORED goes through the same redactor as the other sources (URL
+  // query, headers, text bodies), one sink per side for the `redacted` marker. The
+  // request above already left with whatever the credential mode decided.
+  const reqMark: RedactMark = { hit: false }; const resMark: RedactMark = { hit: false };
+  const storedRequestBody = sendBody != null ? redactText(sendBody, contentTypeOf(headers), reqMark) : null;
+  const requestBytes = storedRequestBody != null ? Buffer.from(storedRequestBody, 'utf8') : null;
+  const responseBinary = rawResponse != null && !isUtf8(rawResponse);
+  const responseBytes = rawResponse == null || responseBinary
+    ? rawResponse
+    : Buffer.from(redactText(Buffer.from(rawResponse).toString('utf8'), contentTypeOf(responseHeaders), resMark) ?? '', 'utf8');
 
   const input: EntryInput = {
     id: newId, deviceId, source: 'replay', startedAt,
-    method, url,
-    requestHeaders: headers, requestBytes, requestBodySize: requestBytes?.length ?? 0, requestBodyOmitted: null,
+    method, url: redactUrl(url, reqMark),
+    requestHeaders: redactHeaders(headers, reqMark), requestBytes, requestBodySize: requestBytes?.length ?? 0, requestBodyOmitted: null,
     status: res ? res.status : null, statusText: res ? res.statusText : '',
-    responseHeaders: res ? collectHeaders(res) : {},
+    responseHeaders: redactHeaders(responseHeaders, resMark),
     responseBytes, responseBodySize: responseBytes?.length ?? 0,
-    responseBodyOmitted: responseBytes && !isUtf8(responseBytes) ? 'binary' : null,
+    responseBodyOmitted: responseBinary ? 'binary' : null,
     durationMs, error,
     replayOf: { id, credentials, stripped },
+    ...redactionMarker(reqMark, resMark),
   };
   store.addEntryInput(input);
 

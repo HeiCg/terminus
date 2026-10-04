@@ -17,6 +17,12 @@ const seen: { method: string; url: string; auth: string | null; cookie: string |
 beforeAll(async () => {
   target = http.createServer((req, res) => {
     if (req.url === '/boom') { req.socket.destroy(); return; }
+    if (req.url === '/login') {
+      // A response carrying credentials on both channels the redactor covers.
+      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'sid=s3cr3t', 'x-request-id': 'rid-1' });
+      res.end('{"access_token":"tok123","user":"u"}');
+      return;
+    }
     const chunks: Buffer[] = [];
     req.on('data', (d) => chunks.push(d));
     req.on('end', () => {
@@ -80,7 +86,8 @@ describe('performReplay (T7.1)', () => {
     // hop-by-hop and host/content-length were stripped from the outgoing request.
     expect(rep!.requestHeaders).not.toHaveProperty('host');
     expect(rep!.requestHeaders).not.toHaveProperty('content-length');
-    expect(rep!.requestHeaders.authorization).toBe('Bearer secret');
+    // T6: the stored copy is redacted like every other source; only the wire saw the value.
+    expect(rep!.requestHeaders.authorization).toBe('***');
   });
 
   it('applies overrides (method, url, headers, body)', async () => {
@@ -265,6 +272,77 @@ describe('performReplay credential stripping (T8.1)', () => {
     if (!result.ok) return;
     expect(seen[before].auth).toBe('Bearer chosen');
     expect(result.stripped).not.toContain('authorization');
+  });
+});
+
+// T6: the replay result is stored through the same redactor as the other sources
+// (URL query, headers, text bodies on both sides) and carries the `redacted`
+// marker; the request that actually leaves keeps what the credential mode decided.
+describe('performReplay stores a redacted result (T6)', () => {
+  it('keep: the wire gets the captured credentials, the stored request side is masked', async () => {
+    const store = new Store();
+    store.addEntry(credentialEntry());
+    const before = seen.length;
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1', credentials: 'keep' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const hit = seen[before];
+    expect(hit.auth).toBe('Bearer secret');
+    expect(hit.url).toBe('/v1/items?token=abc&access_token=xyz&page=2');
+
+    const rep = store.entry('d1', result.key.id)!;
+    expect(rep.requestHeaders.authorization).toBe('***');
+    expect(rep.requestHeaders.cookie).toBe('***');
+    expect(rep.requestHeaders['x-refresh-token']).toBe('***');
+    expect(rep.requestHeaders['x-request-id']).toBe('keep-me');
+    const u = new URL(rep.url);
+    expect(u.searchParams.get('token')).toBe('***');
+    expect(u.searchParams.get('access_token')).toBe('***');
+    expect(u.searchParams.get('page')).toBe('2');
+    expect(rep.redacted?.request).toBe(true);
+  });
+
+  it('an override body is sent verbatim but stored masked', async () => {
+    const store = new Store();
+    store.addEntry(entry());
+    const before = seen.length;
+    const result = await performReplay(store, {
+      deviceId: 'd1', id: 'r1',
+      overrides: { headers: { 'content-type': 'application/json' }, body: '{"user":"u","password":"hunter2"}' },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(seen[before].body).toBe('{"user":"u","password":"hunter2"}');
+    const rep = store.entry('d1', result.key.id)!;
+    expect(rep.requestBody).toBe('{"user":"u","password":"***"}');
+    // The target echoes the body back inside a JSON string: the response pass reaches it too.
+    expect(rep.responseBody).not.toContain('hunter2');
+    expect(rep.redacted).toEqual({ request: true, response: true });
+  });
+
+  it('masks credentials in the response headers and body', async () => {
+    const store = new Store();
+    store.addEntry(entry({ method: 'GET', url: `${targetUrl}/login`, requestHeaders: { accept: 'application/json' }, requestBody: null, requestBodySize: 0 }));
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rep = store.entry('d1', result.key.id)!;
+    expect(rep.responseHeaders['set-cookie']).toBe('***');
+    expect(rep.responseHeaders['x-request-id']).toBe('rid-1');
+    expect(rep.responseBody).toBe('{"access_token":"***","user":"u"}');
+    expect(rep.responseBodySize).toBe(Buffer.byteLength('{"access_token":"***","user":"u"}'));
+    expect(rep.redacted).toEqual({ request: false, response: true });
+  });
+
+  it('a clean replay carries no redacted marker', async () => {
+    const store = new Store();
+    store.addEntry(entry({ method: 'GET', url: `${targetUrl}/v1/plain?page=2`, requestHeaders: { accept: 'application/json' }, requestBody: null, requestBodySize: 0 }));
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rep = store.entry('d1', result.key.id)!;
+    expect(rep.redacted).toBeUndefined();
+    expect(rep.url).toBe(`${targetUrl}/v1/plain?page=2`);
   });
 });
 
