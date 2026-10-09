@@ -182,7 +182,11 @@ Patterns:
 | `api.example.com/health` | That host, exactly that path (the query is ignored). |
 
 No scheme, no port, no IPv6 literal; the only wildcards are a leading `*.` and a
-trailing `*` on a path. An IPv4 address is an exact host.
+trailing `*` on a path. An IPv4 address is an exact host. A path pattern is
+matched against the record's path percent-decoded once (an invalid escape stays
+as it is) and with its `.`/`..` segments resolved, so `/%61dmin` and
+`/v1%2F..%2Fadmin` both match `api.example.com/admin*`. Path matching is
+case-sensitive (`/Admin` is not `/admin`); hosts are not.
 
 Rules: exclude wins over include; an empty `include` records every host. A record
 whose URL is unknown (a WebSocket session the store opened from a frame before its
@@ -282,12 +286,16 @@ the message's `Content-Encoding` and fixes `Content-Length`. Rules may not set o
 remove `content-length`, `transfer-encoding`, `connection`, `keep-alive`,
 `upgrade`, `te`, `trailer` or `proxy-connection`. A rewrite to an absolute URL
 updates `Host` unless the rule sets it; a rewrite whose destination is the cloud
-metadata address (refused at validation) or a collector-internal endpoint closes
-the connection instead.
+metadata service in any spelling (`169.254.0.0/16`, `fd00:ec2::254`, numeric or
+IPv4-mapped/NAT64 forms, `metadata.google.internal`; refused at validation) or a
+collector-internal endpoint closes the connection instead.
 
-Caps: 200 rules, bodies and `find`/`with` strings 1 MiB each, 50 `replace` items,
-50 headers per map, header values 8 KiB. Within a phase the accumulated delay is
-capped at 30 s.
+Caps: 200 rules, bodies and `find` strings 1 MiB each, each `with` 64 KiB, 50
+`replace` items, 50 headers per map, header values 8 KiB. Within a phase the
+accumulated delay is capped at 30 s. A `replace` may grow the body by at most
+1 MiB past max(original size, 1 MiB): the replacement that would cross that cap,
+and every later one, is not made (the rest of the body is left unchanged), and
+the rule's entry in `rules` carries `note` saying so.
 
 ### Evaluation
 
@@ -311,7 +319,7 @@ The entry gains:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `rules` | array, optional | `[{ id, name, action, phase }]`, the rules that ran, in order (request phase first). Absent when none did. |
+| `rules` | array, optional | `[{ id, name, action, phase, note? }]`, the rules that ran, in order (request phase first). `note` explains a partial application (a `replace` stopped at its growth cap). Absent when none did. Rule names are admin-authored labels and are stored verbatim (not redacted). |
 | `mocked` | `true`, optional | A rule answered (`mock`, `block`) or cut off (`close`/`reset`, recorded as `error: "aborted ..."`) the device; no upstream was contacted. |
 | `originalMethod` | string, optional | The device's method, when a rewrite changed it. |
 | `originalUrl` | string, optional | The device's URL (redacted), when a rewrite changed it. |
@@ -408,6 +416,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `gap` | `true` when an entry with a `seq` above your cursor was evicted by retention or removed by a clear, in the scope you asked for. You may have missed records. |
 | `hasMore` | `true` only when a further matching entry did not fit in this page. Read again from `nextSeq`. |
 | `devices` | Present only when the query named `externalId` or `bundleId`: the sorted `deviceId`s that scope resolved to, possibly `[]`. |
+| `truncatedMatch` | Present (`true`) only when a `q` `matches` glob hit its work bound on some entry: that entry was left out of the page. See [Cost bounds](#cost-bounds). |
 
 Parameters, all optional except `afterSeq`:
 
@@ -465,7 +474,10 @@ it records one `source: "proxy"` entry with `method: "CONNECT"` and `url:
 and both bodies are `absent`. While the tunnel is open the entry is in flight
 (`status: null`); when it closes it is upserted with `status: 200`, `durationMs`,
 and the byte counts, or with `error: "tunnel_error <code>"` when the passthrough
-failed. The entry carries:
+failed. A tunnel from a client outside `TERMINUS_PROXY_ALLOW`, or to a refused
+destination (the metadata range; loopback, link-local and the collector's own
+addresses unless `TERMINUS_PROXY_ALLOW_LOCAL=1`), is closed before the proxy dials
+the upstream and leaves no entry. The entry carries:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -662,8 +674,20 @@ session differs in:
 - The HAR export leaves stream sessions out (HAR has no shape for them); the JSON
   export includes them.
 
-A client outside `TERMINUS_PROXY_ALLOW`, or a stream to the cloud metadata address
-`169.254.169.254`, is closed before the proxy dials anything.
+Raw streams are **opt-in**: they need `TERMINUS_PROXY_RAW_STREAMS=1`. Without it
+(the default) a tunnel that carries something other than HTTP, WebSocket or TLS is
+closed, as in 0.2, and no `tcp`/`tls` stream sessions are recorded (TLS
+pass-through tunnels keep their `CONNECT` entry).
+
+Every relay the proxy dials itself (a raw stream, a TLS pass-through tunnel, a
+SOCKS connection) is gated BEFORE the dial: a client outside
+`TERMINUS_PROXY_ALLOW`, a destination in the cloud metadata range (any spelling,
+or the name `metadata.google.internal`), and, unless `TERMINUS_PROXY_ALLOW_LOCAL=1`,
+a loopback, unspecified, link-local or collector-own address are closed before any
+upstream connection exists. A host name is resolved first and the proxy dials the
+address it checked; the session still shows the name the client asked for. The
+collector's own endpoints are exempt (tunnelled by exact host and port). See
+[security.md](security.md#what-the-mitm-proxy-implies).
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8787/api/ws?kind=tcp"
@@ -796,7 +820,8 @@ non-matching entry into a matching one (a response completing a request) counts.
 ```
 
 `items` holds up to `limit` matches in ascending `seq`; `nextSeq` is the `seq` of the
-last one.
+last one. Like the paged read, either answer carries `truncatedMatch: true` when a
+`q` `matches` glob hit its work bound during this wait.
 
 **Timeout.** Still HTTP `200`:
 
@@ -861,7 +886,8 @@ field names are case-insensitive. Every text comparison is case-insensitive.
 
 - `contains` and its alias `~`: substring.
 - `matches`: an anchored glob, `*` for any run and `?` for one character. There is
-  no regular expression, by design.
+  no regular expression, by design. Its work is bounded, see
+  [Cost bounds](#cost-bounds).
 - `in {a, b}`: equal to one of the values (for `status`, inside one of the classes
   or ranges).
 - `!=` is `not ==`: it is true for an entry where the field is missing.
@@ -959,8 +985,24 @@ consequences:
 An expression is at most **2048** characters, nests at most **32** levels
 (parentheses and `not`) and holds at most **512** terms; past that it is a `400`.
 Evaluation walks the expression once per entry, each step linear in the field it
-reads (`matches` at most field length times pattern length); there is no
-backtracking and no user regular expression.
+reads; there is no user regular expression.
+
+### Cost bounds
+
+`matches` is a two-pointer wildcard match that backtracks only to the last `*`:
+about one pass over the field for ordinary patterns, field length times pattern
+length only for pathological ones. Its work is bounded:
+
+- a field longer than **64 KiB** (65536 characters) is not glob-matched;
+- one entry's evaluation may spend at most **1,000,000** glob steps;
+- one read (`GET /api/entries`, one `GET /api/entries/wait`) may spend at most
+  **32,000,000** glob steps across all the entries it evaluates.
+
+An entry whose evaluation hits a bound does **not match**, whatever surrounds the
+glob (`not path matches ...` included), and the response carries
+`truncatedMatch: true`, so a client knows the page may be incomplete. Narrow the
+expression (a `host ==` or `status` term before the glob) or simplify the pattern.
+The UI search box applies the per-field and per-entry bounds silently.
 
 ## Recommended client flow
 

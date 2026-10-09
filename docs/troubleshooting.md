@@ -294,12 +294,16 @@ the exchanges themselves.
 driver, a game or IoT protocol, raw TLS sockets) and nothing shows up in the
 Sockets view, although the proxy is on.
 
-**Cause.** A system HTTP proxy setting only applies to the HTTP stacks that honour
-it; a raw socket client connects straight to its server and never reaches the
-proxy. The proxy only sees a raw stream when the client sends it through a
-`CONNECT` tunnel or SOCKS.
+**Cause.** Raw stream capture is off by default since 0.3.0: without
+`TERMINUS_PROXY_RAW_STREAMS=1` the proxy closes a tunnel that carries something
+other than HTTP, WebSocket or TLS (the client sees its connection drop right after
+the `CONNECT`), as 0.2 did. Otherwise: a system HTTP proxy setting only applies to
+the HTTP stacks that honour it; a raw socket client connects straight to its
+server and never reaches the proxy. The proxy only sees a raw stream when the
+client sends it through a `CONNECT` tunnel or SOCKS.
 
-**Fix.** Point the client at the proxy explicitly:
+**Fix.** Start the collector with `TERMINUS_PROXY_RAW_STREAMS=1`, then point the
+client at the proxy explicitly:
 
 - **SOCKS (most clients).** Start the collector with `TERMINUS_PROXY=1
   TERMINUS_PROXY_SOCKS=1` (plus `TERMINUS_PROXY_ALLOW=<device IP>`); SOCKS v4/v5 is
@@ -333,3 +337,22 @@ proxy. The proxy only sees a raw stream when the client sends it through a
   a test server, or use the protocol's implicit-TLS port so the proxy terminates
   TLS up front.
 - Frames are the TCP chunks as the proxy read them, not protocol messages.
+
+## A tunnel to a server on the collector machine is closed at once
+
+**Symptom.** A raw stream, a TLS pass-through tunnel or a SOCKS connection to a
+server running on the collector machine itself (`127.0.0.1`, `localhost`, or the
+Mac's own LAN IP) closes immediately and nothing is recorded; the collector log
+shows `proxy: refused raw stream <host> <client> loopback` (or `TLS tunnel`, with
+`the collector's own address`, `link-local`, `unspecified`, `resolves to ...`).
+
+**Cause.** Since 0.3.0 the proxy refuses every tunnel destination that is the
+collector machine itself (loopback, unspecified, link-local, any of its interface
+addresses, or a name resolving to one), so a LAN device cannot reach services that
+listen only locally (a database on `127.0.0.1:5432`, a dev server) through it.
+
+**Fix.** If the QA setup really runs its test servers on the collector machine,
+start the collector with `TERMINUS_PROXY_ALLOW_LOCAL=1`, and keep
+`TERMINUS_PROXY_ALLOW` to the QA devices only. The cloud metadata range stays
+refused regardless. Plain HTTP through the proxy is not affected: a device's
+request to `localhost` goes to the device's own machine, as in 0.2.

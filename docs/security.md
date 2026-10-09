@@ -225,8 +225,31 @@ for the QA device that trusts its CA. Turning it on means:
   that trust after QA is manual**. A device that trusts this CA can have its TLS
   intercepted by whatever holds the CA key.
 - **No open relay.** A client outside the required IP allowlist is rejected at the
-  connection; an empty allowlist rejects everyone. The cloud-metadata address
-  `169.254.169.254` is always refused.
+  connection; an empty allowlist rejects everyone. The cloud metadata service is
+  always refused, in every spelling: the link-local range `169.254.0.0/16` and
+  `fd00:ec2::254` written as any IPv4 form (`2852039166`, `0xa9fea9fe`,
+  `169.254.43518`), IPv4-mapped or NAT64 IPv6 (`[::ffff:a9fe:a9fe]`,
+  `[64:ff9b::a9fe:a9fe]`), and the names `metadata.google.internal` and `metadata`.
+  For proxied HTTP and WebSocket, a host NAME is also resolved before forwarding and
+  refused when it resolves into that range. Residual gap: mockttp resolves the name
+  again itself (it has no hook to dial a checked address), so a DNS answer that
+  changes between the two lookups (rebinding) is not caught for HTTP/WebSocket.
+  Tunnels and raw streams have no such gap (below).
+- **Tunnels never reach the collector machine itself.** A TLS pass-through tunnel,
+  a raw TCP/TLS stream and a SOCKS connection are relayed by the proxy as if the
+  device were the collector machine, so their destination is checked BEFORE the
+  proxy dials: loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0/8`, `::`),
+  link-local (`fe80::/10`) and every address of the collector's own interfaces are
+  refused (the client socket is closed, nothing is dialled), as is the metadata
+  range above. A host name is resolved first, every address it resolves to is
+  checked, and the proxy dials the checked address, so a second resolution cannot
+  swap it. `TERMINUS_PROXY_ALLOW_LOCAL=1` lifts the local ranges (for a QA setup
+  whose test servers run on the collector machine); it never lifts the metadata
+  range. The collector's own ingest/UI/Atlantis endpoints are still tunnelled (they
+  are exempt by exact host and port). Plain HTTP through the proxy keeps its 0.2
+  behaviour: mockttp sends a request a LAN client addresses to `localhost` or a
+  loopback address back to that client's own machine, never to the collector's
+  loopback.
 - **Collector endpoints are never intercepted.** The collector's own
   ingest/UI/Atlantis endpoints are tunnelled raw, so the device keeps pinning the
   collector's real certificate and no device token or auth header enters the proxy
@@ -235,24 +258,28 @@ for the QA device that trusts its CA. Turning it on means:
   `TERMINUS_PROXY_PASSTHROUGH` (or every host outside
   `TERMINUS_PROXY_INTERCEPT_ONLY`) is tunnelled raw: the proxy sees only the
   destination, the SNI and byte counts, never headers or bodies. A raw tunnel does
-  not pass the HTTP gate, so the proxy closes a tunnel from a client outside the
-  allowlist, or to `169.254.169.254`, as soon as it is reported, before the
-  upstream can answer. The two lists are host-only and the collector's own hosts are
-  never intercepted in either mode.
-- **Non-HTTP streams are captured too, in plaintext where the proxy can read
-  them.** A TCP connection inside a `CONNECT` (or, with `TERMINUS_PROXY_SOCKS=1`,
-  SOCKS) tunnel that is not HTTP is relayed and recorded as a `tcp`/`tls` stream
-  session: its bytes are stored like WebSocket frames. For plain TCP that is the
+  not pass the HTTP gate, so the proxy gates it before the dial: a tunnel from a
+  client outside the allowlist, or to a refused destination, is closed before any
+  upstream connection exists. The proxy refuses to start when that pre-dial gate
+  cannot be installed (an incompatible mockttp), rather than relay ungated. The two
+  lists are host-only and the collector's own hosts are never intercepted in either
+  mode.
+- **Non-HTTP streams are captured too when you opt in, in plaintext where the
+  proxy can read them.** Off by default: without `TERMINUS_PROXY_RAW_STREAMS=1` a
+  tunnel carrying something other than HTTP or TLS is closed, as in 0.2. With it, a
+  TCP connection inside a `CONNECT` (or, with `TERMINUS_PROXY_SOCKS=1`, SOCKS)
+  tunnel that is not HTTP is relayed and recorded as a `tcp`/`tls` stream session:
+  its bytes are stored like WebSocket frames. For plain TCP that is the
   protocol's cleartext (a database or cache protocol, SMTP, a custom game or IoT
   protocol), and for TLS the proxy terminated it is the decrypted plaintext, so
   passwords and tokens such protocols carry are in the store. Text chunks go through
   the redactor, which only knows HTTP-style names and patterns; binary chunks (a
   NUL byte or invalid UTF-8) are stored verbatim and never redacted. Narrow what is
   recorded with the capture scope. A pass-through TLS tunnel records only metadata.
-  Stream capture applies the same gate before the proxy dials anything: a client
-  outside the allowlist, or a stream to `169.254.169.254`, is closed first. SOCKS
-  is off by default; when on, it is gated by the same allowlist (SOCKS
-  authentication is not used).
+  Stream capture applies the same pre-dial gate: a client outside the allowlist,
+  or a stream to a refused destination (local or metadata, above), is closed
+  first. SOCKS is off by default; when on, it is gated by the same allowlist and
+  destination checks (SOCKS authentication is not used).
 - **Coverage is partial.** A client may ignore the proxy, pin its own certificate,
   use its own trust store, or use QUIC. The proxy never disables the app-side
   capture, and a refused proxy CA is recorded as a `tls_error` entry rather than
@@ -280,6 +307,10 @@ is never stored, so it never reaches the read API, the UI or an export; only a
 per-reason count remains. The scope is not a firewall: proxied traffic out of scope
 still reaches its upstream. Changing the scope is admin-only (the reader token gets
 `403`), and the persisted `scope.json` in the state directory is written `0600`.
+A path pattern is matched against the path percent-decoded once and with its
+`.`/`..` segments resolved, so an encoded spelling (`/%61dmin`,
+`/v1%2F..%2Fadmin`) cannot slip a record past an exclude. Path matching is
+case-sensitive: a server that treats `/Admin` like `/admin` needs both patterns.
 
 ## Interception rules alter live traffic
 
@@ -295,8 +326,12 @@ against errors, slow APIs and fake data), and also why it is guarded:
   needs the exact loopback `Origin`, like every other mutation.
 - Rules act only on the proxy source, only for clients on `TERMINUS_PROXY_ALLOW`,
   and never on the collector's own endpoints or inside TLS pass-through tunnels. A
-  rewrite cannot target the cloud metadata address (refused at validation) or a
-  collector-internal endpoint (the connection is closed instead). Framing headers
+  rewrite cannot target the cloud metadata service in any spelling (refused at
+  validation) or a collector-internal endpoint (the connection is closed instead).
+  A `replace` cannot multiply a body: each `with` is at most 64 KiB, and the
+  replaced body may grow by at most 1 MiB past max(original, 1 MiB); the
+  replacement that would cross it, and every later one, is not made and the
+  entry's `rules[].note` says so. Framing headers
   (`content-length`, `transfer-encoding`, `connection`, ...) are never rule-editable.
 - Rules persist across restarts in `<stateDir>/rules.json`, written `0600`
   atomically. Anyone who can write that file can change what the proxied device
@@ -304,9 +339,11 @@ against errors, slow APIs and fake data), and also why it is guarded:
   malformed file is ignored rather than half-applied.
 - The record is honest about it: an entry a rule touched lists the rules
   (`rules`), says when no upstream was contacted (`mocked`), and keeps the device's
-  original method and URL (redacted) next to what was actually sent. Rule names
-  and mock bodies are admin-chosen text and pass through the same redaction as
-  captured traffic once recorded.
+  original method and URL (redacted) next to what was actually sent. A mock body
+  is recorded as the response the device got and goes through the same redaction
+  as captured traffic. Rule names (and ids) are admin-authored labels, not
+  captured data: they are stored on entries verbatim, never redacted, so do not put
+  secrets in a rule name.
 
 ## Replay re-sends captured requests
 
@@ -370,9 +407,11 @@ stream on a NEW connection from the collector's machine:
   stored bytes are re-sent as they are (a text chunk the redactor masked at
   capture is re-sent masked), so whatever authentication the protocol carried in
   its frames is re-sent too. Choose the frames you send.
-- **SSRF guard.** The destination (captured or overridden) is resolved first and
-  refused (`422`) when any address is in the link-local range `169.254.0.0/16`
-  (the cloud metadata service) or is `fd00:ec2::254`; the connection then goes to
+- **SSRF guard.** The destination (captured or overridden) is refused (`422`)
+  when it is a metadata name (`metadata.google.internal`, `metadata`), and is
+  otherwise resolved first and refused when any address is in the link-local range
+  `169.254.0.0/16` (the cloud metadata service) or is `fd00:ec2::254`, in any
+  spelling (numeric IPv4 forms, IPv4-mapped, NAT64); the connection then goes to
   the resolved address, so the name cannot be re-resolved elsewhere in between.
   Other private addresses are allowed: replaying to LAN hosts is the point.
 - **Upstream TLS is verified**, like the HTTP replay; there is no insecure mode.

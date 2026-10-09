@@ -8,15 +8,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
-- Raw TCP/TLS stream capture on the proxy (capability `raw-streams`). Non-HTTP
-  traffic inside a `CONNECT` tunnel (and, with the new `TERMINUS_PROXY_SOCKS=1`,
+- Raw TCP/TLS stream capture on the proxy (capability `raw-streams`), opt-in with
+  `TERMINUS_PROXY_RAW_STREAMS=1`. Non-HTTP traffic inside a `CONNECT` tunnel (and, with the new `TERMINUS_PROXY_SOCKS=1`,
   SOCKS v4/v5 on the proxy port) is relayed and recorded as a stream session on
   the WebSocket session/frame model: `kind` `tcp` or `tls`, a `stream` field
   (`host`, `port`, `sni`, `plaintext`, `replayOf`), chunks as `out`/`in` frames with
   the WebSocket frame caps and retention (binary chunks kept verbatim, not
   redacted). TLS the proxy terminates is captured as plaintext; a TLS pass-through
-  tunnel gets a metadata-only session. The allowlist and the metadata-IP block close
-  a refused stream before anything is dialled; the capture scope applies.
+  tunnel gets a metadata-only session. The allowlist and the destination guard
+  close a refused stream before anything is dialled; the capture scope applies.
   `GET /api/ws` takes `kind=`. The HAR export leaves stream sessions out.
 - `POST /api/replay/stream` (admin only): re-send a captured stream's client frames
   (all, or a selection, with optional base64 overrides) on a fresh TCP or verified
@@ -33,9 +33,9 @@ All notable changes to this project are documented here. The format is based on
   `terminus_status`, `terminus_devices`, `terminus_entries`, `terminus_entry`
   (headers and optional bodies, size-capped, hex dump for binary),
   `terminus_wait` (with `nearMisses` on timeout), `terminus_ws_sessions` and
-  `terminus_ws_frames`. Results are one compact line per record plus the JSON as
-  `structuredContent`; captured content is wrapped in delimited untrusted-data
-  blocks. Token order: `--token`, `TERMINUS_TOKEN`, then the `reader-token` file,
+  `terminus_ws_frames`. Results are one compact line per record, captured content
+  wrapped in delimited untrusted-data blocks, plus a `structuredContent` limited to
+  collector-generated fields (cursors, counts, ids, status codes, timings, sizes). Token order: `--token`, `TERMINUS_TOKEN`, then the `reader-token` file,
   then `admin-token`. `terminus_replay` is registered only with the admin token
   and `TERMINUS_MCP_ALLOW_REPLAY=1`. A collector without `apiVersion` 1 is
   reported as too old.
@@ -127,6 +127,32 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Proxy: raw TCP/TLS stream relay and capture are opt-in,
+  `TERMINUS_PROXY_RAW_STREAMS=1` (default off). Off, a tunnel carrying something
+  other than HTTP, WebSocket or TLS is closed, as in 0.2, and no `tcp`/`tls`
+  stream sessions are recorded.
+- Proxy: raw streams, TLS pass-through tunnels and SOCKS connections no longer
+  reach the collector machine itself. Loopback (`127.0.0.0/8`, `::1`), unspecified
+  (`0.0.0.0/8`, `::`), link-local (`fe80::/10`) and the collector's own interface
+  addresses are refused before the dial, as is a name resolving to one (the name
+  is resolved first and the checked address dialled). `TERMINUS_PROXY_ALLOW_LOCAL=1`
+  lifts this for QA servers that run on the collector machine; the metadata range
+  stays refused. The collector's own endpoints are still tunnelled. Plain HTTP is
+  unchanged.
+- Proxy: the access gate for TLS pass-through tunnels runs before mockttp dials
+  the upstream (it used to close the tunnel once reported, after the dial), and
+  the proxy refuses to start when that gate cannot be installed.
+- MCP: `structuredContent` no longer carries the collector's raw JSON; only
+  cursors, counts, ids, status codes, timings and sizes, never URLs, headers,
+  bodies, frames or device names. `terminus_ws_sessions` with `kind` needs the
+  `raw-streams` capability (a tool error against an older collector).
+- Interception rules: each `replace` `with` is at most 64 KiB (`400` otherwise),
+  and a `replace` stops at a body growth of 1 MiB past max(original, 1 MiB),
+  leaving the rest unchanged and noting it in the entry's `rules[].note`.
+- Filter language: `matches` uses a two-pointer glob and its work is bounded (a
+  field over 64 KiB is not matched, 1M steps per entry, 32M per read); an entry
+  that hits a bound does not match and `GET /api/entries` / `/api/entries/wait`
+  answer `truncatedMatch: true`.
 - `POST /api/replay` answers an extra `stored` boolean: `false` when the request was
   sent but its result is out of the capture scope and was not recorded.
 - `--load` reports only the entries and sessions actually stored, so records out of
@@ -160,6 +186,25 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Security: an allowlisted LAN client could reach services listening only on the
+  collector machine's loopback (`CONNECT 127.0.0.1:5432`) through a raw stream,
+  a TLS pass-through tunnel or SOCKS. See Changed for the destination guard.
+- Security: the proxy, rule validation, `TERMINUS_PROXY_PASSTHROUGH` and stream
+  replay compared the metadata address as the literal `169.254.169.254`, so
+  `metadata.google.internal`, decimal `2852039166`, `[::ffff:a9fe:a9fe]`,
+  `fd00:ec2::254` (proxy) and NAT64 forms passed. IP literals are normalised and
+  the metadata names refused; proxied HTTP/WebSocket host names are resolved and
+  checked before forwarding (best effort: mockttp re-resolves, so DNS rebinding
+  between the two lookups is a documented residual gap). mockttp's mis-parse of a
+  bracketed IPv6 destination no longer hides it from the gate.
+- Security: a TLS pass-through tunnel from a client outside the allowlist could
+  open the upstream TCP connection before the gate closed it, and the gate failed
+  open when the client socket lookup missed.
+- Capture scope path patterns are matched against the percent-decoded,
+  dot-normalised path, so `/%61dmin` or `/v1%2F..%2Fadmin` no longer slip past an
+  `/admin*` exclude. Path matching stays case-sensitive.
+- docs/security.md said rule names pass through redaction; they are admin-authored
+  labels stored verbatim, which the doc now says.
 - Security: the proxy closed only the FIRST WebSocket upgrade from a client outside
   `TERMINUS_PROXY_ALLOW` (or to a metadata address); mockttp completed the guard
   rule after one match, so later refused upgrades reached the passthrough. The
