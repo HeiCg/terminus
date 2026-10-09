@@ -90,8 +90,9 @@ for the CLI install options.
 There is no npm publish step. A release is a git tag over the source, with the
 version bumped and the changelog rolled over:
 
-1. Bump `"version"` in all **three** `package.json` files to the new `x.y.z`:
-   `package.json` (root), `collector/package.json`, and `cli/package.json`.
+1. Bump `"version"` in all **four** `package.json` files to the new `x.y.z`:
+   `package.json` (root), `collector/package.json`, `cli/package.json`, and
+   `mcp/package.json`.
 2. In `CHANGELOG.md`, rename the `## Unreleased` heading to `## x.y.z — YYYY-MM-DD`
    (keep its `Added`/`Changed`/`Fixed` entries) and start a fresh empty
    `## Unreleased` above it.
