@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Added
+
+- Filter language: a Wireshark-style expression language shared by the Capture
+  search box and the read API. Comparisons (`==`, `!=`, `>`, `>=`, `<`, `<=`,
+  `contains`/`~`, glob `matches`, `in {…}`), `and`/`or`/`not` with parentheses,
+  bare fields as existence tests, and typed values (sizes `10kb`, durations
+  `250ms`, status classes `2xx`, ISO or relative times `-5m`) over `method`, `url`,
+  `host`, `path`, `query`, `scheme`, `port`, `status`, `source`, `device`,
+  `duration`, `size.req`/`size.res`, `time`, `seq`, `completed`, `error`,
+  `redacted.*`, `mime.res`, header fields and `body`. `GET /api/entries` (in
+  `afterSeq` and `last` modes) and `GET /api/entries/wait` accept it as `q=`,
+  ANDed with the other filters; a bad expression is `400` with the character
+  `offset`. Header fields read the stored, redacted headers; `device` also matches
+  alias keys, `externalId` and `bundleId`. New capability `query`. In the UI, a
+  parse error shows next to the search box while the last valid filter stays
+  applied, and the `?` sheet lists the syntax. Every 0.2 search (`method:GET
+  status:5xx login`) keeps its meaning. Limits: 2048 characters, 32 levels, 512
+  terms.
+
 ## 0.2.0 — 2026-10-08
 
 ### Added
