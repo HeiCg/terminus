@@ -52,16 +52,27 @@ missing or expires, the UI shows a login screen instead of reconnecting in a
 silent loop. You can still drive the collector with the admin bearer directly
 (e.g. `curl` with `Authorization: Bearer <adminToken>`).
 
-The topbar search box takes a mini-query as well as a plain substring: space-separated
-`key:value` terms filter by `method:` (comma-separated list), `status:` (a code like
-`404`, a class like `5xx`, or a range like `400-499`), `host:`, `path:`, `source:`
-(`xhr|atlantis|proxy`), `device:`, and `body:` (over already-loaded response/request
-bodies); quote a value to include spaces (`host:"api v2"`), and any token without a
-known `key:` is matched as a free substring over the request's method and URL. Query
-terms combine with the filter-bar chips using AND. The active device, chips, sort and
+The topbar search box takes a Wireshark-style filter expression as well as plain
+text: compare fields with `==`, `!=`, `>`, `>=`, `<`, `<=`, `contains` (or `~`),
+`matches` (a glob with `*` and `?`) and `in {a, b}`, combine with `and`/`&&`,
+`or`/`||`, `not`/`!` and parentheses, or name a field alone to test that it is set.
+For example `status >= 500 or (error)`, `method in {POST, PUT} and host ~ api`,
+`duration > 2s`, `size.res > 1mb`, `time > -5m`, `redacted.request`. Fields include
+`method`, `url`, `host`, `path`, `query`, `scheme`, `port`, `status` (`404`, `4xx`,
+`400-499`), `source`, `device`, `duration`, `size.req`, `size.res`, `time`, `seq`,
+`completed`, `error`, `redacted.request`/`redacted.response` and `body` (over
+already-loaded bodies); header fields (`header.<name>`, `mime.res`) work only
+through the read API's `q=` parameter, since the list has no headers. Plain words
+and quoted phrases search the method and URL, and the 0.2 `key:value` terms
+(`method:GET,POST`, `status:5xx`, `host:`, `path:`, `source:`, `device:`, `body:`)
+still work and mean the same (so a lone word such as `error` is still a text search;
+write `(error)` to test the field). While an expression does not parse, the error and its
+position show next to the box and the last valid filter stays applied. The full
+language is in [docs/read-api.md](../docs/read-api.md#filter-language). The search
+combines with the filter-bar chips using AND. The active device, chips, sort and
 search are mirrored into the URL hash, so a filtered view is bookmarkable and
 shareable, and it is restored on reload. Press `?` (or ⌘/Ctrl-`/`) for a sheet listing
-every keyboard shortcut; in the WebSocket frame inspector the search box finds matches
+every keyboard shortcut and the filter syntax with examples; in the WebSocket frame inspector the search box finds matches
 within the loaded frames and steps through them with Enter / Shift+Enter.
 
 The collector also writes the current admin token to `admin-token` in the state dir

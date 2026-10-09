@@ -51,3 +51,21 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     ],
   },
 ];
+
+// The filter-language cheat sheet the `?` sheet shows under the shortcuts: one
+// example per construct of the Capture search box's language (see the read API
+// docs, "Filter language"). Display-only, like the table above.
+export interface FilterExample {
+  example: string;
+  label: string;
+}
+
+export const FILTER_EXAMPLES: FilterExample[] = [
+  { example: 'status >= 400 && host ~ api', label: 'Compare (== != > >= < <=) and combine with && / and' },
+  { example: 'method in {POST, PUT} or (error)', label: 'Sets, or / ||, a bare field tests that it is set' },
+  { example: 'not source == proxy', label: 'Negate with not / !, group with ( )' },
+  { example: 'path matches "/v?/users/*"', label: 'Glob: * any run, ? one character; ~ is contains' },
+  { example: 'duration > 500ms || size.res > 1mb', label: 'Durations (ms s m h) and sizes (b kb mb gb)' },
+  { example: 'status == 5xx && time > -5m', label: 'Status classes; relative or ISO times' },
+  { example: 'method:post status:5xx login', label: 'Plain words and key:value terms work as before' },
+];

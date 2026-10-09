@@ -2,7 +2,8 @@ import type http from 'node:http';
 import type { Store, DeviceScopeFilter } from './store.js';
 import type { EntrySummary } from './uiProtocol.js';
 import { log } from './log.js';
-import { deviceScopeFilter, nonNegIntParam, parseEntryFilters, type EntryMatch, type Parsed } from './entryFilters.js';
+import { deviceScopeFilter, nonNegIntParam, parseEntryFilters, storeMatchEnv, type EntryMatch, type Parsed } from './entryFilters.js';
+import type { MatchEnv } from './filterLang.js';
 
 // P4: the long-poll `GET /api/entries/wait` and its shared dispatcher.
 
@@ -18,7 +19,7 @@ type WaitQuery = { afterSeq: number; newOnly: boolean; limit: number; timeoutMs:
 // Validate the wait parameters. Same strictness and errors as the afterSeq read:
 // `cursor`/`last` are refused, `afterSeq` is required, `limit` is 1..50 and
 // `timeoutMs` a non-negative integer clamped to 30 s.
-function parseWaitQuery(q: URLSearchParams): Parsed<WaitQuery> {
+function parseWaitQuery(q: URLSearchParams, env: MatchEnv): Parsed<WaitQuery> {
   const bad = (message: string): Parsed<never> => ({ ok: false, message });
   if (q.has('cursor')) return bad('wait cannot be combined with cursor');
   if (q.has('last')) return bad('wait cannot be combined with last');
@@ -43,7 +44,7 @@ function parseWaitQuery(q: URLSearchParams): Parsed<WaitQuery> {
     if (n === null) return bad('timeoutMs must be a non-negative integer');
     timeoutMs = Math.min(n, TIMEOUT_MAX_MS);
   }
-  const filters = parseEntryFilters(q);
+  const filters = parseEntryFilters(q, env);
   if (!filters.ok) return filters;
   return { ok: true, value: { afterSeq, newOnly, limit, timeoutMs, match: filters.value } };
 }
@@ -77,6 +78,7 @@ export type EntryWaits = {
 // completing a request) is a write like any other and is re-tested.
 export function createEntryWaits(store: Store, opts: { max?: number } = {}): EntryWaits {
   const max = opts.max ?? MAX_WAITS;
+  const env = storeMatchEnv(store);
   const waiters = new Set<Waiter>();
   let attached = false;
 
@@ -168,8 +170,11 @@ export function createEntryWaits(store: Store, opts: { max?: number } = {}): Ent
 
   return {
     handle(res, q) {
-      const parsed = parseWaitQuery(q);
-      if (!parsed.ok) return write(res, 400, { error: 'bad_request', message: parsed.message });
+      const parsed = parseWaitQuery(q, env);
+      if (!parsed.ok) {
+        const { message, offset } = parsed;
+        return write(res, 400, offset === undefined ? { error: 'bad_request', message } : { error: 'bad_request', message, offset });
+      }
       const { epoch, lastSeq } = store.seqState();
       if ((q.has('epoch') && q.get('epoch') !== epoch) || parsed.value.afterSeq > lastSeq) {
         return write(res, 409, { error: 'stale_cursor', epoch, lastSeq });

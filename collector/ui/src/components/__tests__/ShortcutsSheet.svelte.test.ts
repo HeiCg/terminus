@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import ShortcutsSheet from '../ShortcutsSheet.svelte';
-import { SHORTCUT_GROUPS } from '../../lib/shortcuts.js';
+import { SHORTCUT_GROUPS, FILTER_EXAMPLES } from '../../lib/shortcuts.js';
+import { buildFilter, UI_FILTER_CAPS } from '../../lib/filterLang.js';
 
 describe('ShortcutsSheet', () => {
   it('renders a modal dialog listing every shortcut from the keymap table', () => {
@@ -13,6 +14,15 @@ describe('ShortcutsSheet', () => {
       for (const item of group.items) {
         expect(screen.getByText(item.label)).toBeInTheDocument();
       }
+    }
+  });
+
+  it('lists the search filter syntax, every example a valid UI filter', () => {
+    render(ShortcutsSheet, { props: { onclose: vi.fn() } });
+    const section = screen.getByTestId('filter-syntax');
+    for (const ex of FILTER_EXAMPLES) {
+      expect(section).toHaveTextContent(ex.example);
+      expect(buildFilter(ex.example, UI_FILTER_CAPS).ok).toBe(true);
     }
   });
 

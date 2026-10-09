@@ -96,7 +96,7 @@ restart.
 
 ```json
 {"status":"ok","version":"0.2.0","apiVersion":1,
- "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker"]}
+ "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query"]}
 ```
 
 ```bash
@@ -115,6 +115,7 @@ two fields also appear on `GET /api/status`.
 | `filters` | The `method`, `urlContains`, `status`, `source` and `completed` filters on `afterSeq` and `last` reads. |
 | `wait` | `GET /api/entries/wait`. |
 | `redaction-marker` | The `redacted` field on entry summaries, details and exports. |
+| `query` | The `q` parameter: a [filter-language](#filter-language) expression on `afterSeq`, `last` and `wait`. |
 
 To feature-detect, call `GET /health` once at startup. A collector older than
 0.2.0 answers without `apiVersion` and `capabilities` and has none of the features
@@ -242,7 +243,7 @@ Parameters, all optional except `afterSeq`:
 | `limit` | A positive integer; lowers the page cap (values above 200 act as 200). |
 | `newOnly` | `true` or `false` (default). `true` keeps only entries with `firstSeq > afterSeq`. |
 | `device`, `externalId`, `bundleId` | [Device scope](#device-scope). |
-| `method`, `urlContains`, `status`, `source`, `completed` | [Filters](#filters). |
+| `method`, `urlContains`, `status`, `source`, `completed`, `q` | [Filters](#filters). |
 
 ### `last` mode
 
@@ -357,6 +358,15 @@ everything. They AND together, with the device scope, and with `newOnly`.
 | `status` | A code `201`, a class `2xx` (case-insensitive), or an inclusive range `200-299`; codes are `100` to `599` | `status` in range. An entry without a status never matches. |
 | `source` | `xhr`, `atlantis`, `proxy`, `replay` | `source` equal |
 | `completed` | `true` or `false` | `true`: has a `status` or an `error`. `false`: has neither (in flight). |
+| `q` | A [filter-language](#filter-language) expression, 1 to 2048 characters | Entries the expression selects |
+
+`q` combines with the other filters by AND, so `method=POST&q=status >= 500` is the
+same as `q=method == POST and status >= 500`. A `q` that does not parse or names
+an unknown field is `400` with the character `offset` of the problem:
+
+```json
+{"error":"bad_request","message":"q: expected a value after '>=', found end of input (at offset 9)","offset":9}
+```
 
 ### Page caps
 
@@ -368,7 +378,7 @@ caps. `limit` only lowers them.
 
 | Status | Body | When |
 | --- | --- | --- |
-| `400` | `{"error":"bad_request","message":"..."}` | A malformed parameter; `afterSeq` or `last` combined with `cursor`; `last` combined with `afterSeq`, `limit` or `newOnly`; a filter without `afterSeq` or `last`. |
+| `400` | `{"error":"bad_request","message":"..."}` | A malformed parameter; `afterSeq` or `last` combined with `cursor`; `last` combined with `afterSeq`, `limit` or `newOnly`; a filter (including `q`) without `afterSeq` or `last`. A `q` error adds `"offset"`, the character offset in the expression. |
 | `401` | empty | No valid credential. |
 | `403` | `{"error":"forbidden_scope","required":"admin"}` | Reader token outside its scope. |
 | `409` | `{"error":"stale_cursor","epoch":"...","lastSeq":n}` | Foreign `epoch`, or `afterSeq` above `lastSeq`. |
@@ -439,7 +449,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `limit` | `1` | `1` to `50`. |
 | `newOnly` | `false` | `true` or `false`, as on `afterSeq` reads. |
 | `device`, `externalId`, `bundleId` | | [Device scope](#device-scope). |
-| `method`, `urlContains`, `status`, `source`, `completed` | | [Filters](#filters). |
+| `method`, `urlContains`, `status`, `source`, `completed`, `q` | | [Filters](#filters). |
 
 `cursor` and `last` are refused (`400`). Parameter errors and `409 stale_cursor` are
 the same as on the `afterSeq` read.
@@ -466,7 +476,7 @@ last one.
 ```
 
 `nextSeq` echoes your `afterSeq`. `nearMisses` holds up to 5 entries with a `seq`
-above `afterSeq`, inside the device scope, that failed the other filters or
+above `afterSeq`, inside the device scope, that failed `q`, the other filters or
 `newOnly`, newest first. Since nothing matched, these are simply the most recent
 entries in scope since your cursor: use them to see what did happen (a `GET`
 instead of a `POST`, a request still in flight, an update to an older entry).
@@ -488,6 +498,137 @@ started is picked up, and its already stored traffic is checked.
 - On shutdown, pending waits are answered with the timeout shape and
   `Connection: close`.
 - Responses carry `Cache-Control: no-store`.
+
+## Filter language
+
+`q=<expression>` takes the same Wireshark-style language as the UI's Capture
+search box. URL-encode it (`curl --data-urlencode` with `-G` does this).
+
+```bash
+curl -s -G -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8787/api/entries" \
+  --data-urlencode "last=20" \
+  --data-urlencode 'q=(status >= 500 or (error)) and not host ~ analytics'
+```
+
+### Grammar
+
+```text
+expr    := or
+or      := and ( ("or" | "||") and )*
+and     := unary ( ("and" | "&&")? unary )*      two terms side by side also AND
+unary   := ("not" | "!") unary | primary
+primary := "(" expr ")"
+         | field op value
+         | field "in" "{" value ("," value)* "}"
+         | field                                 the field is set / true
+         | word | "quoted text"                  text search over method + url
+         | key:value                             0.2 search term (see below)
+op      := "==" | "!=" | ">" | ">=" | "<" | "<=" | "contains" | "~" | "matches"
+```
+
+Precedence is `not` over `and` over `or`; use parentheses to group. Keywords and
+field names are case-insensitive. Every text comparison is case-insensitive.
+
+- `contains` and its alias `~`: substring.
+- `matches`: an anchored glob, `*` for any run and `?` for one character. There is
+  no regular expression, by design.
+- `in {a, b}`: equal to one of the values (for `status`, inside one of the classes
+  or ranges).
+- `!=` is `not ==`: it is true for an entry where the field is missing.
+- Any other comparison on a missing field (no status yet, unknown size, no such
+  header) is false.
+
+Values are bare words or double-quoted strings. Quote a value that contains a
+space or one of `( ) { } ! = < > ~ & | ,`. Escapes inside quotes: `\"`, `\\`,
+`\n`, `\t`, `\r`. Typed values:
+
+| Type | Syntax |
+| --- | --- |
+| Integer | `8080` |
+| Status | a code `404`, a class `4xx`, a range `400-499`. Only a code works with `>`, `>=`, `<`, `<=`. |
+| Size | bytes, or a number with `b`, `kb`, `mb`, `gb` (1024-based): `10kb`, `1.5mb` |
+| Duration | milliseconds, or a number with `ms`, `s`, `m`, `h`: `250ms`, `2s` |
+| Time | ISO 8601 `2026-10-08T10:00:00Z`, epoch ms, or relative to now `-5m` (`ms`, `s`, `m`, `h`, `d`) |
+| Boolean | `true`, `false` (or `1`, `0`) |
+
+### Fields
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `method` | text | Request method |
+| `url` | text | Stored (redacted) URL |
+| `host` | text | URL host, with the port when it is not the default |
+| `path` | text | URL path plus query string, as the UI's Path column |
+| `query` | text | Query string without `?` |
+| `scheme` | text | `https`, `http`, `wss`… |
+| `port` | integer | Explicit port, else 80/443 by scheme |
+| `status` | status | Response status; missing while in flight or on a transport error |
+| `source` | text | `xhr`, `atlantis`, `proxy`, `replay` |
+| `device` | text | The `deviceId`, any Atlantis alias key of the device, its `externalId` and its `bundleId` (true when any of them compares true) |
+| `device.id` | text | The `deviceId` only |
+| `duration` | duration | `durationMs` |
+| `size.req`, `size.res` | size | Original request / response body size; missing when unknown |
+| `time` | time | `startedAt` |
+| `seq` | integer | `seq` |
+| `completed` | boolean | Has a `status` or an `error` |
+| `error` | text | Transport error message |
+| `http.response` | boolean | Has a `status` |
+| `redacted.request`, `redacted.response` | boolean | The [`redacted` marker](#the-redacted-marker) |
+| `mime.res` | text | Response `Content-Type` without parameters (`application/json`) |
+| `header.<name>` | text | A request or response header (either side) |
+| `req.header.<name>`, `res.header.<name>` | text | A request / response header |
+| `body` | text | UI only: the resident request or response body |
+
+Header fields read the stored headers, which were redacted at ingest: a masked
+credential compares as its marker, never as the original value. `body` is not
+available through the API (`400`): the server does not scan bodies on a read. The
+UI search box has no headers for list rows, so it refuses `header.*`,
+`req.header.*`, `res.header.*` and `mime.res` with a message pointing here.
+
+A bare field is true when it is set: a boolean that is `true`, text that is not
+empty, a number that is present, a header that exists.
+
+### Plain words and 0.2 terms
+
+A word that is not a field, or a quoted string, is a case-insensitive search over
+`method + " " + url`. The 0.2 search terms keep working, also inside an
+expression: `method:GET,POST` (method in the list), `status:5xx,404` (codes,
+classes, ranges), `host:`, `path:` (substring), `source:` (equal), `device:`
+(substring of the `deviceId`) and `body:` (UI only).
+
+A query with no operator, bracket or keyword is read exactly as in 0.2: `key:value`
+terms are grouped per key (repeats OR, keys AND), every other word is a text
+search, an invalid `status:` value is ignored, and nothing is an error. Two
+consequences:
+
+- A lone undotted field name in such a query is a text search (`error` finds URLs
+  containing "error"). Write `(error)` or combine it with an operator to test the
+  field. A lone dotted name (`redacted.request`, `http.response`) is a field test.
+- Free text that contains a bracket, `!`, `~`, `<`, `>`, `==`, `&&` or `||`, a
+  word `and`, `or`, `not`, `in`, `contains`, `matches`, or a lone `=`, `&` or `|`,
+  makes the query an expression. A `=`, `&` or `|` inside a word does not
+  (`next=/home&x=1` is still a text search). Quote such text to search for it: `"sign in"`, `"(beta)"`.
+
+### Examples
+
+| Expression | Selects |
+| --- | --- |
+| `status >= 500 or (error)` | Server errors and transport failures |
+| `method in {POST, PUT} and path matches "/v1/*"` | Writes under `/v1/` |
+| `not completed and time < -30s` | Requests in flight for more than 30 seconds |
+| `duration > 2s or size.res > 1mb` | Slow or heavy responses |
+| `res.header.cache-control ~ no-store` | Responses marked `no-store` |
+| `mime.res == application/json and status == 4xx` | JSON client errors |
+| `device == com.acme.app and redacted.request` | One app's requests that had a credential masked |
+| `login status:2xx` | 0.2 style: URL or method contains "login", status 2xx |
+
+### Limits
+
+An expression is at most **2048** characters, nests at most **32** levels
+(parentheses and `not`) and holds at most **512** terms; past that it is a `400`.
+Evaluation walks the expression once per entry, each step linear in the field it
+reads (`matches` at most field length times pattern length); there is no
+backtracking and no user regular expression.
 
 ## Recommended client flow
 

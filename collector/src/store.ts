@@ -479,6 +479,17 @@ export class Store extends EventEmitter {
   // Resolve a device key through the alias map (identity, when unaliased).
   resolveDeviceKey(deviceId: string): string { return this.aliases.get(deviceId) ?? deviceId; }
 
+  // The identity strings a canonical device also answers to in a `q` filter's
+  // `device` field (U2): its alias keys, `externalId` and `bundleId`.
+  deviceMatchKeys(deviceId: string): string[] {
+    const out: string[] = [];
+    for (const [alias, primary] of this.aliases) if (primary === deviceId) out.push(alias);
+    const d = this.devs.get(deviceId);
+    if (d?.externalId) out.push(d.externalId);
+    if (d?.bundleId) out.push(d.bundleId);
+    return out;
+  }
+
   // Set by the Atlantis server: whether a (canonical) device has overlapping live
   // connections right now. Consulted by clear() before lowering `ambiguous`.
   private ambiguityProbe: ((deviceId: string) => boolean) | null = null;
