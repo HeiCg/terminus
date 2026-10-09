@@ -1,5 +1,6 @@
 import type { EntryDetail, FrameSummary, Page } from './protocol.js';
 import { bytesToBase64 } from './bytes.js';
+import type { Rule } from './ruleModel.js';
 
 // All collector calls ride the session cookie same-origin — the admin token is
 // traded for a cookie once (Session.boot) and never travels a request again, and
@@ -170,3 +171,42 @@ export async function saveScope(cfg: { include: string[]; exclude: string[] }): 
 // a pattern list.
 export const parsePatternLines = (text: string): string[] =>
   text.split(/[\n,]/).map((s) => s.trim()).filter((s) => s !== '');
+
+// ---- Interception rules (U6) -----------------------------------------------
+// GET/PUT /api/rules and PATCH /api/rules/:id, admin only. A 400 carries the
+// path of the first invalid field (`rules[2].action.status`) with its message.
+export type RulesResult = { ok: true; rules: Rule[] } | { ok: false; message: string; path?: string };
+
+export async function fetchRules(): Promise<Rule[] | null> {
+  try {
+    const r = await fetch('/api/rules', SAME_ORIGIN);
+    if (!r.ok) return null;
+    return (await r.json() as { rules: Rule[] }).rules;
+  } catch { return null; }
+}
+
+export async function saveRules(rules: Rule[]): Promise<RulesResult> {
+  try {
+    const r = await fetch('/api/rules', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin', body: JSON.stringify({ rules }),
+    });
+    if (r.ok) return { ok: true, rules: (await r.json() as { rules: Rule[] }).rules };
+    if (r.status === 400) {
+      const body = await r.json().catch(() => null) as { message?: string; path?: string } | null;
+      return { ok: false, message: body?.message ?? 'invalid rules', path: body?.path };
+    }
+    return { ok: false, message: `save failed (${r.status})` };
+  } catch { return { ok: false, message: 'save failed (collector unreachable)' }; }
+}
+
+export async function setRuleEnabled(id: string, enabled: boolean): Promise<{ ok: true; rule: Rule } | { ok: false; message: string }> {
+  try {
+    const r = await fetch(`/api/rules/${enc(id)}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin', body: JSON.stringify({ enabled }),
+    });
+    if (r.ok) return { ok: true, rule: await r.json() as Rule };
+    return { ok: false, message: r.status === 404 ? 'rule no longer exists; reload the list' : `update failed (${r.status})` };
+  } catch { return { ok: false, message: 'update failed (collector unreachable)' }; }
+}

@@ -175,7 +175,7 @@ describe('canonicalField', () => {
   it('knows the static fields and header families, case-insensitively', () => {
     for (const f of ['method', 'url', 'host', 'path', 'query', 'scheme', 'port', 'status', 'source', 'device', 'device.id',
       'duration', 'size.req', 'size.res', 'time', 'seq', 'completed', 'error', 'redacted.request', 'redacted.response',
-      'http.response', 'mime.res', 'body', 'header.x-a', 'req.header.cookie', 'res.header.etag']) {
+      'http.response', 'mime.res', 'body', 'header.x-a', 'req.header.cookie', 'res.header.etag', 'rule', 'mocked']) {
       expect(canonicalField(f.toUpperCase())).toBe(f);
     }
     for (const f of ['foo', 'header.', 'header', 'req.header.', 'size', 'api.example.com']) expect(canonicalField(f)).toBeNull();
@@ -198,9 +198,11 @@ const ENTRIES: FilterSubject[] = [
   base({ id: 'e1', url: 'https://api.example.com/v1/users?page=2', durationMs: 120, responseBody: ref(2048), startedAt: NOW - 60_000, seq: 1 }),
   base({ id: 'e2', method: 'POST', url: 'https://api.example.com/v1/login', status: 401, durationMs: 300, source: 'xhr',
     requestBody: ref(64), responseBody: ref(128), redacted: { request: true, response: false }, startedAt: NOW - 600_000, seq: 2 }),
-  base({ id: 'e3', url: 'http://cdn.example.net:8080/img/logo.png', status: 304, durationMs: 15, source: 'proxy', deviceId: 'd2', seq: 3 }),
+  base({ id: 'e3', url: 'http://cdn.example.net:8080/img/logo.png', status: 304, durationMs: 15, source: 'proxy', deviceId: 'd2', seq: 3,
+    rules: [{ id: 'r-mock', name: 'Mock login', action: 'mock', phase: 'request' }], mocked: true }),
+  // (e4's rewrite ran upstream; nothing was mocked.)
   base({ id: 'e4', method: 'PUT', url: 'https://api.example.com/v2/items/9', status: 500, durationMs: 2500, source: 'replay',
-    deviceId: 'd2', responseBody: ref(1572864), seq: 4 }),
+    deviceId: 'd2', responseBody: ref(1572864), seq: 4, rules: [{ id: 'slow-1', name: 'Slow API', action: 'delay', phase: 'response' }] }),
   base({ id: 'e5', url: 'https://api.example.com/v1/stream', status: null, durationMs: null, seq: 5 }),
   base({ id: 'e6', method: 'DELETE', url: 'https://other.test/x', status: null, error: 'timeout', durationMs: 30_000, source: 'xhr', deviceId: 'd3', seq: 6 }),
 ];
@@ -300,6 +302,22 @@ describe('predicates: every field and operator', () => {
     ['redacted.request', ['e2']],
     ['redacted.response', []],
     ['redacted.request == 0', ['e1', 'e3', 'e4', 'e5', 'e6']],
+    // U6 interception rules: by name or id, case-insensitive; `mocked`
+    ['rule == "Mock login"', ['e3']],
+    ['rule == r-mock', ['e3']],
+    ['rule == "mock LOGIN"', ['e3']],
+    ['rule in {slow-1, nope}', ['e4']],
+    ['rule contains slow', ['e4']],
+    ['rule matches "*login"', ['e3']],
+    ['rule != "Mock login"', ['e1', 'e2', 'e4', 'e5', 'e6']],
+    ['(rule)', ['e3', 'e4']],
+    ['not (rule)', ['e1', 'e2', 'e5', 'e6']],
+    ['(mocked)', ['e3']],
+    ['mocked == true', ['e3']],
+    ['mocked == false', ['e1', 'e2', 'e4', 'e5', 'e6']],
+    ['(rule) and not mocked', ['e4']],
+    // A lone undotted field name stays the 0.2 text search.
+    ['mocked', []],
     // headers and mime (API caps)
     ['mime.res == application/json', ['e1', 'e2']],
     ['mime.res matches "image/*"', ['e3']],

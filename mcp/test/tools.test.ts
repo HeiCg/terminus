@@ -92,6 +92,13 @@ describe('terminus_entries', () => {
     expect(lines).toEqual(['#2 POST api.x.com/login 201 42ms req 7B res 11B [device=d1 id=b]']);
   });
 
+  it('shows the interception rules that ran and the mocked marker (U6)', async () => {
+    h.store.addEntry(makeEntry({ id: 'm', source: 'proxy', url: 'https://api.x.com/login', rules: [{ id: 'r1', name: 'Mock login', action: 'mock', phase: 'request' }], mocked: true }));
+    const r = await call(c, 'terminus_entries', { last: 1 });
+    const [line] = text(r).split('\n').filter((l) => l.startsWith('#'));
+    expect(line).toBe('#1 POST api.x.com/login 201 42ms req 7B res 11B src=proxy [device=d1 id=m] [rules:Mock login(mock)] [mocked]');
+  });
+
   it('refuses afterSeq together with last', async () => {
     const r = await call(c, 'terminus_entries', { afterSeq: 0, last: 5 });
     expect(r.isError).toBe(true);
@@ -128,6 +135,18 @@ describe('terminus_entry', () => {
     expect(t).toContain('request headers:\n  content-type: application/json\n  x-trace: abc');
     expect(t).not.toContain('request body');
     expect((r.structuredContent as any).requestHeaders['x-trace']).toBe('abc');
+  });
+
+  it('lists the applied rules, the mocked marker and the original request (U6)', async () => {
+    h.store.addEntry(makeEntry({
+      source: 'proxy', method: 'PUT', url: 'https://staging.example.com/v2/items',
+      rules: [{ id: 'rw', name: 'To staging', action: 'rewrite', phase: 'request' }, { id: 'sl', name: 'Slow', action: 'delay', phase: 'response' }],
+      originalMethod: 'POST', originalUrl: 'https://api.example.com/v1/items?q=1',
+    }));
+    const t = text(await call(c, 'terminus_entry', { deviceId: 'd1', id: 'r1' }));
+    expect(t).toContain('rules applied: To staging (request rewrite, id=rw); Slow (response delay, id=sl)');
+    expect(t).toContain('original request (before rewrite): POST https://api.example.com/v1/items?q=1');
+    expect(t).not.toContain('mocked:');
   });
 
   it('includes UTF-8 bodies, truncated with an explicit note', async () => {

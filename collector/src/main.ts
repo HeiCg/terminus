@@ -21,6 +21,7 @@ import { parseCollectorArgs, COLLECTOR_USAGE } from './mainArgs.js';
 import { loadCaptureFile } from './loadCapture.js';
 import { configureRedaction, redactionConfigFromEnv } from './security/sensitiveNames.js';
 import { loadScopeFile, scopeFromEnv, SCOPE_FILE } from './scope.js';
+import { RulesStore, loadRulesFile, RULES_FILE } from './rulesStore.js';
 
 // Resolve a port from `TERMINUS_<name>` first, then the deprecated `NETCAPTURE_<name>`
 // (warns once via env()), and finally the bare unprefixed `<name>` (e.g. `PORT`),
@@ -179,6 +180,11 @@ async function boot() {
       const { entries, sessions, frames } = loadCaptureFile(store, file);
       log.info(`loaded ${file}: ${entries} entries, ${sessions} sessions, ${frames} frames`);
     }
+    // Interception rules (U6): the admin's persisted list, shared by the API and the
+    // proxy source (they only ever act on proxied traffic).
+    const rulesFile = path.join(stateDir, RULES_FILE);
+    const rules = new RulesStore(loadRulesFile(rulesFile), rulesFile);
+    if (rules.list().length) log.info(`interception rules: ${rules.list().length} loaded, ${rules.list().filter((r) => r.enabled).length} enabled`);
     const uiAuth = createUiAuth({ adminToken, readerToken });
     // Shared ingest machinery (budget, scheduler, connection slots) across both LAN
     // capture channels. Built before the HTTP server so GET /api/status can report
@@ -193,6 +199,7 @@ async function boot() {
       certPort: CERT_PORT,
       ingest: shared,
       scopeFile,
+      rules,
     });
     httpHandle.server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE') log.error(`port ${HTTP_PORT} already in use; set TERMINUS_PORT to another value`);
@@ -253,7 +260,7 @@ async function boot() {
         { passthrough: envName('PROXY_PASSTHROUGH'), interceptOnly: envName('PROXY_INTERCEPT_ONLY') });
       const ca = await loadOrCreateProxyCA(path.join(stateDir, 'proxy-ca'));
       proxy = createProxySource({
-        port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow,
+        port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow, rules,
         ...(tlsMode.mode === 'passthrough' ? { tlsPassthrough: tlsMode.hosts } : {}),
         ...(tlsMode.mode === 'intercept-only' ? { tlsInterceptOnly: tlsMode.hosts } : {}),
         // U7: SOCKS v4/v5 on the proxy port, opt-in (raw stream capture is always on).

@@ -1,3 +1,4 @@
+import type { AppliedRule } from './ruleModel.js';
 export type Hello = { type: 'hello'; deviceId: string; platform: 'android' | 'ios';
   appVersion: string; buildProfile: string; dropped: number; ts: number;
   // Optional: the key the Atlantis SDK will present under, when the app knows it.
@@ -87,7 +88,19 @@ export type Entry = {
   // proxy (the CONNECT handshake included), set at close; null while open or when
   // the proxy could not observe the connection. Epoch ms times, collector clock.
   tunnel?: TunnelInfo;
+  // U6: set only on a proxy entry an interception rule touched. `rules` lists the
+  // rules that ran, in order (request phase first). `mocked` is true when a rule
+  // answered or cut off the device without contacting upstream (block/mock). The
+  // entry itself records the request as SENT upstream (after rewrites) and the
+  // response as DELIVERED to the device; `originalMethod`/`originalUrl` keep the
+  // device's own method/URL when a rewrite changed them (URL redacted as usual).
+  rules?: AppliedRule[];
+  mocked?: boolean;
+  originalMethod?: string;
+  originalUrl?: string;
 };
+
+export type { AppliedRule } from './ruleModel.js';
 
 export type TunnelInfo = {
   host: string; port: number; sni: string | null;

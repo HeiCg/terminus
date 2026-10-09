@@ -34,7 +34,15 @@ export type EntrySummary = {
   firstSeq?: number;
   receivedAt?: number;
   redacted?: { request: boolean; response: boolean };
+  // U6: interception rules that ran on a proxy entry; `mocked` when no upstream
+  // answered; the device's own method/URL when a rewrite changed them.
+  rules?: AppliedRule[];
+  mocked?: boolean;
+  originalMethod?: string;
+  originalUrl?: string;
 };
+
+export type AppliedRule = { id: string; name: string; action: string; phase: string };
 
 export type EntryDetail = EntrySummary & {
   requestHeaders?: Record<string, string | string[]>;
@@ -171,7 +179,22 @@ export function entryLine(e: EntrySummary, opts: { showFirstSeq?: boolean } = {}
   parts.push(`[device=${oneLine(e.deviceId, 120)} id=${oneLine(e.id, 120)}]`);
   const red = [e.redacted?.request ? 'req' : null, e.redacted?.response ? 'res' : null].filter(Boolean);
   if (red.length) parts.push(`[redacted:${red.join(',')}]`);
+  if (e.rules?.length) parts.push(`[rules:${e.rules.slice(0, 5).map((r) => `${oneLine(r.name, 60)}(${oneLine(r.action, 10)})`).join(',')}${e.rules.length > 5 ? `,+${e.rules.length - 5}` : ''}]`);
+  if (e.mocked) parts.push('[mocked]');
   return parts.join(' ');
+}
+
+// The detail lines for the rules that ran on an entry (U6); empty when none did.
+export function ruleLines(e: EntrySummary): string[] {
+  const out: string[] = [];
+  if (e.rules?.length) {
+    out.push(`rules applied: ${e.rules.map((r) => `${oneLine(r.name, 120)} (${oneLine(r.phase, 10)} ${oneLine(r.action, 10)}, id=${oneLine(r.id, 64)})`).join('; ')}`);
+  }
+  if (e.mocked) out.push('mocked: yes (answered by a rule; no upstream was contacted)');
+  if (e.originalMethod != null || e.originalUrl != null) {
+    out.push(`original request (before rewrite): ${oneLine(e.originalMethod ?? e.method, 20)} ${oneLine(e.originalUrl ?? e.url, 4000)}`);
+  }
+  return out;
 }
 
 export function deviceLine(d: Device): string {

@@ -113,6 +113,10 @@ const STATIC_FIELDS: Record<string, Spec> = {
   'redacted.request': { kind: 'bool', get: (c) => c.e.redacted?.request === true },
   'redacted.response': { kind: 'bool', get: (c) => c.e.redacted?.response === true },
   'http.response': { kind: 'bool', get: (c) => c.e.status != null },
+  // U6: the interception rules that ran on a proxy entry, by name and by id
+  // (`rule == "Mock login"`, `(rule)` for any); `mocked` when no upstream answered.
+  rule: { kind: 'strings', get: (c) => (c.e.rules ?? []).flatMap((r) => [r.name, r.id]) },
+  mocked: { kind: 'bool', get: (c) => c.e.mocked === true },
   'mime.res': { kind: 'string', need: 'detail', get: (c) => c.mime() },
   body: { kind: 'string', need: 'body', get: (c) => c.body() },
 };

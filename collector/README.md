@@ -543,6 +543,28 @@ are counted in `GET /api/status` under `scope.dropped`; proxied traffic out of s
 still reaches its upstream. A scope saved by the admin is persisted to `scope.json`
 in the state directory and wins over the environment at the next start.
 
+## Interception rules (proxy)
+
+With the proxy source on, the admin can block, mock, rewrite or delay proxied
+HTTP(S) from the Settings tab (Rules card), from "Create rule" in a Capture entry's
+detail panel, or with `GET`/`PUT /api/rules` and `PATCH /api/rules/:id`. A rule
+matches on method, host (`api.example.com`, `*.example.com`), a path glob (`*`,
+`?`), query and header globs and the scheme, always against the request as the
+device sent it, and acts in the `request` phase (`block`, `mock`, `rewrite`,
+`delay`) or the `response` phase (`rewrite`, `delay`). Rules run top to bottom: the
+first matching block or mock answers the device without contacting upstream, while
+rewrites and delays accumulate. Rules are saved to `rules.json` (0600) in the state
+directory and loaded at start.
+
+Recorded entries show the request as sent upstream and the response as delivered
+to the device, with `rules` (which ran), `mocked` (no upstream contacted) and
+`originalMethod`/`originalUrl` (what the device sent, when a rewrite changed it).
+The Capture list marks them with a RULE or MOCK badge; filter with `rule == "Mock
+login"`, `(rule)` or `(mocked)`. Rules apply only to the proxy: Atlantis and the
+WSS ingest receive a copy of the app's traffic and cannot change it. They never
+touch TLS pass-through tunnels or the collector's own endpoints. Full contract:
+[docs/read-api.md](../docs/read-api.md#interception-rules).
+
 ## Export
 
 - **HAR 1.2** — `GET /export.har?device=<id>` (or the **Export HAR** button).
@@ -571,7 +593,9 @@ members prefixed with `_`; standard importers ignore the ones they do not know):
   entry cannot express (`startedDateTime`/`time` already carry the time, so no
   timestamp is duplicated). This is what makes an `--load` re-import **lossless**:
   the entry returns to the same device/id/source it was captured under, and a
-  replay keeps its `replayOf` back-reference. WS/SSE sessions **linked** to the
+  replay keeps its `replayOf` back-reference. The optional `redacted`, `tunnel`,
+  `rules`, `mocked`, `originalMethod` and `originalUrl` fields ride along the same
+  way when the entry has them. WS/SSE sessions **linked** to the
   entry ride `_terminus.sessions` (each a socket ext); a plain socket ext has
   `kind`, this identity object never does, so the two are told apart on import.
   A third-party HAR has no `_terminus`, so its HTTP entries import onto a
@@ -690,6 +714,8 @@ the `GET /api/entries/wait` long-poll, the reader token, `apiVersion` and
 | POST   | `/api/pause`             | session   | Pause/resume the live `/ui` stream. Body `{ "paused": true\|false }` (≤1 KiB, else `413`; non-boolean/malformed → `400`) → `200 { "paused": bool }`. Cookie mutation needs Origin. While paused the store keeps recording; resume replays a fresh snapshot. |
 | POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, credentials?: 'strip'\|'keep', overrides?: { method?, url?, headers?, body? \| bodyBase64? } }` → `201 { key, status, durationMs, error, stripped }`; `404` unknown entry, `422` when the request body was not retained and no override is given, `413` override body over 1 MiB, `400` malformed (or both body fields). `credentials` defaults to `'strip'` (removes captured auth headers/cookies and token query params; `stripped` lists what went). Cookie mutation needs Origin (a bearer CLI does not). |
 | GET    | `/api/pairing?host=`     | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store). `host` overrides the advertised host for this response (for a simulator or emulator on `127.0.0.1`); a host the certificate SAN does not cover is `400`. |
+| GET/PUT | `/api/rules`            | session   | Proxy interception rules (admin only). `PUT { rules }` replaces the list, validated whole (`400 { message, path }`), persisted to `rules.json`. Cookie mutation needs Origin. |
+| PATCH  | `/api/rules/:id`         | session   | `{ "enabled": bool }` → the updated rule; `404` unknown id. |
 | GET    | `/export.har?device=`    | session   | HAR 1.2 download                         |
 | GET    | `/export.json?device=`   | session   | Raw JSON download                        |
 | WS     | `/ui`                    | session   | Live UI stream: an initial `snapshot` (carries `paused`, protocol v3) then incremental deltas, including `{ type: 'paused', paused }` on toggle. |

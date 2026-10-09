@@ -7,6 +7,7 @@ import { Selection } from '../../../lib/state/Selection.svelte.js';
 import { CTX } from '../../../lib/context.js';
 import type { Row } from '../../../lib/state/Filters.svelte.js';
 import type { BodyRef, EntryDetail } from '../../../lib/protocol.js';
+import { takeRuleSeed } from '../../../lib/state/RuleDraft.svelte.js';
 
 const absent: BodyRef = { state: 'absent', sha256: null, size: 0, storedSize: 0, encoding: 'utf8', omitted: null };
 
@@ -34,6 +35,27 @@ function renderPanel(sel: Selection) {
 }
 
 describe('DetailPanel', () => {
+  it('Create rule hands method/host/path of what the device sent to Settings (U6)', async () => {
+    const sel = makeSelection();
+    sel.current = { ...row(), method: 'PUT', url: 'https://staging.test/v2?x=1', originalMethod: 'POST', originalUrl: 'https://api.test/thing?x=1',
+      rules: [{ id: 'a', name: 'To staging', action: 'rewrite', phase: 'request' }] };
+    sel.detail = detail;
+    sel.detailStatus = 'ok';
+    const nav = { go: vi.fn() };
+    render(DetailPanel, { props: { selection: sel }, context: new Map<symbol, unknown>([[CTX.cache, new BodyCache()], [CTX.nav, nav]]) });
+    expect(screen.getByTestId('applied-rules')).toHaveTextContent('To staging');
+    await fireEvent.click(screen.getByTestId('create-rule'));
+    expect(nav.go).toHaveBeenCalledWith('settings');
+    expect(takeRuleSeed()).toEqual({ method: 'POST', host: 'api.test', path: '/thing' });
+  });
+
+  it('shows no applied-rules section for an untouched entry', () => {
+    const sel = makeSelection();
+    sel.current = row();
+    renderPanel(sel);
+    expect(screen.queryByTestId('applied-rules')).toBeNull();
+  });
+
   it('renders the header, tabs and the Copy as cURL control for a selection', () => {
     const sel = makeSelection();
     sel.current = row();

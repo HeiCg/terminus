@@ -121,8 +121,13 @@ An entry line looks like:
 ```
 
 `firstSeq=` is added when the entry is an update of an exchange that existed
-before (its response arrived later). The list tools also return the collector's
-JSON as MCP `structuredContent`.
+before (its response arrived later). A proxy entry that an
+[interception rule](../docs/read-api.md#interception-rules) changed ends with
+`[rules:<name>(<action>),...]`, plus `[mocked]` when a rule answered without
+contacting upstream; `terminus_entry` lists those rules and the device's original
+method/URL when a rewrite changed them. Rules are edited only in the collector UI
+or its admin API: the MCP server stays read-only. The list tools also return the
+collector's JSON as MCP `structuredContent`.
 
 Bodies come back as UTF-8 text when they decode, otherwise as a hex dump of the
 first bytes (at most 512), and are cut at `maxBodyBytes` with an explicit

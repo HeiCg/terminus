@@ -80,7 +80,7 @@ Content-Type: application/json
 ```
 
 That covers `/api/pairing`, `/api/session`, `/api/clear`, `/api/pause`,
-`/api/replay`, `/api/scope`, `/export.har`, `/export.json`, and any route added in a later
+`/api/replay`, `/api/scope`, `/api/rules`, `/export.har`, `/export.json`, and any route added in a later
 version until it is explicitly opened to readers. The `/ui` WebSocket upgrade is
 admin-only as well: it first requires a loopback `Origin` (without one the socket
 is closed for every caller), and with one a reader gets the same `403` body.
@@ -97,7 +97,7 @@ restart.
 
 ```json
 {"status":"ok","version":"0.2.0","apiVersion":1,
- "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes","tls-passthrough","scope","raw-streams"]}
+ "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes","tls-passthrough","scope","raw-streams","rules"]}
 ```
 
 ```bash
@@ -121,6 +121,7 @@ two fields also appear on `GET /api/status`.
 | `tls-passthrough` | `TERMINUS_PROXY_PASSTHROUGH` / `TERMINUS_PROXY_INTERCEPT_ONLY` on the proxy, and the [`tunnel`](#tunnel-entries) field on the `CONNECT` entries that record raw TLS tunnels. |
 | `scope` | The capture scope: `scope` on `GET /api/status` and the admin-only [`GET`/`PUT /api/scope`](#get-and-put-apiscope-admin). |
 | `raw-streams` | [Raw TCP/TLS stream sessions](#raw-tcp-and-tls-streams) from the proxy (`kind` `tcp`/`tls` and the `stream` field on `GET /api/ws`, the `kind=` filter), `TERMINUS_PROXY_SOCKS`, and the admin-only [`POST /api/replay/stream`](#post-apireplaystream-admin). |
+| `rules` | Proxy [interception rules](#interception-rules): the admin-only `GET`/`PUT /api/rules` and `PATCH /api/rules/:id`, the `rules`, `mocked`, `originalMethod` and `originalUrl` entry fields, and the `rule` and `mocked` filter fields. |
 
 To feature-detect, call `GET /health` once at startup. A collector older than
 0.2.0 answers without `apiVersion` and `capabilities` and has none of the features
@@ -200,6 +201,126 @@ exact loopback `Origin`, like the other mutations.
 
 `POST /api/replay` answers `stored: false` when the replayed request was sent but
 its result is out of scope and was not recorded.
+
+## Interception rules
+
+Rules let the admin block, mock, rewrite or delay HTTP(S) **that goes through the
+proxy source** (`TERMINUS_PROXY=1`). They never apply to the SDK sources (Atlantis,
+the WSS/XHR ingest): the collector is not in their data path, it only receives a
+copy of what the app already sent and received. Within the proxy they apply only to
+intercepted HTTP from an allowed client: never to a collector-internal endpoint (the
+collector's own host and port pairs), never inside a TLS pass-through tunnel (the
+proxy cannot see into it), never to a client refused by `TERMINUS_PROXY_ALLOW` (the
+gate closes it first), and never to WebSocket frames.
+
+### `GET`, `PUT /api/rules` and `PATCH /api/rules/:id` (admin)
+
+Admin token or session only; the reader token gets `403 forbidden_scope`. A
+cookie-driven `PUT`/`PATCH` needs the exact loopback `Origin`.
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN" http://127.0.0.1:8787/api/rules
+curl -s -X PUT -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"rules":[{"name":"Mock login","match":{"methods":["POST"],"host":"api.app.example","path":"/v1/login"},
+       "phase":"request","action":{"type":"mock","status":200,"headers":{"content-type":"application/json"},"body":"{\"token\":\"test\"}"}}]}' \
+  http://127.0.0.1:8787/api/rules
+curl -s -X PATCH -H "Authorization: Bearer $ADMIN" -d '{"enabled":false}' http://127.0.0.1:8787/api/rules/<id>
+```
+
+- `GET` answers `{ "rules": Rule[] }`.
+- `PUT` replaces the whole list with `{ "rules": Rule[] }` and answers the stored
+  list (ids assigned to rules sent without one). The list is validated whole: the
+  first problem refuses the update with `400 {"error":"bad_request","message":
+  "rules[2].action.status: must be an integer from 200 to 599","path":
+  "rules[2].action.status"}`. Bodies over 16 MiB get `413`.
+- `PATCH /api/rules/:id` with exactly `{ "enabled": boolean }` answers the updated
+  rule; `404 not_found` for an unknown id, `400` for any other body.
+
+A change is written to `<stateDir>/rules.json` (mode `0600`, atomic rename) before
+it takes effect, so a failed write (`500`) changes nothing; it applies to the next
+request. At start the collector loads that file; a malformed file is logged and
+ignored (no rules).
+
+### The rule
+
+```json
+{ "id": "mock-login", "name": "Mock login", "enabled": true,
+  "match": { "methods": ["POST"], "host": "*.app.example", "path": "/v1/*",
+             "query": { "page": "?" }, "headers": { "x-env": "qa*" }, "scheme": "https" },
+  "phase": "request",
+  "action": { "type": "mock", "status": 200, "body": "{}" } }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | 1-64 characters of `A-Z a-z 0-9 . _ -`, unique. Optional on `PUT` (assigned). |
+| `name` | 1-120 characters, shown in the UI and on entries. |
+| `enabled` | Default `true`. |
+| `match` | All given criteria must hold (AND); `{}` matches every request. Tested against the request **as the device sent it**, before any rewrite, in both phases. |
+| `match.methods` | Method list, case-insensitive. |
+| `match.host` | `api.example.com` exactly, or `*.example.com` (any subdomain, not the apex). Case-insensitive; no scheme, port or path. |
+| `match.path` | Glob over the URL path (no query): `*` any run of characters (slashes included), `?` one character; everything else literal and case-sensitive. |
+| `match.query` | `{ name: glob }`: each parameter must be present with a value matching its glob (any of its repeated values). |
+| `match.headers` | `{ name: glob }`: each request header (name case-insensitive) must be present with a matching value. |
+| `match.scheme` | `http` or `https`. |
+| `phase` | `request` (before upstream is contacted) or `response` (before the device gets the answer). |
+
+Actions:
+
+| `action.type` | Phase | Fields |
+| --- | --- | --- |
+| `block` | request | `status` (200-599, default 403) and `body`; or `close: true` (end the connection) or `reset: true` (TCP reset). |
+| `mock` | request | `status` (required), `headers`, `body` or `bodyBase64`, `delayMs` (0-30000). |
+| `rewrite` | request | `url` (absolute `http(s)://` URL, or a path starting with `/` that keeps scheme and host), `method`, `setHeaders`, `removeHeaders`, `body` or `bodyBase64`, `replace`. |
+| `rewrite` | response | `status`, `setHeaders`, `removeHeaders`, `body` or `bodyBase64`, `replace`. |
+| `delay` | both | `ms` (1-30000). |
+
+`replace` is a list of `{ "find", "with" }`, applied in order to the decoded text
+body: literal (never a regex), every occurrence; a body that is not UTF-8 text is
+left alone. A `body`/`bodyBase64` replaces the decoded body; the proxy re-applies
+the message's `Content-Encoding` and fixes `Content-Length`. Rules may not set or
+remove `content-length`, `transfer-encoding`, `connection`, `keep-alive`,
+`upgrade`, `te`, `trailer` or `proxy-connection`. A rewrite to an absolute URL
+updates `Host` unless the rule sets it; a rewrite whose destination is the cloud
+metadata address (refused at validation) or a collector-internal endpoint closes
+the connection instead.
+
+Caps: 200 rules, bodies and `find`/`with` strings 1 MiB each, 50 `replace` items,
+50 headers per map, header values 8 KiB. Within a phase the accumulated delay is
+capped at 30 s.
+
+### Evaluation
+
+For each phase, enabled rules whose `match` holds run in list order. `rewrite` and
+`delay` accumulate (a later rewrite sees an earlier one's result; the delays add
+up and are waited before forwarding). The first `block` or `mock` short-circuits:
+the device gets that answer (after the delays so far), upstream is never
+contacted, and later request rules and every response rule are skipped. Response
+rules buffer the upstream response before delivering it, so only requests that
+some enabled response rule matches are buffered; everything else (an SSE stream
+included) streams as before.
+
+### What the entry records
+
+A proxied exchange that a rule touched is recorded as it actually happened:
+`method`, `url`, request headers and body are the request **as sent upstream**
+(after rewrites, or as it would have been sent for a mocked one); `status`,
+response headers and body are the response **as delivered to the device** (after
+rewrites, or the mock). Redaction applies to all of it, as to every stored record.
+The entry gains:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `rules` | array, optional | `[{ id, name, action, phase }]`, the rules that ran, in order (request phase first). Absent when none did. |
+| `mocked` | `true`, optional | A rule answered (`mock`, `block`) or cut off (`close`/`reset`, recorded as `error: "aborted ..."`) the device; no upstream was contacted. |
+| `originalMethod` | string, optional | The device's method, when a rewrite changed it. |
+| `originalUrl` | string, optional | The device's URL (redacted), when a rewrite changed it. |
+
+The in-flight record created when the request arrives still shows the device's
+request; the final write replaces it. The fields are on summaries, details, the
+JSON export and the HAR export (`_terminus.rules`, `.mocked`, `.originalMethod`,
+`.originalUrl`), and `--load` restores them. Filter on them with `rule` and
+`mocked` (see [Fields](#fields)).
 
 ## `GET /api/devices`
 
@@ -331,6 +452,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `receivedAt` | number | Collector clock (epoch ms) at the first write. Never changes. |
 | `redacted` | object | `{ request: boolean, response: boolean }`, see [The `redacted` marker](#the-redacted-marker). |
 | `tunnel` | object, optional | Only on a proxy `CONNECT` entry for a raw TLS tunnel, see [Tunnel entries](#tunnel-entries). |
+| `rules`, `mocked`, `originalMethod`, `originalUrl` | optional | Only on a proxy entry an [interception rule](#interception-rules) touched, see [What the entry records](#what-the-entry-records). |
 
 An exchange counts as **completed** when it has a `status` or an `error`.
 
@@ -782,6 +904,8 @@ space or one of `( ) { } ! = < > ~ & | ,`. Escapes inside quotes: `\"`, `\\`,
 | `error` | text | Transport error message |
 | `http.response` | boolean | Has a `status` |
 | `redacted.request`, `redacted.response` | boolean | The [`redacted` marker](#the-redacted-marker) |
+| `rule` | text | Name and id of each [interception rule](#interception-rules) that ran (true when any compares true); `(rule)` for any rule |
+| `mocked` | boolean | A rule answered without contacting upstream |
 | `mime.res` | text | Response `Content-Type` without parameters (`application/json`) |
 | `header.<name>` | text | A request or response header (either side) |
 | `req.header.<name>`, `res.header.<name>` | text | A request / response header |
