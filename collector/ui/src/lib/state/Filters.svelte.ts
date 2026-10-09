@@ -24,6 +24,13 @@ export type Row = EntrySummary & {
   size: number | null;
 };
 
+// One summary projected to a Row outside the table's derived list (the replay
+// editor selects the new replay entry by key before the table has re-derived).
+export function rowOf(e: EntrySummary, kind: Row['kind'] = 'xhr'): Row {
+  const { host, path } = splitUrl(e.url);
+  return { ...e, kind, host, path, bucket: statusBucket(e.status, e.error), size: e.responseBody.size ?? null };
+}
+
 // The slice of BodyCache the `body` filter field (and the 0.2 `body:` term)
 // needs: a NON-touching lowercased peek by hash. Optional at construction — unit
 // tests stand Filters up without a cache, and then a body term matches nothing.

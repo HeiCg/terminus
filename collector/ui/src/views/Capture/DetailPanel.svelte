@@ -12,6 +12,9 @@
   import TimingTab from './TimingTab.svelte';
   import CurlTab from './CurlTab.svelte';
   import ReplayButton from './ReplayButton.svelte';
+  import ReplayEditor from './ReplayEditor.svelte';
+  import { useCache } from '../../lib/context.js';
+  import { ReplayDraft, capturedBodyOf } from '../../lib/state/ReplayDraft.svelte.js';
 
   type Props = { selection: Selection };
   let { selection }: Props = $props();
@@ -23,6 +26,33 @@
     { id: 'timing', label: 'Timing' },
     { id: 'curl', label: 'cURL' },
   ];
+
+  const cache = useCache();
+
+  // U4 replay editor: the draft being edited (null = closed). Opening loads the
+  // request body first (as Copy as cURL does) so the editor is prefilled with it.
+  let draft = $state<ReplayDraft | null>(null);
+  let opening = $state(false);
+
+  async function openEditor(): Promise<void> {
+    const row = selection.current;
+    if (!row || opening) return;
+    opening = true;
+    try {
+      await selection.loadBody('request');
+    } finally {
+      opening = false;
+    }
+    if (selection.current !== row) return; // the selection moved on meanwhile
+    const bs = selection.bodies.request;
+    const raw = bs.kind === 'ok' ? cache?.peek(bs.hash) : undefined;
+    draft = new ReplayDraft(row.deviceId, row.id, {
+      method: row.method,
+      url: row.url,
+      headers: selection.detail?.requestHeaders ?? {},
+      body: capturedBodyOf(bs, raw),
+    });
+  }
 
   // Copy the cURL of the current selection. The request body is pulled in first so
   // the command includes `--data-raw` even if the Payload tab was never opened.
@@ -63,7 +93,7 @@
         <span class="sep">·</span>
         <span class="time">{fmtTime(row.startedAt)}</span>
         <button type="button" class="curl-btn" onclick={copyCurl}>Copy as cURL</button>
-        <ReplayButton deviceId={row.deviceId} id={row.id} />
+        <ReplayButton deviceId={row.deviceId} id={row.id} onedit={openEditor} editBusy={opening} />
       </div>
     </header>
 
@@ -87,6 +117,14 @@
       {/key}
     </div>
   </aside>
+{/if}
+
+{#if draft}
+  <ReplayEditor
+    {draft}
+    onclose={() => (draft = null)}
+    onsent={(key) => selection.focusEntry(key.deviceId, key.id)}
+  />
 {/if}
 
 <style>

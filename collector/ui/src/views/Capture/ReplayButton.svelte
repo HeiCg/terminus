@@ -10,8 +10,11 @@
   // inline confirmation (the label becomes "Replay with credentials") and a second
   // click sends — no window.confirm. After a replay the names that were stripped are
   // listed when non-empty.
-  type Props = { deviceId: string; id: string };
-  let { deviceId, id }: Props = $props();
+  //
+  // U4: `onedit` adds an "Edit…" button that opens the replay editor; the plain
+  // Replay button stays the one-click quick replay.
+  type Props = { deviceId: string; id: string; onedit?: () => void; editBusy?: boolean };
+  let { deviceId, id, onedit, editBusy = false }: Props = $props();
 
   type State = 'idle' | 'sending' | 'done' | 'error';
   let phase = $state<State>('idle');
@@ -85,6 +88,16 @@
     {label}
     {#if shown !== 'idle' && shown !== 'sending' && detail}<span class="detail">{detail}</span>{/if}
   </button>
+  {#if onedit}
+    <button
+      type="button"
+      class="replay-btn"
+      onclick={onedit}
+      disabled={editBusy}
+      aria-haspopup="dialog"
+      title="Edit the method, URL, headers or body, then replay"
+    >{editBusy ? 'Loading…' : 'Edit…'}</button>
+  {/if}
   <label class="creds" title="Re-send the authorization/cookie headers and token query params that were captured">
     <input type="checkbox" checked={withCreds} onchange={onToggle} />
     Include captured credentials

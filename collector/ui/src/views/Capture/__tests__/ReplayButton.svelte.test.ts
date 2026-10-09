@@ -62,4 +62,15 @@ describe('ReplayButton (T8.1)', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].credentials).toBe('strip');
   });
+
+  it('offers Edit… beside the quick replay when an editor is wired (U4)', async () => {
+    const { calls } = stubFetch();
+    const onedit = vi.fn();
+    const { getByRole } = render(ReplayButton, { props: { deviceId: 'd1', id: 'r1', onedit } });
+    await fireEvent.click(getByRole('button', { name: 'Edit…' }));
+    expect(onedit).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(0); // editing never sends by itself
+    await fireEvent.click(getByRole('button', { name: 'Replay' }));
+    expect(calls).toHaveLength(1); // the one-click replay is still there
+  });
 });

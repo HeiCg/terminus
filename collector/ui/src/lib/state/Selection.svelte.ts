@@ -1,5 +1,5 @@
 import type { Store } from './Store.svelte.js';
-import type { Row } from './Filters.svelte.js';
+import { rowOf, type Row } from './Filters.svelte.js';
 import type { BodyCache } from '../bodyCache.js';
 import type { BodyState } from '../bodyState.js';
 import type { BodyRef, EntryDetail, BodyOmission } from '../protocol.js';
@@ -70,9 +70,40 @@ export class Selection {
     });
   }
 
+  // Stops a pending `focusEntry` wait (its store listener and timer), if any.
+  #stopFocus: (() => void) | null = null;
+
   // Release the store subscription. The Capture view calls this on unmount.
   dispose(): void {
     this.#unsub();
+    this.#stopFocus?.();
+  }
+
+  // Select the entry `deviceId/id` (the replay editor's "navigate to the new
+  // replay"). The POST /api/replay answer usually lands before the live socket
+  // delivers the entry, so when it is not in the store yet this waits for the
+  // batch that brings it (a store listener, not a reactive effect), giving up
+  // after `timeoutMs`. A newer focusEntry supersedes a pending one.
+  focusEntry(deviceId: string, id: string, timeoutMs = 15_000): void {
+    this.#stopFocus?.();
+    const key = entityKey(deviceId, id);
+    const tryNow = (): boolean => {
+      const e = this.#store.state.entries.get(key);
+      if (!e) return false;
+      void this.select(rowOf(e));
+      this.scrollToKey?.(key);
+      return true;
+    };
+    if (tryNow()) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = this.#store.onApplied(() => { if (tryNow()) stop(); });
+    const stop = (): void => {
+      unsub();
+      if (timer) clearTimeout(timer);
+      if (this.#stopFocus === stop) this.#stopFocus = null;
+    };
+    timer = setTimeout(stop, timeoutMs);
+    this.#stopFocus = stop;
   }
 
   // Drop ALL selection state — including the detail cache — and invalidate any
