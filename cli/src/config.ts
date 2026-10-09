@@ -1,4 +1,4 @@
-import { readTokenFile, ADMIN_TOKEN_FILE, type TokenFile } from '../../collector/src/security/adminToken.js';
+import { readTokenFile, ADMIN_TOKEN_FILE, READER_TOKEN_FILE, type TokenFile } from '../../collector/src/security/adminToken.js';
 import { flagString, type Flags } from './args.js';
 import { authError, generalError } from './errors.js';
 
@@ -23,11 +23,16 @@ export type ResolveDeps = {
   // In `tail`/`ls`, `--host` is the traffic filter, not the connection host, so the
   // connection host comes from TERMINUS_HOST or the loopback default instead.
   hostIsFilter?: boolean;
-  // The token files tried, in order, after --token and TERMINUS_TOKEN. The CLI keeps
-  // the default (admin-token only); the MCP server prefers the read-only
-  // reader-token and falls back to admin-token.
+  // The token files tried, in order, after --token and TERMINUS_TOKEN. CLI admin
+  // commands keep the default (admin-token only); CLI read-only commands use
+  // READ_ONLY_TOKEN_FILES; the MCP server prefers the read-only reader-token and
+  // falls back to admin-token.
   tokenFiles?: readonly TokenFile[];
 };
+
+// The token files for CLI commands that only GET reader-scope routes (status, ls,
+// show, devices): admin-token when present, else the read-only reader-token.
+export const READ_ONLY_TOKEN_FILES: readonly TokenFile[] = [ADMIN_TOKEN_FILE, READER_TOKEN_FILE];
 
 // Where a resolved token came from: a flag, the environment, or one of the token
 // files a same-machine collector wrote.

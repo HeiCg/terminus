@@ -148,11 +148,12 @@ crash no longer matches the running collector, so it authenticates nothing.
   URL (`http://127.0.0.1:8787/#token=<adminToken>`).
 
 The CLI resolves the token as `--token`, then `TERMINUS_TOKEN`, then the
-`admin-token` file. `TERMINUS_TOKEN` (or `--token`) may also hold the read-only
-reader token from `reader-token` in the same directory: `terminus status` and
-`terminus ls` work with it, and admin-only commands exit **2** with *"this command
-needs the admin token (reader token given)"*. The reader token rotates on restart
-like the admin token.
+`admin-token` file. The read-only commands (`status`, `ls`, `show`, `devices`) then
+also try the `reader-token` file in the same directory when `admin-token` is absent.
+`TERMINUS_TOKEN` (or `--token`) may also hold the read-only reader token: those four
+commands work with it, and admin-only commands exit **2** with *"this command needs
+the admin token (reader token given)"*. The reader token rotates on restart like the
+admin token.
 
 ## OpenSSL missing at startup
 

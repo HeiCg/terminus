@@ -107,7 +107,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_REDACT_ALLOW` | empty | collector | Comma-separated names exempt from ingest redaction and from the replay strip's shared-name check (e.g. `nextPageToken`), matched as whole names, case-insensitively. Wins over `TERMINUS_REDACT_EXTRA` and the built-in names, except `authorization`, `cookie`, `set-cookie` and `proxy-authorization`, which are always masked. | `NETCAPTURE_REDACT_ALLOW` |
 | `TERMINUS_HOST` | `127.0.0.1` | cli | Collector host the CLI connects to. In `tail`/`ls`, `--host` is the traffic filter, so the connection host is taken from this variable instead of the flag. | — |
 | `TERMINUS_PORT` | `8787` | cli | Collector port the CLI connects to. | — |
-| `TERMINUS_TOKEN` | — | cli | Bearer token for the CLI. Used after `--token` and before the `admin-token` file fallback. May hold the read-only reader token, which works for `status` and `ls` only. | — |
+| `TERMINUS_TOKEN` | — | cli | Bearer token for the CLI. Used after `--token` and before the token-file fallback (`admin-token`; for `status`, `ls`, `show` and `devices` also `reader-token` when `admin-token` is absent). May hold the read-only reader token, which works for those four commands only. | — |
 | `TERMINUS_RECONNECT_MIN_MS` | `1000` | cli | `terminus tail` reconnect backoff floor. Internal, for tests. | — |
 | `TERMINUS_RECONNECT_MAX_MS` | `15000` | cli | `terminus tail` reconnect backoff cap. Internal, for tests. | — |
 | `TERMINUS_LS_PAGE_SIZE` | `200` | cli | `terminus ls` per-page fetch size. Internal, for tests. | — |

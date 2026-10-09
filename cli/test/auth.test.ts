@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveConfig, resolveToken } from '../src/config.js';
+import { resolveConfig, resolveToken, READ_ONLY_TOKEN_FILES } from '../src/config.js';
 import { CliError } from '../src/errors.js';
 import { writeAdminTokenFile, writeTokenFile } from '../../collector/src/security/adminToken.js';
 import { createCollectorHarness } from '../../collector/test/fixtures/harness.js';
@@ -41,6 +41,18 @@ describe('token resolution precedence', () => {
   it('ignores a lone reader-token file (the CLI needs admin)', () => {
     writeTokenFile('reader-token', 'reader-tok', dir);
     expect(() => resolveConfig({ flags: {}, env: {}, stateDir: dir })).toThrow(/no token/);
+  });
+
+  it('read-only token files: admin-token first, then reader-token', () => {
+    writeTokenFile('reader-token', 'reader-tok', dir);
+    expect(resolveToken({ flags: {}, env: {}, stateDir: dir, tokenFiles: READ_ONLY_TOKEN_FILES }))
+      .toEqual({ token: 'reader-tok', source: 'reader-token' });
+    writeAdminTokenFile('admin-tok', dir);
+    expect(resolveToken({ flags: {}, env: {}, stateDir: dir, tokenFiles: READ_ONLY_TOKEN_FILES }))
+      .toEqual({ token: 'admin-tok', source: 'admin-token' });
+    // --token and TERMINUS_TOKEN keep precedence over both files.
+    expect(resolveToken({ flags: {}, env: { TERMINUS_TOKEN: 'env-tok' }, stateDir: dir, tokenFiles: READ_ONLY_TOKEN_FILES }).source).toBe('env');
+    expect(resolveToken({ flags: { token: 'f' }, env: { TERMINUS_TOKEN: 'env-tok' }, stateDir: dir, tokenFiles: READ_ONLY_TOKEN_FILES }).source).toBe('flag');
   });
 
   it('errors with exit code 2 and a clear message when no token anywhere', () => {

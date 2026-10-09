@@ -1,5 +1,5 @@
 import { parseArgs } from './args.js';
-import { resolveConfig } from './config.js';
+import { resolveConfig, READ_ONLY_TOKEN_FILES } from './config.js';
 import { makeColors, colorEnabled } from './format.js';
 import { CliError } from './errors.js';
 import type { Ctx } from './context.js';
@@ -30,7 +30,9 @@ const FILTER_FLAGS: CommandSpec['flags'] = {
   errors: { type: 'boolean', help: 'only transport errors and 4xx/5xx' },
 };
 
-type Command = { run: (ctx: Ctx) => Promise<number>; hostIsFilter?: boolean; offline?: boolean; spec: CommandSpec };
+// `readOnly`: the command only GETs reader-scope routes, so with no --token or
+// TERMINUS_TOKEN it falls back to the reader-token file when admin-token is absent.
+type Command = { run: (ctx: Ctx) => Promise<number>; hostIsFilter?: boolean; offline?: boolean; readOnly?: boolean; spec: CommandSpec };
 
 // The completion model is derived from the same COMMANDS/GLOBAL_FLAGS tables the
 // parser and --help use, so a completion script never lists a flag the CLI does
@@ -57,7 +59,7 @@ function completionModel(): CompletionModel {
 // Each command carries a flag table: `main()` validates the parsed flags against it
 // (unknown flag / bad value → exit 1) and `--help` renders it.
 const COMMANDS: Record<string, Command> = {
-  status: { run: runStatus, spec: { summary: 'collector snapshot (devices, counts, paused, retention)', flags: {} } },
+  status: { run: runStatus, readOnly: true, spec: { summary: 'collector snapshot (devices, counts, paused, retention)', flags: {} } },
   tail: {
     run: runTail, hostIsFilter: true,
     spec: {
@@ -70,7 +72,7 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   ls: {
-    run: runLs, hostIsFilter: true,
+    run: runLs, hostIsFilter: true, readOnly: true,
     spec: {
       summary: 'list captured entries',
       flags: {
@@ -81,7 +83,7 @@ const COMMANDS: Record<string, Command> = {
     },
   },
   show: {
-    run: runShow,
+    run: runShow, readOnly: true,
     spec: {
       summary: 'one entry: headers, timing, bodies',
       usage: '<dev>/<key>',
@@ -122,7 +124,7 @@ const COMMANDS: Record<string, Command> = {
     run: runClear,
     spec: { summary: 'drop captured data', flags: { device: { type: 'string', arg: '<id>', help: 'only this device' } } },
   },
-  devices: { run: runDevices, spec: { summary: 'list paired devices', flags: {} } },
+  devices: { run: runDevices, readOnly: true, spec: { summary: 'list paired devices', flags: {} } },
   pair: {
     run: runPair,
     spec: { summary: 'show pairing (QR contains the device token)', flags: { qr: { type: 'boolean', help: 'render a scannable QR' } } },
@@ -161,7 +163,9 @@ Common filters (tail, ls): --device <id> --method GET,POST --status 4xx|5xx|200
 
 Connection: --host <h> (default 127.0.0.1) --port <p> (default 8787)
 Auth:       --token <t> | TERMINUS_TOKEN | admin-token file in the state dir
-            (the read-only reader-token works for status and ls only)
+            (status, ls, show and devices also read the reader-token file
+            when admin-token is absent; the read-only reader token works for
+            those four only)
 Output:     --json for machine-readable output; NO_COLOR disables colour
 Help:       terminus <command> --help for a command's flags
 Version:    terminus --version | -V
@@ -197,7 +201,10 @@ export async function main(argv: string[], deps: MainDeps): Promise<number> {
     // it a placeholder config it never reads rather than resolving or demanding auth.
     const config = cmd.offline
       ? { host: '', port: 0, token: '', baseUrl: '', origin: '' }
-      : resolveConfig({ flags: parsed.flags, env: deps.env, stateDir: deps.stateDir, hostIsFilter: cmd.hostIsFilter });
+      : resolveConfig({
+        flags: parsed.flags, env: deps.env, stateDir: deps.stateDir, hostIsFilter: cmd.hostIsFilter,
+        tokenFiles: cmd.readOnly ? READ_ONLY_TOKEN_FILES : undefined,
+      });
     const ctx: Ctx = {
       config,
       flags: parsed.flags,

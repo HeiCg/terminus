@@ -76,7 +76,9 @@ token**, to `reader-token` in the same state directory. It is generated, written
 (`0600`, atomic), rotated on restart and removed on shutdown exactly like the admin
 token; only its scope differs. It is the recommended credential for a local
 automation client (a test runner, a script, an agent) that only needs to read
-captured traffic, and the CLI accepts it in `TERMINUS_TOKEN` for `status` and `ls`.
+captured traffic. The CLI accepts it in `TERMINUS_TOKEN` (or `--token`) for its
+read-only commands `status`, `ls`, `show` and `devices`, and those commands read the
+`reader-token` file themselves when `admin-token` is absent.
 
 The HTTP gate resolves every credential to a role. The session cookie and the admin
 bearer are `admin`; the reader bearer is `reader`, which passes an explicit
