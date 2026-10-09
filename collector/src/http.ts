@@ -15,6 +15,7 @@ import { performReplay } from './replay.js';
 import { sanCoversHost } from './security/identity.js';
 import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters, storeMatchEnv } from './entryFilters.js';
 import { createEntryWaits } from './entryWait.js';
+import { validateScopeBody, saveScopeFile } from './scope.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -143,9 +144,11 @@ function deviceScope(store: Store, q: URLSearchParams): string[] | null {
 export function createHttpServer(
   store: Store,
   uiDir: string,
-  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number; ingest?: IngestShared },
+  // `scopeFile`: where `PUT /api/scope` persists the capture scope (main.ts passes
+  // `<stateDir>/scope.json`); without it a PUT applies to this process only.
+  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number; ingest?: IngestShared; scopeFile?: string },
 ) {
-  const { uiAuth, getPairing, getPairingWarning, certPort, ingest } = opts;
+  const { uiAuth, getPairing, getPairingWarning, certPort, ingest, scopeFile } = opts;
   // Boot instant, so GET /api/status can report the collector's uptime without a
   // process-global. A server created after boot reports its own age, which is what
   // the operator asked "how long has this been serving".
@@ -249,7 +252,48 @@ export function createHttpServer(
             ingest: ingest ? ingest.scheduler.stats() : null,
             // P1: where the server sequence stands, on the collector clock.
             ...store.seqState(), now: Date.now(), apiVersion: API_VERSION, capabilities: CAPABILITIES,
+            // U5: the active capture scope and what it kept out since boot.
+            scope: store.scopeStatus(),
           });
+        }
+        // Capture scope (U5), admin only (not in the reader allowlist). GET reads the
+        // active patterns and drop counters; PUT validates and REPLACES both lists
+        // (an invalid pattern refuses the whole update, 400), applies them to new
+        // records at once and persists them to `scopeFile` (0600). Like the other
+        // mutations a cookie-driven PUT needs an exact Origin; the body is ≤64 KiB.
+        if (u.pathname === '/api/scope') {
+          if (method === 'GET') return json(store.scopeStatus());
+          if (method !== 'PUT') { res.writeHead(405); return res.end(); }
+          if (!requireMutation(res, origin, auth)) return;
+          const chunks: Buffer[] = [];
+          let size = 0;
+          let aborted = false;
+          req.on('data', (d: Buffer) => {
+            if (aborted) return;
+            size += d.length;
+            if (size > 64 * 1024) { aborted = true; res.writeHead(413); res.end('payload too large'); req.destroy(); }
+            else chunks.push(d);
+          });
+          req.on('end', () => {
+            if (aborted) return;
+            const bad = (message: string) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'bad_request', message })); };
+            let body: unknown;
+            try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null'); } catch { return bad('body is not valid JSON'); }
+            const v = validateScopeBody(body);
+            if (!v.ok) return bad(v.message);
+            // Outside the handler's outer try: a failed write is a logged 500, and
+            // the in-memory scope is only replaced once the file is safely written.
+            try {
+              if (scopeFile) saveScopeFile(scopeFile, v.value);
+              store.setScope(v.value);
+            } catch (e) {
+              log.warn('scope', String(e));
+              res.writeHead(500); return res.end('scope update failed');
+            }
+            log.info(`capture scope set: include [${v.value.include.join(', ')}] exclude [${v.value.exclude.join(', ')}]`);
+            return json(store.scopeStatus());
+          });
+          return;
         }
         // Parsed path segments for the parametric metadata/body routes below.
         // e.g. /api/entries/d1/r1/body -> ['api','entries','d1','r1','body'].
