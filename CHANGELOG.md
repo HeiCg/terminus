@@ -82,6 +82,24 @@ All notable changes to this project are documented here. The format is based on
   `GET`/`PUT /api/scope` (not open to the reader token) or the new Settings tab in
   the UI; it is persisted to `scope.json` (0600) in the state directory and wins
   over the environment at the next start. New capability `scope`.
+- Interception rules for the proxy source: block (status, close or reset), mock
+  (status, headers, text or base64 body, delay), rewrite (request URL, method,
+  headers, body and literal find/replace; response status, headers, body and
+  find/replace) and delay, matched by method, host (`*.` wildcard), path glob,
+  query and header globs and scheme against the request as the device sent it.
+  Rules run in list order; the first matching block/mock answers without
+  contacting upstream, rewrites and delays accumulate. Admin-only `GET`/`PUT
+  /api/rules` (validated whole, `400` with the path of the first error) and
+  `PATCH /api/rules/:id` (`enabled`), persisted to `rules.json` (0600) in the
+  state directory; Settings has a Rules card (toggle, add, edit, delete,
+  reorder), and Capture's detail panel offers "Create rule" prefilled from the
+  selected request. Entries record the request as sent upstream and the response
+  as delivered, plus `rules`, `mocked`, `originalMethod` and `originalUrl`
+  (redacted); the Capture list marks them with a RULE/MOCK badge, the filter
+  language gains `rule` and `mocked`, HAR exports and `--load` keep the fields,
+  and the MCP entry tools show them. Rules never touch SDK sources, TLS
+  pass-through tunnels or the collector's own endpoints. Caps: 200 rules, 1 MiB
+  bodies, 50 replacements, 30 s of delay per phase. New capability `rules`.
 - Docs: HTTP/3 (QUIC over UDP 443) never goes through the proxy or the SDK capture
   layers; troubleshooting explains how to spot it and force a TCP fallback (block
   UDP 443, or e.g. Cronet `enableQuic(false)`). Terminus does not intercept or

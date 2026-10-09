@@ -267,6 +267,33 @@ per-reason count remains. The scope is not a firewall: proxied traffic out of sc
 still reaches its upstream. Changing the scope is admin-only (the reader token gets
 `403`), and the persisted `scope.json` in the state directory is written `0600`.
 
+## Interception rules alter live traffic
+
+Proxy [interception rules](read-api.md#interception-rules) (`/api/rules`, the
+Settings Rules card) can block, mock, rewrite or delay what the device sends and
+what it receives: a rule can change the URL, method, headers and bodies of requests
+leaving for the network, send a request to another host, or hand the device a
+response no server produced. That is the point of the feature (testing an app
+against errors, slow APIs and fake data), and also why it is guarded:
+
+- Editing rules is admin-only. The reader token gets `403 forbidden_scope` on every
+  `/api/rules` route, and the MCP server has no rule tools. A cookie-driven change
+  needs the exact loopback `Origin`, like every other mutation.
+- Rules act only on the proxy source, only for clients on `TERMINUS_PROXY_ALLOW`,
+  and never on the collector's own endpoints or inside TLS pass-through tunnels. A
+  rewrite cannot target the cloud metadata address (refused at validation) or a
+  collector-internal endpoint (the connection is closed instead). Framing headers
+  (`content-length`, `transfer-encoding`, `connection`, ...) are never rule-editable.
+- Rules persist across restarts in `<stateDir>/rules.json`, written `0600`
+  atomically. Anyone who can write that file can change what the proxied device
+  sees after the next start, so it is protected like the admin-token file; a
+  malformed file is ignored rather than half-applied.
+- The record is honest about it: an entry a rule touched lists the rules
+  (`rules`), says when no upstream was contacted (`mocked`), and keeps the device's
+  original method and URL (redacted) next to what was actually sent. Rule names
+  and mock bodies are admin-chosen text and pass through the same redaction as
+  captured traffic once recorded.
+
 ## Replay re-sends captured requests
 
 `POST /api/replay` (and `terminus replay`) re-sends a captured request from the
@@ -329,6 +356,9 @@ distinct from passive capture:
   [What redaction does not cover](#what-redaction-does-not-cover)).
 - The reader-token file grants read access to all captured traffic; it is protected
   only by file permissions, like the admin-token file.
+- An enabled interception rule keeps changing proxied traffic until it is disabled;
+  a forgotten mock or block can make a test device misbehave in ways that look like
+  a server bug. Captured entries carry `rules`/`mocked` so this stays visible.
 
 ## Reporting
 
