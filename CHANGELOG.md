@@ -35,6 +35,44 @@ All notable changes to this project are documented here. The format is based on
   applied, and the `?` sheet lists the syntax. Every 0.2 search (`method:GET
   status:5xx login`) keeps its meaning. Limits: 2048 characters, 32 levels, 512
   terms.
+- systemd `--user` service for Linux: `collector/scripts/systemd/install.sh` and
+  `uninstall.sh` render `terminus-collector.service` with the absolute `node` and
+  checkout paths, read optional settings from `~/.config/terminus/collector.env`,
+  log to the journal, restart on failure (with a start limit), and print a
+  `loginctl enable-linger` hint. CI checks every service script with `bash -n`.
+- `TERMINUS_SAN_INTERFACES`: comma-separated interface names whose addresses go into
+  a new identity's certificate SAN, the proxy exclusion list and the pairing-host
+  candidates, used exclusively and in the listed order.
+- `TERMINUS_OPENSSL`: path to an OpenSSL 3 binary, tried first (before `openssl`
+  on `PATH`).
+
+### Changed
+
+- Network interfaces are classified before use. Virtual and tunnel interfaces
+  (Linux `docker*`, `veth*`, `br-*`, `virbr*`, `cni*`, `flannel*`, `tun*`, `tap*`
+  and similar; macOS `utun*`, `awdl*`, `llw*`, `bridge*`, `anpi*`, `ap<n>`) and IPv6
+  link-local addresses no longer go into the certificate SAN of a new or rotated
+  identity or the proxy exclusion list, and are never picked as the pairing host;
+  Wi-Fi/Ethernet addresses are preferred. Existing certificates are not reissued:
+  rotate to apply the filter to the SAN. `TERMINUS_PAIRING_HOST` still wins.
+- CLI: the read-only commands `status`, `ls`, `show` and `devices` fall back to the
+  `reader-token` file when `admin-token` is absent. Admin commands still read
+  `admin-token` only; `--token` and `TERMINUS_TOKEN` keep precedence.
+- Docs and package metadata describe the collector as macOS and Linux, with the
+  Linux state directory shown next to the macOS one.
+- CI runs on Node 20, 22 and 24 on Linux and Node 22 on macOS.
+
+### Fixed
+
+- mDNS discovery failure is non-fatal: a responder that cannot bind or advertise
+  (no multicast on CI, UDP 5353 held by Avahi) logs one warning and the collector
+  keeps running. The advertised DNS-SD instance name is sanitized instead of using
+  the raw hostname.
+- OpenSSL discovery on macOS: after `TERMINUS_OPENSSL` (if set) and `openssl` on
+  `PATH` (LibreSSL on stock macOS), the collector tries Homebrew's keg-only `openssl@3`
+  (`/opt/homebrew/opt/openssl@3/bin/openssl`, `/usr/local/opt/openssl@3/bin/openssl`),
+  then `/opt/homebrew/bin/openssl` and `/usr/local/bin/openssl`. The startup error
+  lists every candidate tried.
 
 ## 0.2.0 — 2026-10-08
 

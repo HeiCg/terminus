@@ -1,7 +1,7 @@
 # Terminus (collector)
 
-The Terminus collector is a local Mac server that captures HTTP and WebSocket
-traffic from your devices on the LAN, shows it live in a web UI, and exports it as
+The Terminus collector is a local server for macOS and Linux that captures HTTP and
+WebSocket traffic from your devices on the LAN, shows it live in a web UI, and exports it as
 HAR 1.2. Device capture runs over **TLS with device-token auth** on the LAN, while
 the UI stays loopback-only. This README covers running and operating the collector;
 for the project overview see the [repository README](../README.md), for the
@@ -25,9 +25,13 @@ database), capped at 5 000 HTTP entries per device.
 ## Requirements
 
 - Node.js ≥ 20
-- OpenSSL 3 on `PATH` (used once to generate the collector's identity certificate).
-  Checked at startup; a missing/old OpenSSL is a hard, actionable error before any
-  listener opens.
+- OpenSSL 3 (used to generate the collector's identity certificate). The collector
+  uses `TERMINUS_OPENSSL` when set, else `openssl` on `PATH` when it is version 3;
+  otherwise it tries Homebrew's keg-only `openssl@3`
+  (`/opt/homebrew/opt/openssl@3/bin/openssl`, `/usr/local/opt/openssl@3/bin/openssl`),
+  then `/opt/homebrew/bin/openssl` and `/usr/local/bin/openssl`. Checked at startup;
+  when none is OpenSSL 3 it is a hard, actionable error, listing what was tried,
+  before any listener opens.
 
 ## Run
 
@@ -97,8 +101,10 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_INGEST_PORT` | `8788` | collector | WSS device-capture ingest port (`/ingest`, TLS on the LAN). Bare `INGEST_PORT` accepted as legacy. | `NETCAPTURE_INGEST_PORT` |
 | `TERMINUS_ATLANTIS_PORT` | `10909` | collector | Atlantis TLS capture ingest port. Bare `ATLANTIS_PORT` accepted as legacy. | `NETCAPTURE_ATLANTIS_PORT` |
 | `TERMINUS_CERT_PORT` | `8789` | collector | Public cert endpoint port (`GET /api/cert`, plain HTTP on the LAN) for QR pairing. | `NETCAPTURE_CERT_PORT` |
-| `TERMINUS_STATE_DIR` | `~/Library/Application Support/Terminus` (macOS) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
+| `TERMINUS_STATE_DIR` | macOS `~/Library/Application Support/Terminus`; Linux `$XDG_STATE_HOME/terminus` (fallback `~/.local/state/terminus`) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
 | `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
+| `TERMINUS_SAN_INTERFACES` | unset (classifier picks) | collector | Comma-separated interface names (e.g. `eth0` or `en0,en7`) whose addresses go into the certificate SAN of a **new or rotated** identity, the proxy exclusion list and the pairing-host candidates, used exclusively and in the listed order. IPv6 link-local is still skipped and the loopback anchors are always kept. Unset, virtual and tunnel interfaces are skipped (see [the advertised pairing host](#the-advertised-pairing-host-is-the-machines-lan-ip)). | `NETCAPTURE_SAN_INTERFACES` |
+| `TERMINUS_OPENSSL` | unset | collector | Path to an OpenSSL 3 binary, tried first (before `openssl` on `PATH` and the built-in Homebrew locations). | `NETCAPTURE_OPENSSL` |
 | `TERMINUS_INGEST_PAUSE_MAX_MS` | `30000` | collector | Max time a back-pressured (read-paused) WSS ingest connection may stay paused before it is closed with `1013` (overload). | `NETCAPTURE_INGEST_PAUSE_MAX_MS` |
 | `TERMINUS_ATLANTIS_PING_MS` | `30000` | collector | Interval between server→client Atlantis `ping` control frames on an authenticated connection; `0` disables pinging. | `NETCAPTURE_ATLANTIS_PING_MS` |
 | `TERMINUS_BODY_BUDGET` | `67108864` (64 MiB) | collector | Total bytes of captured request/response/frame bodies retained across all devices before the store evicts to make room. A positive integer of bytes, optional binary `k`/`m`/`g` suffix (e.g. `256m`); an invalid value is fatal at start. | `NETCAPTURE_BODY_BUDGET` |
@@ -112,7 +118,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_REDACT_ALLOW` | empty | collector | Comma-separated names exempt from ingest redaction and from the replay strip's shared-name check (e.g. `nextPageToken`), matched as whole names, case-insensitively. Wins over `TERMINUS_REDACT_EXTRA` and the built-in names, except `authorization`, `cookie`, `set-cookie` and `proxy-authorization`, which are always masked. | `NETCAPTURE_REDACT_ALLOW` |
 | `TERMINUS_HOST` | `127.0.0.1` | cli | Collector host the CLI connects to. In `tail`/`ls`, `--host` is the traffic filter, so the connection host is taken from this variable instead of the flag. | — |
 | `TERMINUS_PORT` | `8787` | cli | Collector port the CLI connects to. | — |
-| `TERMINUS_TOKEN` | — | cli | Bearer token for the CLI. Used after `--token` and before the `admin-token` file fallback. May hold the read-only reader token, which works for `status` and `ls` only. | — |
+| `TERMINUS_TOKEN` | — | cli | Bearer token for the CLI. Used after `--token` and before the token-file fallback (`admin-token`; for `status`, `ls`, `show` and `devices` also `reader-token` when `admin-token` is absent). May hold the read-only reader token, which works for those four commands only. | — |
 | `TERMINUS_RECONNECT_MIN_MS` | `1000` | cli | `terminus tail` reconnect backoff floor. Internal, for tests. | — |
 | `TERMINUS_RECONNECT_MAX_MS` | `15000` | cli | `terminus tail` reconnect backoff cap. Internal, for tests. | — |
 | `TERMINUS_LS_PAGE_SIZE` | `200` | cli | `terminus ls` per-page fetch size. Internal, for tests. | — |
@@ -136,10 +142,14 @@ Notes:
 - **`TERMINUS_PROXY_CA`** is read on the **device / M-agent** side (where to load
   the proxy CA), not by the collector.
 
-## Run as a service (macOS)
+## Run as a service
 
-To keep the collector running across logins, install it as a per-user launchd agent.
-It runs the built `dist/main.js`, so build first:
+To keep the collector running across logins, install it as a per-user service:
+a launchd agent on macOS, a systemd `--user` unit on Linux. Both run the built
+`dist/main.js` with the absolute path of your `node` and this checkout, so build
+first and reinstall after moving the checkout or switching Node versions.
+
+### macOS (launchd)
 
 ```sh
 npm run build -w collector
@@ -149,13 +159,43 @@ collector/scripts/launchd/install.sh
 `install.sh` renders `scripts/launchd/com.terminus.collector.plist.template` with the
 absolute paths of your `node` and this checkout, writes
 `~/Library/LaunchAgents/com.terminus.collector.plist`, and bootstraps it under your
-GUI session (`launchctl bootstrap gui/$UID`). Logs (stdout and stderr) go to
+GUI session (`launchctl bootstrap gui/$UID`). launchd restarts it whenever it exits
+(`KeepAlive`). Logs (stdout and stderr) go to
 `~/Library/Logs/Terminus/collector.log`. Check state with
 `launchctl print gui/$UID/com.terminus.collector`.
 
 Remove it with `collector/scripts/launchd/uninstall.sh` (the log file is kept). The
 agent uses fixed ports; set overrides in the plist's `EnvironmentVariables` if the
 defaults collide, then reinstall.
+
+### Linux (systemd)
+
+```sh
+npm run build -w collector
+collector/scripts/systemd/install.sh
+```
+
+`install.sh` renders `scripts/systemd/terminus-collector.service.template` into
+`~/.config/systemd/user/terminus-collector.service` (`$XDG_CONFIG_HOME` is
+honoured), then runs `systemctl --user daemon-reload`, `enable` and `restart`, so a
+reinstall replaces the running service. The unit restarts the collector on failure
+(5 s apart, giving up after 5 failed starts within 60 s, e.g. a port already in use;
+clear that with `systemctl --user reset-failed terminus-collector`). A clean stop
+(`systemctl --user stop terminus-collector`) stays stopped.
+
+- **Logs** go to the journal: `journalctl --user -u terminus-collector -f`.
+- **Settings** go in `~/.config/terminus/collector.env`, one `VAR=value` per line
+  (any variable from [Configuration](#configuration)). The first install seeds it
+  with commented examples (`0600`) and never overwrites it; restart the service
+  after editing. A missing file is ignored.
+- **Status:** `systemctl --user status terminus-collector`.
+- **Running without a login session.** A user service stops when your last session
+  ends. To keep it running after logout and start it at boot, enable lingering
+  once: `loginctl enable-linger "$USER"` (the installer prints this hint when
+  lingering is off).
+
+Remove it with `collector/scripts/systemd/uninstall.sh`, which disables and stops the
+unit and deletes the unit file. The env file and the journal are kept.
 
 ## Migration from argo-netcapture
 
@@ -198,14 +238,34 @@ the QA screen. The response also carries `certPort` (the LAN cert listener's por
 so the UI can render the QR below. The terminal only ever prints the admin token,
 never the device token.
 
-### The advertised pairing host is the Mac's LAN IP
+### The advertised pairing host is the machine's LAN IP
 
-The `host` in the pairing blob and QR is **the Mac's LAN IPv4** (e.g. `192.168.1.10`),
-resolved at runtime — not the machine hostname. Phones have no way to resolve the
-Mac's hostname on the LAN (there is no DNS for it, and Android's `fetch` does not do
-mDNS), so a hostname-based pairing fails immediately with a fetch error. The IP is
-chosen as the first current LAN IPv4 that is also in the certificate's SAN, so the
-device's TLS SAN check passes when it dials it.
+The `host` in the pairing blob and QR is **the collector machine's LAN IPv4** (e.g.
+`192.168.1.10`), resolved at runtime — not the machine hostname. Phones have no way
+to resolve the machine's hostname on the LAN (there is no DNS for it, and Android's
+`fetch` does not do mDNS), so a hostname-based pairing fails immediately with a fetch
+error. The IP is chosen as the first current LAN IPv4 that is also in the
+certificate's SAN, so the device's TLS SAN check passes when it dials it.
+
+One interface classifier decides which addresses count, for the certificate SAN of a
+new identity, the proxy exclusion list and the pairing host alike:
+
+- Virtual and tunnel interfaces are skipped by name: Linux `docker*`, `podman*`,
+  `veth*`, `br-*`, `virbr*`, `lxcbr*`/`lxdbr*`, `cni*`, `flannel*`, `cali*`,
+  `vxlan*`, `tun*`, `tap*`, `wg*`; macOS `utun*`, `awdl*`, `llw*`, `bridge*`,
+  `anpi*`, `ap<n>`, `gif*`, `stf*`; VMware/VirtualBox `vmnet*`/`vboxnet*`.
+- IPv6 link-local addresses (`fe80::/10`) are skipped on every interface.
+- Wi-Fi and Ethernet interfaces (`en*` such as `en0`, `enp*`, `eno*`, `ens*`;
+  `eth*`; `wlan*`, `wl*` such as `wlp*`) come first; any other non-virtual
+  interface follows. The loopback anchors `127.0.0.1` and `::1` are always present.
+- `TERMINUS_SAN_INTERFACES=<name>[,<name>…]` replaces the classifier: only the
+  listed interfaces are used, in that order.
+
+The classifier only changes **new or rotated** identities: an existing certificate is
+never reissued, so its SAN keeps whatever addresses it was created with (including a
+`docker0` or `utun` address from an older build). Rotate to apply it, which re-pairs
+every device. The pairing-host order applies at once, but only among addresses the
+existing SAN covers. `TERMINUS_PAIRING_HOST` still wins over all of this.
 
 Because the address is a **DHCP lease**, it can change. When it does, the old cert no
 longer covers the new IP: rotate the identity (which regenerates the cert SAN and the
@@ -547,7 +607,7 @@ HAR (no `_terminus`) lands on a `har:<basename>` device with `source: xhr`.
 
 `POST /api/replay` (and `terminus replay <device>/<id>`) reconstructs a stored
 request, applies any overrides (`method`, `url`, `headers`, `body`), strips
-hop-by-hop and `host`/`content-length` headers, and re-sends it from the Mac with a
+hop-by-hop and `host`/`content-length` headers, and re-sends it from the collector machine with a
 30 s timeout and no redirect following. The response is stored as a **new** entry
 with `source: replay`, a fresh id, and a `replayOf: { id, credentials, stripped }`
 back-reference — the original is never modified. A request whose body was omitted at

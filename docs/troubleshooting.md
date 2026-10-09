@@ -30,14 +30,14 @@ During QR pairing the app fetches the certificate DER from
   Rotation regenerates the certificate (and its SAN), the device token, and the
   collector UUID, so **every** device must re-pair.
 
-## Device cannot reach the Mac's LAN IP
+## Device cannot reach the collector's LAN IP
 
 **Symptom.** The device fails to connect immediately (a fetch/TLS error), or the
 collector logs a drift warning at boot such as *"no current LAN IPv4 is in the
 certificate SAN … run `npm run identity:rotate`"*.
 
-The advertised pairing `host` is the Mac's **LAN IPv4**, resolved at runtime —
-phones cannot resolve the Mac's hostname on the LAN. Because that address is a
+The advertised pairing `host` is the collector machine's **LAN IPv4**, resolved at
+runtime — phones cannot resolve the machine's hostname on the LAN. Because that address is a
 DHCP lease, it can change, and when it does the certificate SAN no longer covers
 it.
 
@@ -55,7 +55,7 @@ it.
 
 - If the address is correct but the device still cannot reach it, the network is
   likely isolating clients (Wi-Fi *client/AP isolation*, a guest network, or the
-  Mac and device on different subnets/VLANs). Put both on the same,
+  collector machine and device on different subnets/VLANs). Put both on the same,
   non-isolated LAN.
 
 ## Simulator, emulator, or Linux on the same machine
@@ -85,7 +85,7 @@ curl -s -H "Authorization: Bearer $(cat "$HOME/Library/Application Support/Termi
 `host` overrides the advertised host for that response only; a host the certificate
 SAN does not cover is refused with `400`.
 
-**Android emulator.** Forward the capture ports from the emulator to the Mac with
+**Android emulator.** Forward the capture ports from the emulator to the host with
 `adb reverse`, then pair with the same `?host=127.0.0.1` blob:
 
 ```bash
@@ -105,11 +105,37 @@ Rotation issues a new certificate and device token, so **every** paired device m
 re-pair; `adb reverse` avoids that.
 
 **Linux.** The collector runs on Linux (CI covers Ubuntu). It needs Node.js 20+ and
-OpenSSL 3 on `PATH` (see [OpenSSL missing at startup](#openssl-missing-at-startup)).
-The state directory is `$XDG_STATE_HOME/terminus` (fallback
-`~/.local/state/terminus`). mDNS discovery may be unavailable where multicast is
-blocked, as on most CI runners; pair with the blob instead of relying on discovery.
-The launchd service scripts are macOS-only.
+OpenSSL 3 (see [OpenSSL missing at startup](#openssl-missing-at-startup)). The state
+directory is `$XDG_STATE_HOME/terminus` (fallback `~/.local/state/terminus`). mDNS
+discovery may be unavailable where multicast is blocked, as on most CI runners, or
+when another responder holds UDP 5353: the collector logs one *"mDNS discovery
+unavailable"* warning and keeps running; pair with the QR or the blob. Container and
+VPN interfaces (`docker0`, `br-*`, `veth*`, `virbr*`, `tun*`, …) are left out of the
+certificate SAN and the pairing host for new identities; see
+[Run as a service](../collector/README.md#run-as-a-service) for the systemd
+`--user` unit (launchd on macOS).
+
+## The collector service does not start or stops at logout
+
+**Symptom.** After `collector/scripts/launchd/install.sh` (macOS) or
+`collector/scripts/systemd/install.sh` (Linux) the collector is not running, or on
+Linux it stops when you log out.
+
+**Fix.**
+
+- Build first (`npm run build -w collector`): both services run `dist/main.js`.
+  Reinstall after moving the checkout or changing the Node install, since the unit
+  holds absolute paths.
+- **macOS:** read `~/Library/Logs/Terminus/collector.log` and
+  `launchctl print gui/$UID/com.terminus.collector`.
+- **Linux:** read `journalctl --user -u terminus-collector` and
+  `systemctl --user status terminus-collector`. After 5 failed starts within 60 s
+  (for example a port already in use) systemd stops retrying; fix the cause, then
+  `systemctl --user reset-failed terminus-collector` and
+  `systemctl --user restart terminus-collector`. Settings live in
+  `~/.config/terminus/collector.env`.
+- **Linux, stops at logout:** a user service ends with your last session unless
+  lingering is on: `loginctl enable-linger "$USER"`.
 
 ## Port already in use (`EADDRINUSE`)
 
@@ -148,28 +174,40 @@ crash no longer matches the running collector, so it authenticates nothing.
   URL (`http://127.0.0.1:8787/#token=<adminToken>`).
 
 The CLI resolves the token as `--token`, then `TERMINUS_TOKEN`, then the
-`admin-token` file. `TERMINUS_TOKEN` (or `--token`) may also hold the read-only
-reader token from `reader-token` in the same directory: `terminus status` and
-`terminus ls` work with it, and admin-only commands exit **2** with *"this command
-needs the admin token (reader token given)"*. The reader token rotates on restart
-like the admin token.
+`admin-token` file. The read-only commands (`status`, `ls`, `show`, `devices`) then
+also try the `reader-token` file in the same directory when `admin-token` is absent.
+`TERMINUS_TOKEN` (or `--token`) may also hold the read-only reader token: those four
+commands work with it, and admin-only commands exit **2** with *"this command needs
+the admin token (reader token given)"*. The reader token rotates on restart like the
+admin token.
 
 ## OpenSSL missing at startup
 
-**Symptom.** The collector refuses to start with *"OpenSSL 3 not found on PATH.
-Install OpenSSL 3 and put it on PATH …"* or *"OpenSSL 3 required, found: …"*.
+**Symptom.** The collector refuses to start with *"OpenSSL 3 not found. Tried:
+openssl on PATH (LibreSSL 3.3.6); /opt/homebrew/opt/openssl@3/bin/openssl (not
+found); …"*.
 
-OpenSSL 3+ is required once, to generate the collector's identity certificate; the
-check runs **before** any listener opens. Stock macOS ships LibreSSL as
-`/usr/bin/openssl`, which fails the version check.
+OpenSSL 3+ is required to generate the collector's identity certificate; the check
+runs **before** any listener opens. Stock macOS ships LibreSSL as `/usr/bin/openssl`,
+which fails the version check. The collector looks in this order and uses the first
+OpenSSL 3 it finds:
 
-**Fix.** Install OpenSSL 3 and make it available on `PATH`.
+1. `TERMINUS_OPENSSL` (an explicit path to the binary), when set;
+2. `openssl` on `PATH`;
+3. Homebrew's keg-only `openssl@3`: `/opt/homebrew/opt/openssl@3/bin/openssl`
+   (Apple silicon), then `/usr/local/opt/openssl@3/bin/openssl` (Intel);
+4. `/opt/homebrew/bin/openssl`, then `/usr/local/bin/openssl`.
 
-macOS (Homebrew's `openssl@3` is keg-only, so add it to `PATH` yourself):
+The error lists each candidate and what it was (not found, or the version found).
+
+**Fix.** Install OpenSSL 3.
+
+macOS: `brew install openssl@3` is enough; the keg-only install is found without
+changing `PATH`. For a non-Homebrew build, point `TERMINUS_OPENSSL` at it:
 
 ```bash
 brew install openssl@3
-export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+# or: export TERMINUS_OPENSSL=/path/to/openssl
 ```
 
 Linux (most current distributions already ship OpenSSL 3):
@@ -179,7 +217,8 @@ sudo apt install openssl     # Debian, Ubuntu
 sudo dnf install openssl     # Fedora, RHEL
 ```
 
-Check with `openssl version`, then restart the collector.
+Check with `openssl version` (or `$TERMINUS_OPENSSL version`), then restart the
+collector.
 
 ## QR pairing fails on a hardened QA build (paste works)
 

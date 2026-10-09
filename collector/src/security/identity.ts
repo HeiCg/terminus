@@ -85,30 +85,73 @@ export async function migrateLegacyStateDir(
 // Fail before opening any listener if OpenSSL 3+ is unavailable; the message names
 // the fix rather than surfacing a raw ENOENT deep in cert generation. The hint
 // covers both supported platforms (stock macOS ships LibreSSL, which fails the
-// version check; Homebrew's openssl@3 is keg-only, hence the PATH step).
-const OPENSSL_HINT = 'Install OpenSSL 3 and put it on PATH before starting the collector. '
-  + 'macOS: `brew install openssl@3`, then add `$(brew --prefix openssl@3)/bin` to PATH. '
+// version check; Homebrew's openssl@3 is keg-only, so it is found by location).
+const OPENSSL_HINT = 'Install OpenSSL 3, then put it on PATH or set TERMINUS_OPENSSL to the binary. '
+  + 'macOS: `brew install openssl@3` (found automatically under /opt/homebrew or /usr/local). '
   + 'Linux: install your distribution\'s OpenSSL 3 package (e.g. `apt install openssl` or `dnf install openssl`).';
 
-export async function ensureOpenSSL(): Promise<void> {
-  let out: string;
-  try { out = (await exec('openssl', ['version'])).stdout; }
-  catch { throw new Error(`OpenSSL 3 not found on PATH. ${OPENSSL_HINT}`); }
-  const m = /OpenSSL\s+(\d+)\./.exec(out);
-  if (!m || Number(m[1]) < 3) throw new Error(`OpenSSL 3 required, found: ${out.trim()}. ${OPENSSL_HINT}`);
-}
+// Where to look when TERMINUS_OPENSSL and `openssl` on PATH are missing or not v3:
+// Homebrew's keg-only openssl@3 (Apple silicon, then Intel), then a linked Homebrew
+// or locally built openssl.
+export const OPENSSL_FALLBACKS: readonly string[] = [
+  '/opt/homebrew/opt/openssl@3/bin/openssl',
+  '/usr/local/opt/openssl@3/bin/openssl',
+  '/opt/homebrew/bin/openssl',
+  '/usr/local/bin/openssl',
+];
 
-// LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. Filtered
-// to the addresses the device is likely to dial.
-const LOOPBACK_IPS = ['127.0.0.1', '::1'];
+// `<bin> version` stdout; rejects when the binary cannot run.
+export type OpenSSLProbe = (bin: string) => Promise<string>;
+const defaultProbe: OpenSSLProbe = async (bin) => (await exec(bin, ['version'])).stdout;
 
-export function lanAddresses(): string[] {
-  const ips = new Set<string>(LOOPBACK_IPS);
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const nic of list ?? []) if (!nic.internal) ips.add(nic.address.replace(/%.*$/, ''));
+export type FindOpenSSLOpts = {
+  probe?: OpenSSLProbe;
+  env?: typeof env;
+  fallbacks?: readonly string[];
+};
+
+// The first OpenSSL 3+ binary among: TERMINUS_OPENSSL, `openssl` on PATH, then
+// OPENSSL_FALLBACKS. The error lists every candidate and what it turned out to be.
+export async function findOpenSSL(opts: FindOpenSSLOpts = {}): Promise<string> {
+  const probe = opts.probe ?? defaultProbe;
+  const e = opts.env ?? env;
+  const explicit = e('OPENSSL')?.trim();
+  // An explicit TERMINUS_OPENSSL is the user's choice and is tried first.
+  const candidates: { bin: string; label: string }[] = [];
+  if (explicit) candidates.push({ bin: explicit, label: `${explicit} from ${envName('OPENSSL')}` });
+  candidates.push({ bin: 'openssl', label: 'openssl on PATH' });
+  for (const bin of opts.fallbacks ?? OPENSSL_FALLBACKS) {
+    if (!candidates.some((c) => c.bin === bin)) candidates.push({ bin, label: bin });
   }
-  return [...ips];
+  const tried: string[] = [];
+  for (const { bin, label } of candidates) {
+    let out: string;
+    try { out = await probe(bin); }
+    catch { tried.push(`${label} (not found)`); continue; }
+    const m = /OpenSSL\s+(\d+)\./.exec(out);
+    if (m && Number(m[1]) >= 3) return bin;
+    tried.push(`${label} (${out.trim() || 'unrecognized version'})`);
+  }
+  throw new Error(`OpenSSL 3 not found. Tried: ${tried.join('; ')}. ${OPENSSL_HINT}`);
 }
+
+// The OpenSSL binary identity generation runs, resolved by ensureOpenSSL().
+let opensslBin: string | null = null;
+
+// Resolve (and remember) the OpenSSL 3 binary, or throw the actionable error.
+export async function ensureOpenSSL(opts: FindOpenSSLOpts = {}): Promise<string> {
+  opensslBin = await findOpenSSL(opts);
+  return opensslBin;
+}
+
+// LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. The
+// interface classifier (virtual/tunnel NICs and IPv6 link-local skipped,
+// Wi-Fi/Ethernet first, TERMINUS_SAN_INTERFACES override) lives in interfaces.ts;
+// re-exported because the collector's callers import it here.
+import { lanAddresses } from './interfaces.js';
+export { lanAddresses };
+
+const LOOPBACK_IPS = ['127.0.0.1', '::1'];
 
 // Reject anything that is not a plain hostname or IP before it reaches the openssl
 // argv; SAN values are attacker-influenced when they come from a rotate CLI.
@@ -214,7 +257,7 @@ export async function generateCertificate(dir: string, opts: GenerateOpts = {}):
   ];
   args.push('-days', String(opts.days ?? 365));
   try {
-    await exec('openssl', args, { maxBuffer: 8 * 1024 * 1024 });
+    await exec(opensslBin ?? await ensureOpenSSL(), args, { maxBuffer: 8 * 1024 * 1024 });
     const certPem = await fsp.readFile(certOut, 'utf8');
     const keyPem = await fsp.readFile(keyOut, 'utf8');
     return { certPem, keyPem };
@@ -300,7 +343,8 @@ function pairingHostOverride(e: typeof env): string | null {
 // endpoint log). Resolved at runtime, not from identity meta:
 //   1. TERMINUS_PAIRING_HOST when set and valid;
 //   2. else the first current LAN IPv4 that is in the cert SAN (so the device's SAN
-//      check passes when it dials it);
+//      check passes when it dials it), in lanAddresses() order: Wi-Fi/Ethernet
+//      first, virtual/tunnel interfaces (docker0, utun, ...) never;
 //   3. else identity meta.host, warning once about the drift.
 // `e`/`lan` are injectable so tests do not depend on the machine's real interfaces.
 export function pairingHost(id: CollectorIdentity, e: typeof env = env, lan: () => string[] = lanAddresses): string {

@@ -1,0 +1,27 @@
+# Terminus collector as a systemd --user service (Linux). Rendered by install.sh,
+# which fills in the placeholders with absolute paths; do not install as is.
+[Unit]
+Description=Terminus collector (HTTP/WebSocket capture from LAN devices)
+Documentation=https://github.com/HeiCg/terminus/blob/main/collector/README.md
+# Give up after 5 failed starts within 60 s (e.g. a port already in use) instead of
+# restarting forever; `systemctl --user reset-failed` clears it.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=__COLLECTOR_DIR__
+ExecStart="__NODE__" "__COLLECTOR_DIR__/dist/main.js"
+Environment="PATH=__NODE_DIR__:/usr/local/bin:/usr/bin:/bin"
+# Optional overrides (TERMINUS_PORT, TERMINUS_SAN_INTERFACES, ...), one VAR=value per
+# line. The leading '-' makes a missing file harmless.
+EnvironmentFile=-__ENV_FILE__
+Restart=on-failure
+RestartSec=5
+# stdout/stderr go to the journal: journalctl --user -u terminus-collector
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=terminus-collector
+
+[Install]
+WantedBy=default.target

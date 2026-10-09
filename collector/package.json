@@ -1,7 +1,7 @@
 {
   "name": "terminus",
   "version": "0.2.0",
-  "description": "Local Mac collector that captures HTTP/WebSocket traffic from LAN devices over TLS, shows it in a loopback web UI, and exports HAR 1.2.",
+  "description": "Local collector for macOS and Linux that captures HTTP/WebSocket traffic from LAN devices over TLS, shows it in a loopback web UI, and exports HAR 1.2.",
   "license": "MIT",
   "repository": {
     "type": "git",

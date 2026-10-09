@@ -54,7 +54,8 @@ Send the token as a bearer header. A token is never accepted in a query string,
 and a bearer caller needs no `Origin`.
 
 ```bash
-TOKEN="$(cat "$HOME/Library/Application Support/Terminus/reader-token")"
+TOKEN="$(cat "$HOME/Library/Application Support/Terminus/reader-token")"   # macOS
+TOKEN="$(cat "${XDG_STATE_HOME:-$HOME/.local/state}/terminus/reader-token")"  # Linux
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/status
 ```
 

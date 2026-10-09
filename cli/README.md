@@ -49,23 +49,26 @@ that calls the CLI), so callers just type `terminus` and never see the nested pa
 The collector binds loopback only. The CLI connects to `--host`/`--port`
 (default `127.0.0.1:8787`), overridable with `TERMINUS_HOST` / `TERMINUS_PORT`.
 
-The admin token is resolved in this order:
+The token is resolved in this order:
 
 1. `--token <t>`
 2. `TERMINUS_TOKEN`
 3. the `admin-token` file the running collector writes in its state dir
-   (`~/Library/Application Support/Terminus/admin-token`, or `TERMINUS_STATE_DIR`).
+   (macOS `~/Library/Application Support/Terminus`, Linux `$XDG_STATE_HOME/terminus`
+   or `~/.local/state/terminus`; `TERMINUS_STATE_DIR` overrides both);
+4. for the read-only commands `status`, `ls`, `show` and `devices` only: the
+   `reader-token` file in the same directory, when `admin-token` is absent.
 
 With none of these you get:
 `no token: pass --token, set TERMINUS_TOKEN, or run the collector on this machine`.
 
 `--token` or `TERMINUS_TOKEN` may instead hold the read-only **reader token**, which
-the collector writes to `reader-token` in the same state dir. With it, `status` and
-`ls` work (`status` then reports from `GET /api/status` only, since the live `/ui`
-socket is admin-only, and `--json` carries `snapshot: null`). Commands that need
-admin (`tail`, `clear`, `pause`, `resume`, `pair`, `replay`, `export`) exit `2` with
-`this command needs the admin token (reader token given)`. The file fallback always
-reads `admin-token`. See
+the collector writes to `reader-token` in the same state dir. With it, `status`,
+`ls`, `show` and `devices` work (`status` then reports from `GET /api/status` only,
+since the live `/ui` socket is admin-only, and `--json` carries `snapshot: null`).
+Commands that need admin (`tail`, `clear`, `pause`, `resume`, `pair`, `replay`,
+`export`) exit `2` with `this command needs the admin token (reader token given)`,
+and their file fallback reads `admin-token` only. See
 [docs/read-api.md](../docs/read-api.md#authentication).
 
 ## Commands

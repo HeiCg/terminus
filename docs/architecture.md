@@ -1,7 +1,7 @@
 # Architecture
 
-Terminus is a local Mac collector that captures HTTP and WebSocket/SSE traffic
-from devices on the LAN, keeps it in memory, shows it in a loopback web UI, and
+Terminus is a local collector for macOS and Linux that captures HTTP and
+WebSocket/SSE traffic from devices on the LAN, keeps it in memory, shows it in a loopback web UI, and
 exports it as HAR 1.2 or JSON. This document describes the listeners, the path a
 captured request takes from the wire to the dashboard, the two pairing flows, the
 on-disk state, and the optional MITM proxy. For the trust model behind these
@@ -136,7 +136,8 @@ at the same import path.
 ## State directory and migration
 
 On first run the collector generates a persistent identity in its state directory
-(`~/Library/Application Support/Terminus`, overridable with `TERMINUS_STATE_DIR`):
+(macOS `~/Library/Application Support/Terminus`, Linux `$XDG_STATE_HOME/terminus`
+or `~/.local/state/terminus`, overridable with `TERMINUS_STATE_DIR`):
 a UUID `collectorId`, an RSA-3072/SHA-256 self-signed `serverAuth` certificate
 (365-day validity, SAN covering the host and LAN IPs), and a 32-byte device token.
 The directory is `0700`, the private key and token `0600`, and all files are

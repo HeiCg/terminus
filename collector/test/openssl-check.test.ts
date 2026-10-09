@@ -5,7 +5,11 @@ import path from 'node:path';
 import { ensureOpenSSL } from '../src/security/identity.js';
 
 // The startup OpenSSL check names a fix for each supported platform (macOS and
-// Linux), not only Homebrew. A fake `openssl` on a private PATH drives each case.
+// Linux), not only Homebrew. A fake `openssl` on a private PATH drives each case;
+// the built-in fallback locations and TERMINUS_OPENSSL are switched off so a real
+// Homebrew openssl@3 on this machine cannot satisfy the check (discovery itself is
+// covered in openssl-discovery.test.ts).
+const pathOnly = { fallbacks: [], env: () => undefined };
 let dir: string;
 let savedPath: string | undefined;
 
@@ -26,8 +30,8 @@ afterEach(() => {
 
 describe('ensureOpenSSL', () => {
   it('missing binary: platform-neutral message with a macOS and a Linux hint', async () => {
-    const err = await ensureOpenSSL().then(() => null, (e: Error) => e);
-    expect(err?.message).toMatch(/^OpenSSL 3 not found on PATH\./);
+    const err = await ensureOpenSSL(pathOnly).then(() => null, (e: Error) => e);
+    expect(err?.message).toMatch(/^OpenSSL 3 not found\. Tried: openssl on PATH \(not found\)\./);
     expect(err?.message).toContain('macOS');
     expect(err?.message).toContain('brew install openssl@3');
     expect(err?.message).toContain('Linux');
@@ -36,14 +40,14 @@ describe('ensureOpenSSL', () => {
 
   it('too old (or LibreSSL): names what was found and gives the same hints', async () => {
     fakeOpenssl('LibreSSL 3.3.6');
-    const err = await ensureOpenSSL().then(() => null, (e: Error) => e);
-    expect(err?.message).toMatch(/^OpenSSL 3 required, found: LibreSSL 3\.3\.6\./);
+    const err = await ensureOpenSSL(pathOnly).then(() => null, (e: Error) => e);
+    expect(err?.message).toMatch(/^OpenSSL 3 not found\. Tried: openssl on PATH \(LibreSSL 3\.3\.6\)\./);
     expect(err?.message).toContain('brew install openssl@3');
     expect(err?.message).toContain('Linux');
   });
 
   it('OpenSSL 3 passes', async () => {
     fakeOpenssl('OpenSSL 3.0.13 30 Jan 2024');
-    await expect(ensureOpenSSL()).resolves.toBeUndefined();
+    await expect(ensureOpenSSL(pathOnly)).resolves.toBe('openssl');
   });
 });

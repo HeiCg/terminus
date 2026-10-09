@@ -1,7 +1,7 @@
 # Terminus
 
-Terminus is a local Mac collector that captures HTTP and WebSocket/SSE traffic
-from your devices on the LAN, shows it live in a loopback web UI, and exports it
+Terminus is a local collector for macOS and Linux that captures HTTP and
+WebSocket/SSE traffic from your devices on the LAN, shows it live in a loopback web UI, and exports it
 as HAR 1.2 or JSON. It is built for mobile and device developers who want to see
 exactly what their app puts on the wire, over TLS with per-device authentication,
 without routing traffic through a third-party service.
