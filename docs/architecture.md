@@ -176,5 +176,28 @@ allowlist rejects every client, so there is no open relay on the LAN, and the
 cloud-metadata address `169.254.169.254` is always refused. Proxy traffic passes
 through the same redaction and body caps as the other sources.
 
+Two optional host lists change what is intercepted (`src/proxy/tlsMode.ts`):
+`TERMINUS_PROXY_PASSTHROUGH` tunnels the listed hosts raw (a pinned app keeps
+working), and `TERMINUS_PROXY_INTERCEPT_ONLY` intercepts only the listed hosts.
+A raw tunnel is recorded as a body-less `CONNECT` entry whose `tunnel` field holds
+host, port, SNI, the client connection's byte counts and open/close times. mockttp
+exposes neither the socket nor byte counts for a raw tunnel, so the proxy watches
+its listener's `connection` event to read them, and to close a tunnel from a
+client outside the allowlist (raw tunnels never reach the HTTP gate).
+
 The proxy is not total coverage: a client may ignore it, use its own trust store,
-pin its own certificate, or use QUIC. It never disables the app-side capture.
+pin its own certificate, or use QUIC (HTTP/3 over UDP, which never goes through an
+HTTP proxy; Terminus does not capture QUIC, UDP or DTLS). It never disables the
+app-side capture.
+
+## Capture scope
+
+`src/scope.ts` holds the host-pattern grammar and the capture scope
+(`TERMINUS_SCOPE_INCLUDE`/`EXCLUDE`, `GET`/`PUT /api/scope`, persisted to
+`<stateDir>/scope.json`). The scope is enforced inside the store, at the point a
+new entry or WebSocket session is created, so every source (Atlantis, WSS ingest,
+proxy, replay results, `--load`) is held to the same rule without per-source code.
+An out-of-scope record is not stored and is counted once per record under its
+reason; later writes for it (a completion, a socket's frames) are dropped quietly.
+The proxy checks the scope up front only to skip its own work; out-of-scope traffic
+is still forwarded upstream.

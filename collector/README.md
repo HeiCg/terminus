@@ -111,6 +111,10 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_PROXY` | off | collector | `=1` turns on the additive MITM proxy source (off by default). | `NETCAPTURE_PROXY` |
 | `TERMINUS_PROXY_PORT` | `8080` | collector | Proxy listener port (when the proxy is on). | `NETCAPTURE_PROXY_PORT` |
 | `TERMINUS_PROXY_ALLOW` | empty (rejects every client) | collector | Comma-separated device-IP allowlist for the proxy. An empty allowlist rejects every client, so there is no open relay. | `NETCAPTURE_PROXY_ALLOW` |
+| `TERMINUS_PROXY_PASSTHROUGH` | empty | collector | Comma-separated host patterns (`api.example.com`, `*.example.com`) the proxy tunnels **without** MITM, in addition to the collector's own hosts: the device sees the real certificate, so a pinned app keeps working. Each tunnel is recorded as a `CONNECT` entry with a `tunnel` field (host, port, SNI, bytes, open/close). Invalid patterns are warned about and skipped. Cannot be combined with `TERMINUS_PROXY_INTERCEPT_ONLY`. | `NETCAPTURE_PROXY_PASSTHROUGH` |
+| `TERMINUS_PROXY_INTERCEPT_ONLY` | empty | collector | Inverse mode: only these host patterns are intercepted; every other TLS connection is tunnelled (and recorded as a `CONNECT` tunnel entry). The collector's own hosts are never intercepted. Setting it together with `TERMINUS_PROXY_PASSTHROUGH`, or with no usable pattern, refuses to start. | `NETCAPTURE_PROXY_INTERCEPT_ONLY` |
+| `TERMINUS_SCOPE_INCLUDE` | empty (every host) | collector | Capture scope, all sources: comma-separated host patterns, each optionally with a path (`api.example.com/v1/*` prefix, `api.example.com/health` exact). An HTTP entry or WebSocket session whose URL matches none is not stored. Initial value only: once the admin saves a scope (`PUT /api/scope`, UI Settings) the persisted `scope.json` in the state directory wins. | `NETCAPTURE_SCOPE_INCLUDE` |
+| `TERMINUS_SCOPE_EXCLUDE` | empty | collector | Same syntax; a matching URL is not stored. Exclude wins over include. Out-of-scope proxy traffic is still forwarded upstream (scope is about recording, not blocking). Drops are counted in `GET /api/status` `scope.dropped`. | `NETCAPTURE_SCOPE_EXCLUDE` |
 | `TERMINUS_ALLOW_LEGACY_LOOPBACK` | off | collector | `=1` opens a plaintext Atlantis listener on `127.0.0.1:10910` (loopback only, testing). | `NETCAPTURE_ALLOW_LEGACY_LOOPBACK` |
 | `TERMINUS_LOG_LEVEL` | `info` | collector | Log verbosity (`debug`\|`info`\|`warn`\|`error`); an invalid value falls back to `info` with a warning. Every line carries an ISO-8601 timestamp and the level. | `NETCAPTURE_LOG_LEVEL` |
 | `TERMINUS_CRASH_THRESHOLD` | `5` | collector | Number of `uncaughtException`/`unhandledRejection` events within 60 s that trigger a clean shutdown with exit 1 (state lock released, `admin-token` removed). | `NETCAPTURE_CRASH_THRESHOLD` |
@@ -512,6 +516,31 @@ Guarantees enforced by the collector:
 A client may still ignore the proxy, use its own trust store, pin its own
 certificate, or use QUIC — the proxy is not total coverage. A refused proxy CA is
 recorded as a `tls_error` entry rather than lost.
+
+**Pinned apps and TLS pass-through.** `TERMINUS_PROXY_PASSTHROUGH=api.bank.example,*.bank.example`
+tunnels those hosts without interception, so a pinned app keeps working; the
+inverse, `TERMINUS_PROXY_INTERCEPT_ONLY=api.app.example`, intercepts only the
+listed hosts and tunnels everything else. The two cannot be combined. Each raw
+tunnel is recorded as a `CONNECT` entry with a `tunnel` field (destination, SNI,
+bytes up/down on the client connection, open/close time); nothing inside it is
+visible. A tunnel from a client outside the allowlist is closed, as is any tunnel to
+the metadata address.
+
+**HTTP/3 is invisible.** QUIC (UDP 443) never goes through an HTTP proxy, and
+Terminus does not intercept or replay QUIC, HTTP/3, UDP or DTLS. Block UDP 443 on
+the test network or disable QUIC in the client to force a TCP fallback (see
+[Troubleshooting](../docs/troubleshooting.md#an-app-works-but-the-proxy-shows-nothing-for-a-host-http3--quic)).
+
+## Capture scope
+
+`TERMINUS_SCOPE_INCLUDE` and `TERMINUS_SCOPE_EXCLUDE` (or the Settings tab in the UI,
+or `PUT /api/scope`) limit what is **recorded** from every source: a host pattern
+(`api.example.com`, `*.example.com`), optionally with a path (`api.example.com/v1/*`
+prefix, `api.example.com/health` exact). Exclude wins over include; an empty include
+records every host. Out-of-scope requests and WebSocket sessions are not stored and
+are counted in `GET /api/status` under `scope.dropped`; proxied traffic out of scope
+still reaches its upstream. A scope saved by the admin is persisted to `scope.json`
+in the state directory and wins over the environment at the next start.
 
 ## Export
 

@@ -250,3 +250,40 @@ is intentional — it survives a collector restart.
 - Leave it running: it will reconnect automatically once the collector is back.
 - To restore the fail-fast behaviour (exit **3** on a dropped connection instead
   of reconnecting), pass `--no-reconnect`.
+
+## An app works but the proxy shows nothing for a host (HTTP/3 / QUIC)
+
+**Symptom.** With the proxy on, the app loads content from a host, yet the proxy
+records nothing for it (no entry, no `tls_error`), and the app-side capture may be
+missing it too.
+
+**Cause.** The client is talking HTTP/3, which runs over QUIC on **UDP** port 443.
+An HTTP proxy only carries TCP, so QUIC never goes through it, and a stack that
+speaks QUIC on its own (Cronet, some `URLSession`/OkHttp setups, game or media
+engines) also bypasses the SDK capture layers. Terminus does not intercept or
+replay QUIC, HTTP/3, UDP or DTLS.
+
+**How to spot it.** The host works while the proxy shows nothing for it; in a
+packet capture you see UDP 443 to the host's address; an HTTP response captured
+elsewhere carries `alt-svc: h3=...`, which is how clients learn to switch.
+
+**Fix.** Force the fallback to TCP (HTTP/2 or HTTP/1.1), which the proxy and the
+SDKs do see:
+
+- Block UDP 443 on the test network (router or firewall rule for the QA device);
+  clients fall back to TCP after the QUIC attempt fails.
+- Or disable QUIC in the client, for example Cronet
+  `CronetEngine.Builder.enableQuic(false)`, or the equivalent setting of the
+  library in use.
+
+## A pinned app fails behind the proxy
+
+**Symptom.** With the proxy on, an app with certificate pinning fails its requests
+and the proxy records `tls_error` entries for the pinned host.
+
+**Fix.** Add the host to `TERMINUS_PROXY_PASSTHROUGH` (e.g. `api.bank.example` or
+`*.bank.example`) and restart the collector. The proxy then tunnels that host
+without interception: the app sees the real certificate, and the capture shows a
+`CONNECT` entry per connection (host, port, SNI, bytes up/down, open/close time)
+instead of the requests inside it. The app-side capture (Atlantis/XHR) still records
+the exchanges themselves.
