@@ -2,7 +2,7 @@ import type { DeviceScopeFilter } from './store.js';
 import type { EntrySummary } from './uiProtocol.js';
 import type { Source } from './types.js';
 import {
-  parseFilter, compileFilter, andNodes, API_FILTER_CAPS,
+  parseFilter, compileFilter, andNodes, newMatchBudget, API_FILTER_CAPS,
   type FilterNode, type FilterValue, type FilterHeaders, type MatchEnv,
 } from './filterLang.js';
 
@@ -30,8 +30,10 @@ export type FilterStore = {
   entryDetail(deviceId: string, id: string): FilterHeaders | null;
   deviceMatchKeys(deviceId: string): string[];
 };
-export function storeMatchEnv(store: FilterStore): MatchEnv {
-  return { detail: (e) => store.entryDetail(e.deviceId, e.id), deviceNames: (id) => store.deviceMatchKeys(id) };
+// One env per request: it carries the request's glob budget, whose `truncated`
+// the route reports as `truncatedMatch: true` (filterLang.ts, "Cost").
+export function storeMatchEnv(store: FilterStore): MatchEnv & { budget: NonNullable<MatchEnv['budget']> } {
+  return { detail: (e) => store.entryDetail(e.deviceId, e.id), deviceNames: (id) => store.deviceMatchKeys(id), budget: newMatchBudget() };
 }
 
 // Whether the query names any of the P4 filters (used to refuse them outside the

@@ -26,12 +26,28 @@ import type { EntrySummary } from './uiProtocol.js';
 // quoted. A `=`, `&` or `|` inside a word (`next=/home&x=1`) stays text.
 //
 // Cost: compile is linear in the input; a predicate walks the AST once per entry
-// (at most FILTER_MAX_NODES nodes), each node linear in the field it reads, glob
-// `matches` O(field x pattern) with no backtracking. No user regex is ever built.
+// (at most FILTER_MAX_NODES nodes), each node linear in the field it reads. Glob
+// `matches` is the two-pointer wildcard match (backtracking only to the last
+// `*`): near-linear for ordinary patterns, O(field x pattern) only for
+// pathological ones, and BOUNDED: a field longer than GLOB_FIELD_MAX characters is
+// not glob-matched, one entry's evaluation may spend at most
+// GLOB_STEPS_PER_EVALUATION steps, and a caller can share a MatchBudget across a
+// whole request (the read API: GLOB_STEPS_PER_REQUEST). When a bound is hit the
+// entry does NOT match (whatever `not` around the glob says) and the budget
+// records `truncated`, which the read API reports as `truncatedMatch: true`. No
+// user regex is ever built.
 
 export const FILTER_MAX_LENGTH = 2048;
 export const FILTER_MAX_DEPTH = 32;
 export const FILTER_MAX_NODES = 512;
+export const GLOB_FIELD_MAX = 64 * 1024;
+export const GLOB_STEPS_PER_EVALUATION = 1_000_000;
+export const GLOB_STEPS_PER_REQUEST = 32_000_000;
+
+// Glob work shared by every evaluation of one request. `truncated` is set when an
+// entry was left unmatched because a bound was hit.
+export type MatchBudget = { steps: number; truncated: boolean };
+export const newMatchBudget = (steps = GLOB_STEPS_PER_REQUEST): MatchBudget => ({ steps, truncated: false });
 
 export type FilterError = { message: string; offset: number };
 export type FilterOp = '==' | '!=' | '>' | '>=' | '<' | '<=' | 'contains' | 'matches' | 'in';
@@ -61,6 +77,8 @@ export interface MatchEnv {
   bodyText?: (e: EntrySummary) => string | null;
   // Headers for `header.*`, `req.header.*`, `res.header.*` and `mime.res`.
   detail?: (e: EntrySummary) => FilterHeaders | null;
+  // Glob work shared across a request (absent: each evaluation has its own cap).
+  budget?: MatchBudget;
 }
 
 export type FilterPredicate = (e: FilterSubject, env?: MatchEnv) => boolean;
@@ -172,7 +190,27 @@ class Ctx {
   #detail?: FilterHeaders | null;
   #body?: string | null;
   #now?: number;
+  #globLeft = GLOB_STEPS_PER_EVALUATION;
+  // A glob bound was hit: this entry does not match.
+  exceeded = false;
   constructor(readonly e: FilterSubject, readonly env: MatchEnv | undefined) {}
+
+  // One bounded glob test (pattern and text already lower-cased).
+  glob(pattern: string, text: string): boolean {
+    if (this.exceeded) return false;
+    if (text.length > GLOB_FIELD_MAX) return this.#trip();
+    const shared = this.env?.budget;
+    const limit = Math.min(this.#globLeft, shared ? Math.max(0, shared.steps) : Infinity);
+    const r = globMatchBounded(pattern, text, limit);
+    this.#globLeft -= r.steps;
+    if (shared) shared.steps -= r.steps;
+    return r.match ?? this.#trip();
+  }
+  #trip(): false {
+    this.exceeded = true;
+    if (this.env?.budget) this.env.budget.truncated = true;
+    return false;
+  }
 
   split(): { host: string; path: string } {
     if (!this.#split) {
@@ -610,32 +648,23 @@ function numValue(kind: Kind, field: string, v: FilterValue): NumVal {
   }
 }
 
-// Anchored, case-insensitive glob with `*` (any run) and `?` (one character).
-// Segments between stars are placed leftmost-first, which is exact for globs and
-// never backtracks: O(text x pattern) at worst.
-function compileGlob(pattern: string): (s: string) => boolean {
-  const segs = pattern.toLowerCase().split('*');
-  const at = (seg: string, s: string, i: number): boolean => {
-    for (let k = 0; k < seg.length; k++) if (seg[k] !== '?' && seg[k] !== s[i + k]) return false;
-    return true;
-  };
-  if (segs.length === 1) return (s) => s.length === segs[0].length && at(segs[0], s, 0);
-  const first = segs[0];
-  const last = segs[segs.length - 1];
-  const middle = segs.slice(1, -1).filter((x) => x !== '');
-  return (s) => {
-    if (s.length < first.length + last.length || !at(first, s, 0)) return false;
-    const end = s.length - last.length;
-    if (!at(last, s, end)) return false;
-    let pos = first.length;
-    for (const seg of middle) {
-      let found = -1;
-      for (let i = pos; i + seg.length <= end; i++) if (at(seg, s, i)) { found = i; break; }
-      if (found < 0) return false;
-      pos = found + seg.length;
-    }
-    return true;
-  };
+// Anchored glob with `*` (any run) and `?` (one character), over text the caller
+// lower-cased (the pattern too). The classic two-pointer wildcard match: on a
+// mismatch it backtracks only to the most recent `*`, so ordinary patterns run in
+// about one pass and only pathological ones reach O(text x pattern). `limit`
+// bounds the steps: `match` is null when it ran out.
+export function globMatchBounded(pattern: string, text: string, limit: number): { match: boolean | null; steps: number } {
+  let p = 0; let t = 0; let star = -1; let mark = 0; let steps = 0;
+  while (t < text.length) {
+    if (++steps > limit) return { match: null, steps: limit };
+    const c = pattern.charCodeAt(p);
+    if (p < pattern.length && c !== 42 && (c === 63 || c === text.charCodeAt(t))) { p++; t++; }
+    else if (p < pattern.length && c === 42) { star = p++; mark = t; }
+    else if (star >= 0) { p = star + 1; t = ++mark; }
+    else return { match: false, steps };
+  }
+  while (p < pattern.length && pattern.charCodeAt(p) === 42) p++;
+  return { match: p === pattern.length, steps };
 }
 
 const NUMERIC: ReadonlySet<Kind> = new Set(['number', 'status', 'size', 'duration', 'time']);
@@ -690,20 +719,20 @@ function cmpPred(n: Extract<FilterNode, { type: 'cmp' }>, caps: FilterCaps): Pre
   }
   // Text fields: every comparison is case-insensitive.
   if (ORDER_OPS.has(op)) return fail(`${opName} compares numbers; ${field} is text`, n.pos);
-  let test: (s: string) => boolean;
+  let test: (s: string, c: Ctx) => boolean;
   if (op === 'in') {
     const set = new Set(n.values.map((v) => v.text.toLowerCase()));
     test = (s) => set.has(s);
   } else {
     const want = n.values[0].text.toLowerCase();
-    test = op === 'contains' ? (s) => s.includes(want) : op === 'matches' ? compileGlob(want) : (s) => s === want;
+    test = op === 'contains' ? (s) => s.includes(want) : op === 'matches' ? (s, c) => c.glob(want, s) : (s) => s === want;
   }
   const get = spec.get;
   const pred: Pred = (c) => {
     const v = get(c);
     if (v == null) return false;
-    if (typeof v === 'string') return test(v.toLowerCase());
-    return (v as readonly string[]).some((s) => test(s.toLowerCase()));
+    if (typeof v === 'string') return test(v.toLowerCase(), c);
+    return (v as readonly string[]).some((s) => test(s.toLowerCase(), c));
   };
   return op === '!=' ? (c) => !pred(c) : pred;
 }
@@ -733,7 +762,8 @@ function compileNode(n: FilterNode, caps: FilterCaps): Pred {
 export function compileFilter(ast: FilterNode, caps: FilterCaps = API_FILTER_CAPS): CompileResult {
   try {
     const p = compileNode(ast, caps);
-    return { ok: true, match: (e, env) => p(new Ctx(e, env)) };
+    // An entry whose evaluation hit a glob bound does not match.
+    return { ok: true, match: (e, env) => { const c = new Ctx(e, env); return p(c) && !c.exceeded; } };
   } catch (e) {
     if (e instanceof Fail) return { ok: false, error: { message: e.message, offset: e.offset } };
     throw e;

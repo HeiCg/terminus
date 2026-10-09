@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseFilter, compileFilter, buildFilter, formatFilterError, canonicalField,
   API_FILTER_CAPS, UI_FILTER_CAPS, FILTER_MAX_LENGTH, FILTER_MAX_DEPTH, FILTER_MAX_NODES,
+  GLOB_FIELD_MAX, GLOB_STEPS_PER_EVALUATION, GLOB_STEPS_PER_REQUEST, globMatchBounded, newMatchBudget,
   type FilterNode, type FilterSubject, type MatchEnv, type FilterCaps, type FilterHeaders,
 } from '../src/filterLang.js';
 import type { BodyRef } from '../src/types.js';
@@ -423,5 +424,59 @@ describe('performance', () => {
     const elapsed = performance.now() - t0;
     expect(hits).toBeGreaterThan(0);
     expect(elapsed).toBeLessThan(1500);
+  });
+});
+
+// 0.3.0 review: `matches` cost is bounded. Two-pointer wildcard matching, a cap
+// on the characters of one field, a per-evaluation step cap and a per-request
+// budget; an entry that hits a bound does not match and the budget says so.
+describe('glob matches work bounds', () => {
+  const match = (q: string) => {
+    const r = buildFilter(q, API_FILTER_CAPS);
+    if (!r.ok || !r.match) throw new Error('compile');
+    return r.match;
+  };
+
+  it('two-pointer matching stays exact', () => {
+    const cases: [string, string, boolean][] = [
+      ['*', '', true], ['?', '', false], ['a*b', 'ab', true], ['a*b', 'acccb', true], ['a*b', 'acccbc', false],
+      ['*a?c*', 'xxabcxx', true], ['*a?c', 'abcabd', false], ['**x', 'yyx', true], ['/v?/*', '/v1/items', true],
+    ];
+    for (const [p, t, want] of cases) expect(globMatchBounded(p, t, 1e6).match, `${p} ~ ${t}`).toBe(want);
+    expect(globMatchBounded('*a', 'b'.repeat(100), 10)).toEqual({ match: null, steps: 10 });
+  });
+
+  it('a field over GLOB_FIELD_MAX characters never matches, even under not, and is reported', () => {
+    const e = base({ url: `https://x/${'a'.repeat(GLOB_FIELD_MAX)}` });
+    const budget = newMatchBudget();
+    expect(match('url matches "*"')(e, { budget })).toBe(false);
+    expect(budget.truncated).toBe(true);
+    const b2 = newMatchBudget();
+    expect(match('not url matches "zzz*"')(e, { budget: b2 })).toBe(false);
+    expect(b2.truncated).toBe(true);
+    // Below the cap it matches as usual.
+    expect(match('url matches "*"')(base({ url: 'https://x/short' }), { budget: newMatchBudget() })).toBe(true);
+  });
+
+  it('a pathological glob is cut off by the per-evaluation step cap: no match, fast', () => {
+    const e = base({ url: `https://x/${'a'.repeat(60_000)}` });
+    const budget = newMatchBudget();
+    const t0 = performance.now();
+    expect(match(`url matches "*${'a'.repeat(1000)}b"`)(e, { budget })).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(budget.truncated).toBe(true);
+    expect(budget.steps).toBeLessThanOrEqual(GLOB_STEPS_PER_REQUEST - GLOB_STEPS_PER_EVALUATION + 1);
+  });
+
+  it('a shared request budget, once spent, leaves later glob entries unmatched', () => {
+    const m = match('path matches "/v1/*"');
+    const budget = newMatchBudget(20); // one evaluation of this glob takes 12 steps
+    const e = base({ url: 'https://x/v1/items/1' });
+    expect(m(e, { budget })).toBe(true);
+    expect(budget.truncated).toBe(false);
+    expect(m(e, { budget })).toBe(false);
+    expect(budget.truncated).toBe(true);
+    // Without a shared budget each evaluation has its own cap.
+    expect(m(e)).toBe(true);
   });
 });

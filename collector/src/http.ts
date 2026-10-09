@@ -126,7 +126,8 @@ function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): {
   const n = nonNegIntParam(q, isLast ? 'last' : 'afterSeq');
   if (n === null) return bad(`${isLast ? 'last' : 'afterSeq'} must be a non-negative integer`);
   if (isLast && (n < 1 || n > 200)) return bad('last must be between 1 and 200');
-  const filters = parseEntryFilters(q, storeMatchEnv(store));
+  const env = storeMatchEnv(store);
+  const filters = parseEntryFilters(q, env);
   if (!filters.ok) return bad(filters.message, filters.offset);
   const match = filters.value;
 
@@ -137,7 +138,9 @@ function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): {
   const deviceIds = scope ?? undefined;
   const page = isLast ? store.lastEntries(n, { deviceIds, match }) : store.entriesAfterSeq(n, { deviceIds, limit, newOnly, match });
   const echo = q.get('externalId') || q.get('bundleId');
-  return { status: 200, body: echo && scope ? { ...page, devices: scope } : page };
+  // A `matches` glob hit its work bound on some entry: that entry was left out.
+  const body = env.budget.truncated ? { ...page, truncatedMatch: true } : page;
+  return { status: 200, body: echo && scope ? { ...body, devices: scope } : body };
 }
 
 // The device-scope filters (P2) shared by /api/entries and /api/devices.

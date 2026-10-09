@@ -186,3 +186,27 @@ describe('GET /api/entries/wait?q= (U2)', () => {
     expect(empty.status).toBe(400);
   }));
 });
+
+describe('q= glob work bound (0.3.0 review)', () => {
+  it('reports truncatedMatch when a matches glob hit its bound, and leaves that entry out', async () => {
+    await withHarness(async (h, get) => {
+      seed(h);
+      h.store.addEntryInput(input('huge', 'd1', { url: `https://api.example/${'a'.repeat(8000)}` })); // 7
+      expect(h.store.entries().some((e) => e.id === 'huge')).toBe(true);
+      // Pathological for the two-pointer match on `huge` only (millions of steps).
+      const q = enc(`url matches "*${'a'.repeat(1000)}b" or url matches "https://api.example/*"`);
+      const last = await (await get(`/api/entries?last=200&q=${q}`)).json();
+      expect(last.truncatedMatch).toBe(true);
+      expect(ids(last.items)).not.toContain('huge');
+      expect(ids(last.items)).toContain('get200');
+      const after = await (await get(`/api/entries?afterSeq=0&q=${q}`)).json();
+      expect(after.truncatedMatch).toBe(true);
+      const wait = await (await get(`/api/entries/wait?afterSeq=0&timeoutMs=0&limit=50&q=${q}`)).json();
+      expect(wait.truncatedMatch).toBe(true);
+      // No bound hit: no field.
+      const plain = await (await get(`/api/entries?last=200&q=${enc('path matches "/v1/*"')}`)).json();
+      expect(plain.truncatedMatch).toBeUndefined();
+    });
+  });
+});
+

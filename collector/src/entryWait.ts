@@ -14,7 +14,7 @@ const LIMIT_DEFAULT = 1;
 const LIMIT_MAX = 50;
 const NEAR_MISSES = 5;
 
-type WaitQuery = { afterSeq: number; newOnly: boolean; limit: number; timeoutMs: number; match: EntryMatch | undefined };
+type WaitQuery = { afterSeq: number; newOnly: boolean; limit: number; timeoutMs: number; match: EntryMatch | undefined; env: MatchEnv };
 
 // Validate the wait parameters. Same strictness and errors as the afterSeq read:
 // `cursor`/`last` are refused, `afterSeq` is required, `limit` is 1..50 and
@@ -46,7 +46,7 @@ function parseWaitQuery(q: URLSearchParams, env: MatchEnv): Parsed<WaitQuery> {
   }
   const filters = parseEntryFilters(q, env);
   if (!filters.ok) return filters;
-  return { ok: true, value: { afterSeq, newOnly, limit, timeoutMs, match: filters.value } };
+  return { ok: true, value: { afterSeq, newOnly, limit, timeoutMs, match: filters.value, env } };
 }
 
 type Waiter = WaitQuery & {
@@ -78,7 +78,6 @@ export type EntryWaits = {
 // completing a request) is a write like any other and is re-tested.
 export function createEntryWaits(store: Store, opts: { max?: number } = {}): EntryWaits {
   const max = opts.max ?? MAX_WAITS;
-  const env = storeMatchEnv(store);
   const waiters = new Set<Waiter>();
   let attached = false;
 
@@ -90,7 +89,12 @@ export function createEntryWaits(store: Store, opts: { max?: number } = {}): Ent
   };
 
   const query = (w: Waiter) => store.entriesAfterSeq(w.afterSeq, { deviceIds: w.scope ?? undefined, limit: w.limit, newOnly: w.newOnly, match: w.match });
-  const withDevices = (w: Waiter, body: Record<string, unknown>) => (w.echo && w.scope ? { ...body, devices: w.scope } : body);
+  // `truncatedMatch`: a `matches` glob of this wait hit its work bound on some
+  // entry, which was left out (filterLang.ts, "Cost"). The budget is per wait.
+  const withDevices = (w: Waiter, body: Record<string, unknown>) => {
+    const b = w.env.budget?.truncated ? { ...body, truncatedMatch: true } : body;
+    return w.echo && w.scope ? { ...b, devices: w.scope } : b;
+  };
 
   // The matched response from the current store state, or null when nothing matches.
   const matched = (w: Waiter): Record<string, unknown> | null => {
@@ -170,7 +174,7 @@ export function createEntryWaits(store: Store, opts: { max?: number } = {}): Ent
 
   return {
     handle(res, q) {
-      const parsed = parseWaitQuery(q, env);
+      const parsed = parseWaitQuery(q, storeMatchEnv(store));
       if (!parsed.ok) {
         const { message, offset } = parsed;
         return write(res, 400, offset === undefined ? { error: 'bad_request', message } : { error: 'bad_request', message, offset });
