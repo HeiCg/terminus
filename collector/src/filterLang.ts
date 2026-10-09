@@ -20,6 +20,9 @@ import type { EntrySummary } from './uiProtocol.js';
 // a lone DOTTED field name (`redacted.request`, `http.response`) is a field test,
 // since no 0.2 user typed those as text. A lone undotted field (`error`) stays a
 // text search there; `(error)` or any operator switches to the expression reading.
+// Free text that contains expression syntax (a bracket, `!`, `~`, `<`, `>`, `==`,
+// `&&`, `||` outside quotes) or a bare keyword (and/or/not/in/contains/matches)
+// is read as an expression, so such a 0.2 search must now be quoted.
 //
 // Cost: compile is linear in the input; a predicate walks the AST once per entry
 // (at most FILTER_MAX_NODES nodes), each node linear in the field it reads, glob
@@ -462,6 +465,8 @@ class Parser {
 // ---- the 0.2 reading ---------------------------------------------------------
 
 type LegacyToken = { text: string; quoted: boolean; pos: number; syntax: boolean };
+const LONE_SYNTAX = '(){}<>~!';
+const PAIR_SYNTAX = '=&|';
 
 // The 0.2 tokenizer: split on unquoted spaces and drop the quote characters, so
 // a quoted run keeps its spaces. Also notes, per token, whether any expression
@@ -484,7 +489,10 @@ function legacyTokens(input: string): LegacyToken[] {
       cur = ''; has = false; quoted = false; syntax = false;
       continue;
     }
-    if (!inQuote && SPECIAL.includes(ch)) syntax = true;
+    // Expression syntax: a bracket, comparison or `!`/`~`, or a doubled `==`,
+    // `&&`, `||`. A lone `=`, `&` or `|` is no operator, so a query-string
+    // search such as `next=/home&x=1` keeps its 0.2 meaning.
+    if (!inQuote && (LONE_SYNTAX.includes(ch) || (PAIR_SYNTAX.includes(ch) && input[i + 1] === ch))) syntax = true;
     cur += ch;
     has = true;
   }
