@@ -31,6 +31,9 @@ export type EntrySummary = Pick<Entry, 'id' | 'deviceId' | 'source' | 'startedAt
   // request headers/body) and on the response side (response headers/body).
   // Always set by the server; optional only so pre-0.2 fixtures still type-check.
   redacted?: { request: boolean; response: boolean };
+  // U5: present only on a proxy CONNECT entry for a TLS tunnel passed through
+  // without interception (see `Entry.tunnel`).
+  tunnel?: Entry['tunnel'];
   // Set by the fanout when a device-supplied identity string (id/url/…) exceeded
   // the message cap and was clipped; the record is otherwise intact.
   identityClipped?: true;

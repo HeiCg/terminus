@@ -63,8 +63,37 @@ All notable changes to this project are documented here. The format is based on
 - `terminus-mcp`: `terminus_entries` and `terminus_wait` take `q` (a filter
   expression, sent only to a collector advertising `query`), and `terminus_replay`
   takes `overrides.bodyBase64`.
+- Proxy TLS pass-through: `TERMINUS_PROXY_PASSTHROUGH` lists host patterns
+  (`api.example.com`, `*.example.com`) the proxy tunnels without interception, so a
+  pinned app keeps working; `TERMINUS_PROXY_INTERCEPT_ONLY` is the inverse (only
+  those hosts are intercepted). Invalid patterns are warned about and skipped; both
+  set, or an intercept-only list with nothing usable, refuses to start. Each raw
+  tunnel is recorded as a proxy `CONNECT` entry with a new `tunnel` field (host,
+  port, SNI, bytes up/down on the client connection, open/close time), carried by
+  the read API, HAR exports and `--load`, and shown in the UI detail panel. A tunnel
+  from a client outside `TERMINUS_PROXY_ALLOW`, or to the metadata address, is
+  closed. New capability `tls-passthrough`.
+- Capture scope: `TERMINUS_SCOPE_INCLUDE` / `TERMINUS_SCOPE_EXCLUDE` (host patterns,
+  optionally `host/path` or `host/path*`) limit what is recorded from every source
+  (Atlantis, WSS ingest, proxy, replay results, `--load`). Exclude wins; an empty
+  include records everything. Out-of-scope records are not stored and are counted
+  per reason in `GET /api/status` `scope.dropped`; proxied traffic out of scope is
+  still forwarded. The admin can read and replace the scope at runtime with
+  `GET`/`PUT /api/scope` (not open to the reader token) or the new Settings tab in
+  the UI; it is persisted to `scope.json` (0600) in the state directory and wins
+  over the environment at the next start. New capability `scope`.
+- Docs: HTTP/3 (QUIC over UDP 443) never goes through the proxy or the SDK capture
+  layers; troubleshooting explains how to spot it and force a TCP fallback (block
+  UDP 443, or e.g. Cronet `enableQuic(false)`). Terminus does not intercept or
+  replay QUIC, HTTP/3, UDP or DTLS.
 
 ### Changed
+
+- `POST /api/replay` answers an extra `stored` boolean: `false` when the request was
+  sent but its result is out of the capture scope and was not recorded.
+- `--load` reports only the entries and sessions actually stored, so records out of
+  the capture scope are not counted.
+- UI: the Settings tab, a placeholder until now, holds the capture-scope editor.
 
 - Network interfaces are classified before use. Virtual and tunnel interfaces
   (Linux `docker*`, `veth*`, `br-*`, `virbr*`, `cni*`, `flannel*`, `tun*`, `tap*`

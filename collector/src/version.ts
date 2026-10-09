@@ -24,4 +24,4 @@ export const VERSION: string = readVersion();
 // serves, advertised on `/health` and `/api/status` so a client can feature-detect
 // instead of parsing VERSION. Each capability is appended by the change that ships it.
 export const API_VERSION = 1;
-export const CAPABILITIES: readonly string[] = ['seq', 'reader-token', 'device-identity', 'filters', 'wait', 'redaction-marker', 'query', 'replay-bytes'];
+export const CAPABILITIES: readonly string[] = ['seq', 'reader-token', 'device-identity', 'filters', 'wait', 'redaction-marker', 'query', 'replay-bytes', 'tls-passthrough', 'scope'];

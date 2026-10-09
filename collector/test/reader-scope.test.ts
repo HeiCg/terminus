@@ -53,6 +53,11 @@ const MATRIX: Row[] = [
   { method: 'POST', path: '/api/clear', expect: adminOnly(200) },
   { method: 'POST', path: '/api/pause', body: '{"paused":true}', expect: adminOnly(200) },
   { method: 'POST', path: '/api/replay', body: '{"deviceId":"d1","id":"missing"}', expect: adminOnly(404) },
+  // U5 capture scope: admin only, never in the reader allowlist.
+  { method: 'GET', path: '/api/scope', expect: adminOnly(200) },
+  { method: 'PUT', path: '/api/scope', body: '{"include":[],"exclude":["ads.example"]}', expect: adminOnly(200) },
+  { method: 'PUT', path: '/api/scope?bad', body: '{"include":["https://x"]}', expect: adminOnly(400) },
+  { method: 'POST', path: '/api/scope', expect: adminOnly(405) },
   { method: 'GET', path: '/export.har', expect: adminOnly(200) },
   { method: 'GET', path: '/export.json', expect: adminOnly(200) },
   // Unlisted path: admin-only by default, so a reader never even learns it is a 404.

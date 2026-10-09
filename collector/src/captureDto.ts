@@ -93,6 +93,7 @@ export function storedToEntrySummary(s: StoredEntry, q: EntrySeq): EntrySummary 
     requestBody: s.requestBody, responseBody: s.responseBody,
     seq: q.seq, firstSeq: q.firstSeq, receivedAt: q.receivedAt,
     redacted: { request: s.redacted?.request === true, response: s.redacted?.response === true },
+    ...(s.tunnel ? { tunnel: s.tunnel } : {}),
   };
 }
 

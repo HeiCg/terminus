@@ -16,6 +16,9 @@ import type { HarLog, HarEntry } from './har.js';
 // bodies (including base64 binary) recovered. A plain third-party HAR has no
 // `_terminus`, so its HTTP entries take `deviceId: 'har:<basename>'` and a default
 // `source: 'xhr'`.
+//
+// Imported records go through the store's capture scope like live traffic (U5):
+// an out-of-scope entry or session is not stored and is not counted below.
 
 export type LoadSummary = { entries: number; sessions: number; frames: number };
 
@@ -44,15 +47,14 @@ function loadJsonExport(store: Store, doc: { entries?: unknown; ws?: unknown }, 
   for (const e of entries as Entry[]) {
     if (!e || typeof e.id !== 'string' || typeof e.deviceId !== 'string') continue;
     ensureDevice(store, e.deviceId, e.startedAt ?? Date.now(), seen);
-    store.addEntry({ ...e, source: asSource(e.source) });
-    summary.entries++;
+    if (store.addEntry({ ...e, source: asSource(e.source) })) summary.entries++;
   }
   const sessions = Array.isArray(doc.ws) ? doc.ws : [];
   for (const s of sessions as WsSession[]) {
     if (!s || typeof s.wsId !== 'string' || typeof s.deviceId !== 'string') continue;
     ensureDevice(store, s.deviceId, s.openedAt ?? Date.now(), seen);
     const { frames = [], ...shell } = s;
-    store.addWsSession({ ...shell, source: asSource(s.source), generation: gen });
+    if (store.addWsSession({ ...shell, source: asSource(s.source), generation: gen }) === 'dropped') continue;
     for (const f of frames) {
       store.appendWsFrame(s.wsId, { ts: f.ts, direction: f.direction, data: f.data, size: f.size, binary: f.binary }, null, s.deviceId, asSource(s.source));
       summary.frames++;
@@ -92,9 +94,9 @@ function bodyBytes(
 // third-party HAR carries none of this; a Terminus HAR carries device/id/source so
 // the entry lands exactly where it was captured, with its replay back-reference and
 // linked sockets (`sessions`) preserved.
-type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; redacted?: Entry['redacted']; sessions?: WsExt[] };
+type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; redacted?: Entry['redacted']; tunnel?: Entry['tunnel']; sessions?: WsExt[] };
 
-function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fallbackDevice: string, seen: Set<string>): void {
+function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fallbackDevice: string, seen: Set<string>): boolean {
   const startedAt = (http?.ts ?? Date.parse(he.startedDateTime)) || Date.now();
   const deviceId = http?.deviceId ?? fallbackDevice;
   ensureDevice(store, deviceId, startedAt, seen);
@@ -112,8 +114,9 @@ function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fal
     ...(http?.replayOf ? { replayOf: http.replayOf } : {}),
     // The store ORs and normalizes the marker to booleans (mergeRedacted).
     ...(http?.redacted ? { redacted: http.redacted } : {}),
+    ...(http?.tunnel ? { tunnel: http.tunnel } : {}),
   };
-  store.addEntryInput(input);
+  return store.addEntryInput(input);
 }
 
 type WsExt = { kind: 'websocket' | 'sse'; source?: string; wsId?: string; deviceId?: string; openedAt?: number;
@@ -128,10 +131,11 @@ function harSocket(store: Store, ext: WsExt, url: string | null, messages: WsMsg
   const wsId = ext.wsId ?? `har-${ext.openedAt ?? 0}`;
   const openedAt = ext.openedAt ?? 0;
   ensureDevice(store, deviceId, openedAt, seen);
-  store.addWsSession({
+  const opened = store.addWsSession({
     wsId, deviceId, source: asSource(ext.source), url, openedAt, kind: ext.kind, httpEntryKey: null,
     closedAt: ext.close?.at ?? null, closeCode: ext.close?.code ?? null, closeReason: ext.close?.reason ?? '', generation: gen,
   });
+  if (opened === 'dropped') return; // out of scope (or refused): nothing to replay into
   for (const m of messages) {
     const direction = m.type === 'send' ? 'out' : 'in';
     const ts = Math.round(m.time * 1000);
@@ -169,8 +173,7 @@ function loadHar(store: Store, doc: HarLog, basename: string, gen: string): Load
     // Terminus export; a third-party HAR has none, so it falls back to the
     // `har:<basename>` device and `source: xhr`.
     const http = (t != null && !Array.isArray(t)) ? (t as unknown as HttpExt) : undefined;
-    harHttpEntry(store, he, http, httpDevice, seen);
-    summary.entries++;
+    if (harHttpEntry(store, he, http, httpDevice, seen)) summary.entries++;
     // Linked sockets: the T9 shape nests them under `_terminus.sessions`; a legacy
     // export carried them as the bare `_terminus` array.
     const linked: WsExt[] = http?.sessions ?? (Array.isArray(t) ? (t as unknown as WsExt[]) : []);

@@ -11,6 +11,7 @@ import { createCertServer } from './security/certServer.js';
 import { createDeviceServer, createIngestShared } from './deviceServer.js';
 import { startAtlantisServer, startLegacyLoopback } from './atlantis/server.js';
 import { createProxySource, loadOrCreateProxyCA, type ProxySource } from './proxy/server.js';
+import { resolveProxyTls } from './proxy/tlsMode.js';
 import { startDiscovery } from './discovery.js';
 import { VERSION } from './version.js';
 import { log } from './log.js';
@@ -19,6 +20,7 @@ import { createCrashGuard } from './crashGuard.js';
 import { parseCollectorArgs, COLLECTOR_USAGE } from './mainArgs.js';
 import { loadCaptureFile } from './loadCapture.js';
 import { configureRedaction, redactionConfigFromEnv } from './security/sensitiveNames.js';
+import { loadScopeFile, scopeFromEnv, SCOPE_FILE } from './scope.js';
 
 // Resolve a port from `TERMINUS_<name>` first, then the deprecated `NETCAPTURE_<name>`
 // (warns once via env()), and finally the bare unprefixed `<name>` (e.g. `PORT`),
@@ -164,7 +166,13 @@ async function boot() {
 
     // The bodies budget is the store's compiled 64 MiB default unless the operator
     // raised it via TERMINUS_BODY_BUDGET (T7.5).
-    const store = new Store(BODY_BUDGET != null ? { limits: { bodyBytes: BODY_BUDGET } } : {});
+    // Capture scope (U5): the admin's persisted scope (`PUT /api/scope`) wins; when
+    // there is none, TERMINUS_SCOPE_INCLUDE/EXCLUDE are the initial value. Set before
+    // --load so imported records are held to it too.
+    const scopeFile = path.join(stateDir, SCOPE_FILE);
+    const scope = loadScopeFile(scopeFile) ?? scopeFromEnv(env('SCOPE_INCLUDE'), env('SCOPE_EXCLUDE'), { include: envName('SCOPE_INCLUDE'), exclude: envName('SCOPE_EXCLUDE') });
+    if (scope.include.length || scope.exclude.length) log.info(`capture scope: include [${scope.include.join(', ')}] exclude [${scope.exclude.join(', ')}]`);
+    const store = new Store({ ...(BODY_BUDGET != null ? { limits: { bodyBytes: BODY_BUDGET } } : {}), scope });
     // Import any --load capture files before the listeners come up, so the UI's
     // first snapshot already includes the imported records (T7.3).
     for (const file of ARGS.loads) {
@@ -184,6 +192,7 @@ async function boot() {
       getPairingWarning: () => pairingHostWarning(identity, env),
       certPort: CERT_PORT,
       ingest: shared,
+      scopeFile,
     });
     httpHandle.server.on('error', (e: NodeJS.ErrnoException) => {
       if (e.code === 'EADDRINUSE') log.error(`port ${HTTP_PORT} already in use; set TERMINUS_PORT to another value`);
@@ -237,11 +246,24 @@ async function boot() {
       const collectorHosts = [...new Set([host, 'localhost', ...lanAddresses()])];
       const internal = [INGEST_PORT, ATLANTIS_PORT, HTTP_PORT].flatMap((p) =>
         collectorHosts.map((h) => ({ host: h, port: p })));
+      // U5: optional TLS pass-through / intercept-only host lists. Both set, or an
+      // intercept-only list with no usable pattern, throws: the collector refuses
+      // to start (through the catch below) rather than guess.
+      const tlsMode = resolveProxyTls({ passthrough: env('PROXY_PASSTHROUGH'), interceptOnly: env('PROXY_INTERCEPT_ONLY') }, collectorHosts,
+        { passthrough: envName('PROXY_PASSTHROUGH'), interceptOnly: envName('PROXY_INTERCEPT_ONLY') });
       const ca = await loadOrCreateProxyCA(path.join(stateDir, 'proxy-ca'));
-      proxy = createProxySource({ port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow });
+      proxy = createProxySource({
+        port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow,
+        ...(tlsMode.mode === 'passthrough' ? { tlsPassthrough: tlsMode.hosts } : {}),
+        ...(tlsMode.mode === 'intercept-only' ? { tlsInterceptOnly: tlsMode.hosts } : {}),
+      });
       await proxy.start();
       log.info(`proxy CA (copy to QA device, trust as user CA): ${ca.certPath}`);
       if (allow.length === 0) log.warn('proxy: TERMINUS_PROXY_ALLOW is empty; every client will be rejected. Set it to the QA device IP(s).');
+    } else {
+      for (const name of ['PROXY_PASSTHROUGH', 'PROXY_INTERCEPT_ONLY']) {
+        if (env(name) != null) log.warn(`${envName(name)} is set but the proxy is off (${envName('PROXY')} is not 1); ignoring it`);
+      }
     }
   } catch (e) {
     // A failure after the token was written must still clean it up and release the

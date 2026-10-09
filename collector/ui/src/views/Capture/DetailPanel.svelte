@@ -15,6 +15,7 @@
   import ReplayEditor from './ReplayEditor.svelte';
   import { useCache } from '../../lib/context.js';
   import { ReplayDraft, capturedBodyOf } from '../../lib/state/ReplayDraft.svelte.js';
+  import TunnelInfo from './TunnelInfo.svelte';
 
   type Props = { selection: Selection };
   let { selection }: Props = $props();
@@ -93,9 +94,16 @@
         <span class="sep">·</span>
         <span class="time">{fmtTime(row.startedAt)}</span>
         <button type="button" class="curl-btn" onclick={copyCurl}>Copy as cURL</button>
-        <ReplayButton deviceId={row.deviceId} id={row.id} onedit={openEditor} editBusy={opening} />
+        {#if !row.tunnel}
+          <!-- A raw tunnel has no request to re-send. -->
+          <ReplayButton deviceId={row.deviceId} id={row.id} onedit={openEditor} editBusy={opening} />
+        {/if}
       </div>
     </header>
+
+    {#if row.tunnel}
+      <div class="tunnel-slot"><TunnelInfo tunnel={row.tunnel} /></div>
+    {/if}
 
     <div class="tabs">
       <Tabs tabs={TABS} value={selection.tab} onchange={(id) => selection.setTab(id as Tab)} />
@@ -209,6 +217,10 @@
   }
   .tabs {
     padding: 0 8px;
+  }
+  .tunnel-slot {
+    padding-top: 12px;
+    border-bottom: 1px solid var(--border-subtle);
   }
   .content {
     flex: 1 1 auto;

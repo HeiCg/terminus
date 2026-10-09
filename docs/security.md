@@ -231,10 +231,41 @@ for the QA device that trusts its CA. Turning it on means:
   ingest/UI/Atlantis endpoints are tunnelled raw, so the device keeps pinning the
   collector's real certificate and no device token or auth header enters the proxy
   store.
+- **Pass-through hosts are not intercepted, and are still not an open relay.**
+  `TERMINUS_PROXY_PASSTHROUGH` (or every host outside
+  `TERMINUS_PROXY_INTERCEPT_ONLY`) is tunnelled raw: the proxy sees only the
+  destination, the SNI and byte counts, never headers or bodies. A raw tunnel does
+  not pass the HTTP gate, so the proxy closes a tunnel from a client outside the
+  allowlist, or to `169.254.169.254`, as soon as it is reported, before the
+  upstream can answer. The two lists are host-only and the collector's own hosts are
+  never intercepted in either mode.
 - **Coverage is partial.** A client may ignore the proxy, pin its own certificate,
   use its own trust store, or use QUIC. The proxy never disables the app-side
   capture, and a refused proxy CA is recorded as a `tls_error` entry rather than
   silently lost.
+
+## HTTP/3, QUIC and other UDP traffic are not captured
+
+Terminus does not intercept or replay QUIC, HTTP/3, UDP or DTLS. HTTP/3 runs over
+QUIC on UDP port 443; an HTTP proxy only carries TCP, so HTTP/3 traffic never goes
+through the proxy. It also bypasses the SDK capture layers: the Atlantis SDK and the
+XHR/WebSocket patches see only the client stacks they hook, and a networking stack
+that speaks QUIC on its own (Cronet, a QUIC-enabled `URLSession` or OkHttp
+configuration, a game or media engine) is outside them. Such traffic is simply
+absent from the capture, not flagged.
+
+To capture it, force the client back to TCP: block UDP 443 on the test network or
+disable QUIC in the client (for example Cronet `enableQuic(false)`). See
+[Troubleshooting](troubleshooting.md#an-app-works-but-the-proxy-shows-nothing-for-a-host-http3--quic).
+
+## The capture scope limits what is stored
+
+`TERMINUS_SCOPE_INCLUDE` / `TERMINUS_SCOPE_EXCLUDE` and `PUT /api/scope` decide
+which hosts (and paths) are **recorded**, for every source. An out-of-scope record
+is never stored, so it never reaches the read API, the UI or an export; only a
+per-reason count remains. The scope is not a firewall: proxied traffic out of scope
+still reaches its upstream. Changing the scope is admin-only (the reader token gets
+`403`), and the persisted `scope.json` in the state directory is written `0600`.
 
 ## Replay re-sends captured requests
 

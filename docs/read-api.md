@@ -80,7 +80,7 @@ Content-Type: application/json
 ```
 
 That covers `/api/pairing`, `/api/session`, `/api/clear`, `/api/pause`,
-`/api/replay`, `/export.har`, `/export.json`, and any route added in a later
+`/api/replay`, `/api/scope`, `/export.har`, `/export.json`, and any route added in a later
 version until it is explicitly opened to readers. The `/ui` WebSocket upgrade is
 admin-only as well: it first requires a loopback `Origin` (without one the socket
 is closed for every caller), and with one a reader gets the same `403` body.
@@ -97,7 +97,7 @@ restart.
 
 ```json
 {"status":"ok","version":"0.2.0","apiVersion":1,
- "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes"]}
+ "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes","tls-passthrough","scope"]}
 ```
 
 ```bash
@@ -118,6 +118,8 @@ two fields also appear on `GET /api/status`.
 | `redaction-marker` | The `redacted` field on entry summaries, details and exports. |
 | `query` | The `q` parameter: a [filter-language](#filter-language) expression on `afterSeq`, `last` and `wait`. |
 | `replay-bytes` | Binary-safe [replay](#post-apireplay-admin): `overrides.bodyBase64`, a captured binary request body re-sent without an override, binary responses stored as bytes, and the `413` override-body cap. |
+| `tls-passthrough` | `TERMINUS_PROXY_PASSTHROUGH` / `TERMINUS_PROXY_INTERCEPT_ONLY` on the proxy, and the [`tunnel`](#tunnel-entries) field on the `CONNECT` entries that record raw TLS tunnels. |
+| `scope` | The capture scope: `scope` on `GET /api/status` and the admin-only [`GET`/`PUT /api/scope`](#get-and-put-apiscope-admin). |
 
 To feature-detect, call `GET /health` once at startup. A collector older than
 0.2.0 answers without `apiVersion` and `capabilities` and has none of the features
@@ -148,6 +150,55 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/status
 | `now` | number | Collector clock, epoch ms. Same base as `receivedAt`. |
 | `apiVersion` | number | As on `/health`. |
 | `capabilities` | string[] | As on `/health`. |
+| `scope` | object | The capture scope: `{ include, exclude, dropped: { excluded, notIncluded } }`. `include`/`exclude` are the active host patterns; `dropped` counts the records (entries and WebSocket sessions, from every source) not stored since start because they matched an exclude pattern (`excluded`) or no include pattern (`notIncluded`). Each record counts once. |
+
+## `GET` and `PUT /api/scope` (admin)
+
+The capture scope decides which hosts (and paths) are **recorded**, for every
+source: Atlantis, the WSS ingest, the proxy, replay results and `--load` imports.
+An HTTP entry or WebSocket session whose URL is out of scope is never stored, so it
+never appears in any read, the UI or an export. It is not a firewall: proxied
+traffic out of scope still reaches its upstream. Admin token or session only; the
+reader token gets `403 forbidden_scope`.
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN" http://127.0.0.1:8787/api/scope
+curl -s -X PUT -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"include":["*.app.example"],"exclude":["cdn.app.example","api.app.example/health"]}' \
+  http://127.0.0.1:8787/api/scope
+```
+
+Both answer `200` with the same object as `GET /api/status` `scope`.
+
+Patterns:
+
+| Pattern | Matches |
+| --- | --- |
+| `api.example.com` | That host, any path. Case-insensitive. |
+| `*.example.com` | Any subdomain, at any depth; not `example.com` itself. |
+| `api.example.com/v1/*` | That host, path starting with `/v1/`. |
+| `api.example.com/health` | That host, exactly that path (the query is ignored). |
+
+No scheme, no port, no IPv6 literal; the only wildcards are a leading `*.` and a
+trailing `*` on a path. An IPv4 address is an exact host.
+
+Rules: exclude wins over include; an empty `include` records every host. A record
+whose URL is unknown (a WebSocket session the store opened from a frame before its
+handshake URL arrived) is recorded. The scope is decided when a record is created: a
+later write to a record already stored (its completion, after a scope change) still
+lands, and records already stored are kept.
+
+`PUT` replaces both lists (an omitted list becomes empty). The body is
+`{ "include": string[], "exclude": string[] }`, at most 256 patterns per list and
+64 KiB. Any invalid pattern refuses the whole update with `400
+{"error":"bad_request","message":"invalid pattern: ..."}`; `413` over the size
+limit. The new scope applies at once and is saved to `<stateDir>/scope.json`
+(mode `0600`). At start the collector uses that file when it exists, otherwise
+`TERMINUS_SCOPE_INCLUDE` / `TERMINUS_SCOPE_EXCLUDE`. A cookie-driven `PUT` needs the
+exact loopback `Origin`, like the other mutations.
+
+`POST /api/replay` answers `stored: false` when the replayed request was sent but
+its result is out of scope and was not recorded.
 
 ## `GET /api/devices`
 
@@ -278,8 +329,30 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `firstSeq` | number | Server sequence of the entry's first write. Never changes. |
 | `receivedAt` | number | Collector clock (epoch ms) at the first write. Never changes. |
 | `redacted` | object | `{ request: boolean, response: boolean }`, see [The `redacted` marker](#the-redacted-marker). |
+| `tunnel` | object, optional | Only on a proxy `CONNECT` entry for a raw TLS tunnel, see [Tunnel entries](#tunnel-entries). |
 
 An exchange counts as **completed** when it has a `status` or an `error`.
+
+### Tunnel entries
+
+When the proxy tunnels a TLS connection without intercepting it (a host in
+`TERMINUS_PROXY_PASSTHROUGH`, or any host outside `TERMINUS_PROXY_INTERCEPT_ONLY`),
+it records one `source: "proxy"` entry with `method: "CONNECT"` and `url:
+"https://<host>:<port>"`. Nothing inside the tunnel is visible: there are no headers
+and both bodies are `absent`. While the tunnel is open the entry is in flight
+(`status: null`); when it closes it is upserted with `status: 200`, `durationMs`,
+and the byte counts, or with `error: "tunnel_error <code>"` when the passthrough
+failed. The entry carries:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `tunnel.host`, `tunnel.port` | string, number | The tunnel's destination (the `CONNECT` target, or the SNI with port 443 for a transparent connection). |
+| `tunnel.sni` | string or null | Server name from the client's TLS hello. |
+| `tunnel.bytesUp`, `tunnel.bytesDown` | number or null | Bytes the client sent and received on its connection to the proxy, the `CONNECT` request and reply included. `null` while open. |
+| `tunnel.openedAt`, `tunnel.closedAt` | number, number or null | Epoch ms, collector clock. `closedAt` is `null` while open. |
+
+Tunnel entries go through the capture scope like any other entry. HAR exports
+carry the field as `_terminus.tunnel` and `--load` restores it.
 
 ### `seq` and `firstSeq`
 
@@ -764,3 +837,8 @@ side was masked. What is masked, and how to tune it, is in
   traffic stays mixed under one device; the collector cannot split it.
 - **Redaction is name-based.** See the honest limits in
   [security.md](security.md#what-redaction-does-not-cover).
+- **No QUIC, HTTP/3, UDP or DTLS.** Terminus does not intercept or replay them.
+  HTTP/3 never goes through the proxy, and a QUIC-speaking client stack bypasses the
+  SDK capture layers; see [troubleshooting](troubleshooting.md#an-app-works-but-the-proxy-shows-nothing-for-a-host-http3--quic).
+- **Out-of-scope traffic leaves no record.** With a capture scope set, only the
+  per-reason counts on `GET /api/status` show that something was left out.

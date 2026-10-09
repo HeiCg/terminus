@@ -15,6 +15,7 @@ import {
 import type { UiDevice, EntrySummary, EntryDetail, WsSummary, FrameSummary, Page, SeqPage } from './uiProtocol.js';
 import { redactUrl, redactHeaders, redactText, contentTypeOf, redactionMarker, mergeRedacted, type RedactMark } from './redactor.js';
 import { log } from './log.js';
+import { CaptureScope, type ScopeConfig, type ScopeDropReason } from './scope.js';
 
 // Metadata-page ceilings shared by the summary endpoints (SPEC): a page carries
 // at most 200 records and 1 MiB serialized, whichever is hit first.
@@ -110,7 +111,16 @@ type StoredSession = {
   droppedLocal: number;
 };
 
-export type StoreOptions = { limits?: Partial<RetentionLimits>; bodies?: BodyStore };
+export type StoreOptions = { limits?: Partial<RetentionLimits>; bodies?: BodyStore; scope?: ScopeConfig };
+
+// The capture scope as `GET /api/status` and `GET /api/scope` report it: the
+// active patterns and how many records each rule kept out since boot.
+export type ScopeStatus = ScopeConfig & { dropped: Record<ScopeDropReason, number> };
+
+// How many out-of-scope record keys are remembered, so the several writes of one
+// dropped record (start + completion, a socket's frames) count once and frames of
+// a dropped socket are not mistaken for a resumed session. Oldest forgotten first.
+const SCOPE_DROPPED_KEYS_MAX = 8192;
 
 // A server-sequence read (P1). `deviceId` scopes to one device's index;
 // `deviceIds` (P2) scopes to a SET of devices and wins over `deviceId` when both
@@ -189,25 +199,68 @@ export class Store extends EventEmitter {
     evictedForBodyBudget: 0,
   };
 
+  // Capture scope (U5): applied at every write entry point, so every source
+  // (Atlantis, WSS ingest, proxy, replay, --load) is held to the same rule.
+  private scope = new CaptureScope();
+  private scopeDropped: Record<ScopeDropReason, number> = { excluded: 0, notIncluded: 0 };
+  private scopeDroppedKeys = new Set<string>();
+
   constructor(opts: StoreOptions = {}) {
     super();
     this.limits = { ...STORE_DEFAULT_LIMITS, ...(opts.limits ?? {}) };
     this.bodies = opts.bodies ?? createBodyStore({ maxBytes: this.limits.bodyBytes });
     this.admission = createSessionAdmission(this.limits);
+    if (opts.scope) this.scope = new CaptureScope(opts.scope);
+  }
+
+  // ---- Capture scope (U5) -------------------------------------------------
+
+  // Replace the active scope. Records already stored are kept; the scope only
+  // decides what is recorded from now on. Counters are cumulative since boot.
+  setScope(cfg: ScopeConfig): void {
+    this.scope = new CaptureScope(cfg);
+    this.scopeDroppedKeys.clear();
+  }
+
+  scopeStatus(): ScopeStatus { return { ...this.scope.config(), dropped: { ...this.scopeDropped } }; }
+
+  // Whether a record for `url` is recorded. When it is not, the drop is counted
+  // under its reason, once per `recordKey` (a record arriving in several writes
+  // counts once). Exposed so a source can skip its own work for an out-of-scope
+  // exchange (the proxy still forwards it upstream).
+  admitScope(url: string | null | undefined, recordKey?: string): boolean {
+    const reason = this.scope.verdict(url);
+    if (reason == null) return true;
+    if (recordKey == null || !this.scopeDroppedKeys.has(recordKey)) {
+      this.scopeDropped[reason]++;
+      if (recordKey != null) {
+        this.scopeDroppedKeys.add(recordKey);
+        if (this.scopeDroppedKeys.size > SCOPE_DROPPED_KEYS_MAX) {
+          const oldest = this.scopeDroppedKeys.values().next().value;
+          if (oldest !== undefined) this.scopeDroppedKeys.delete(oldest);
+        }
+      }
+    }
+    return false;
   }
 
   // ---- HTTP entries -------------------------------------------------------
 
   // Legacy entry point: an `Entry` with text bodies (fixtures, WSS ingest that
   // already decoded JSON text). Converted to byte input, then upserted.
-  addEntry(e: Entry): void { this.addEntryInput(legacyEntryToInput(e)); }
+  addEntry(e: Entry): boolean { return this.addEntryInput(legacyEntryToInput(e)); }
 
-  // Byte entry point (Atlantis decode): bytes are preserved and hashed.
-  addEntryInput(input: EntryInput): void {
+  // Byte entry point (Atlantis decode): bytes are preserved and hashed. Returns
+  // whether the record is stored: false when the capture scope keeps it out or
+  // its metadata alone is over `maxRecordBytes`.
+  addEntryInput(input: EntryInput): boolean {
     const deviceId = this.resolveDeviceKey(input.deviceId);
     if (deviceId !== input.deviceId) input = { ...input, deviceId };
     const key = keyOf(input.deviceId, input.id);
     const existing = this.entriesByKey.get(key);
+    // Scope is decided when a record is created; a later write to a record that is
+    // already stored (a completion after a scope change) still lands on it.
+    if (!existing && !this.admitScope(input.url, `e${key}`)) return false;
 
     const reqRef = this.admitEntryBody(input.requestBytes, input.requestBodyOmitted, input.requestBodySize, key);
     const resRef = this.admitEntryBody(input.responseBytes, input.responseBodyOmitted, input.responseBodySize, key);
@@ -226,7 +279,7 @@ export class Store extends EventEmitter {
       this.counters.rejectedRecords++;
       this.retentionDirty = true;
       this.flushRetention();
-      return;
+      return false;
     }
 
     const q = this.stampSeq(key, stored.deviceId);
@@ -261,6 +314,7 @@ export class Store extends EventEmitter {
     // never materializes retained bytes out of the BodyStore onto the wire.
     this.emit('entry', storedToEntrySummary(this.entriesByKey.get(key)!, q));
     this.flushRetention();
+    return true;
   }
 
   // Whether the stored entry (alias-resolved) is already completed, i.e. carries
@@ -275,7 +329,7 @@ export class Store extends EventEmitter {
     // Legacy id-only signature (kept for compatibility). Prefer patchEntry with a
     // deviceId on the hot ingest path; this scans as a fallback.
     for (const stored of this.entriesByKey.values()) {
-      if (stored.id === id) return void this.addEntry({ ...this.toEntry(stored), ...patch });
+      if (stored.id === id) { this.addEntry({ ...this.toEntry(stored), ...patch }); return; }
     }
   }
 
@@ -331,6 +385,10 @@ export class Store extends EventEmitter {
     if (deviceId !== w.deviceId) w = { ...w, deviceId };
     const gen = w.generation ?? `legacy:${w.deviceId}`;
     const key = keyOf(w.deviceId, w.wsId);
+    // Out of the capture scope: not stored, and not counted as a refused session
+    // (`refusedSessions` is the admission authority's own refusal). Frames for it
+    // are then dropped quietly by appendWsFrame.
+    if (!this.sessionsByKey.has(key) && !this.admitScope(w.url, `w${key}`)) return 'dropped';
     const outcome = this.admission.observe({ deviceId: w.deviceId, wsId: w.wsId }, gen, w.via ?? 'open');
     if (outcome === 'dropped' || outcome === 'overload') {
       // Refused outright: count it (distinct from an evicted session) and emit.
@@ -381,6 +439,9 @@ export class Store extends EventEmitter {
     if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
     let key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
     let ss = key ? this.sessionsByKey.get(key) : undefined;
+    // A frame of a session the capture scope kept out: drop it quietly (it is not
+    // a retention loss) instead of synthesizing a resumed session for it.
+    if (!ss && key && this.scopeDroppedKeys.has(`w${key}`)) return;
     if (!ss) {
       // Unknown session. When the frame carries a deviceId we can SYNTHESIZE a
       // resumed session (its ws_open predates this collector — the socket was open
@@ -591,10 +652,11 @@ export class Store extends EventEmitter {
         // An XHR `request` marks the START of an exchange (its `response` patches it).
         this.markDevice(deviceId, 'startEvents');
         const mark: RedactMark = { hit: false };
-        return this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url, mark),
+        this.addEntry({ id: m.id, deviceId, source: 'xhr', startedAt: m.ts, method: m.method, url: redactUrl(m.url, mark),
         requestHeaders: redactHeaders(m.headers, mark), requestBody: redactText(m.body, contentTypeOf(m.headers), mark), requestBodySize: m.bodySize, requestBodyOmitted: m.bodyOmitted ?? null,
         status: null, statusText: '', responseHeaders: {}, responseBody: null, responseBodySize: 0, responseBodyOmitted: null, durationMs: null, error: null,
         ...redactionMarker(mark, { hit: false }) });
+        return;
       }
       case 'response': {
         const mark: RedactMark = { hit: false };
