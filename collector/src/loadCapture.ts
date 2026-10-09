@@ -94,7 +94,8 @@ function bodyBytes(
 // third-party HAR carries none of this; a Terminus HAR carries device/id/source so
 // the entry lands exactly where it was captured, with its replay back-reference and
 // linked sockets (`sessions`) preserved.
-type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; redacted?: Entry['redacted']; tunnel?: Entry['tunnel']; sessions?: WsExt[] };
+type HttpExt = { deviceId?: string; id?: string; source?: string; ts?: number; replayOf?: Entry['replayOf']; redacted?: Entry['redacted']; tunnel?: Entry['tunnel'];
+  rules?: Entry['rules']; mocked?: boolean; originalMethod?: string; originalUrl?: string; sessions?: WsExt[] };
 
 function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fallbackDevice: string, seen: Set<string>): boolean {
   const startedAt = (http?.ts ?? Date.parse(he.startedDateTime)) || Date.now();
@@ -115,8 +116,26 @@ function harHttpEntry(store: Store, he: HarEntry, http: HttpExt | undefined, fal
     // The store ORs and normalizes the marker to booleans (mergeRedacted).
     ...(http?.redacted ? { redacted: http.redacted } : {}),
     ...(http?.tunnel ? { tunnel: http.tunnel } : {}),
+    ...importedRuleFields(http),
   };
   return store.addEntryInput(input);
+}
+
+// U6 rule fields from a Terminus HAR, kept only when well-formed (a third-party
+// file is untrusted input).
+function importedRuleFields(http: HttpExt | undefined): Pick<Entry, 'rules' | 'mocked' | 'originalMethod' | 'originalUrl'> {
+  if (!http) return {};
+  const str = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max;
+  const rules = Array.isArray(http.rules)
+    ? http.rules.filter((r) => r && str(r.id, 64) && str(r.name, 120) && ['block', 'mock', 'rewrite', 'delay'].includes(r.action) && (r.phase === 'request' || r.phase === 'response'))
+      .slice(0, 200).map((r) => ({ id: r.id, name: r.name, action: r.action, phase: r.phase }))
+    : [];
+  return {
+    ...(rules.length ? { rules } : {}),
+    ...(http.mocked === true ? { mocked: true } : {}),
+    ...(str(http.originalMethod, 32) ? { originalMethod: http.originalMethod } : {}),
+    ...(str(http.originalUrl, 8192) ? { originalUrl: http.originalUrl } : {}),
+  };
 }
 
 type WsExt = { kind: 'websocket' | 'sse'; source?: string; wsId?: string; deviceId?: string; openedAt?: number;

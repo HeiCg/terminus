@@ -50,6 +50,8 @@ type TerminusHttpExt = {
   redacted?: Entry['redacted'];
   // U5: a proxy CONNECT entry's pass-through tunnel metadata.
   tunnel?: Entry['tunnel'];
+  // U6: interception rules that ran on a proxy entry, and what they changed.
+  rules?: Entry['rules']; mocked?: boolean; originalMethod?: string; originalUrl?: string;
   sessions?: TerminusWsExt[];
 };
 
@@ -166,6 +168,10 @@ function httpExt(e: StoredEntry, linked: ExportSession[]): TerminusHttpExt {
     ...(e.replayOf ? { replayOf: e.replayOf } : {}),
     ...(e.redacted ? { redacted: e.redacted } : {}),
     ...(e.tunnel ? { tunnel: e.tunnel } : {}),
+    ...(e.rules?.length ? { rules: e.rules } : {}),
+    ...(e.mocked ? { mocked: true } : {}),
+    ...(e.originalMethod != null ? { originalMethod: e.originalMethod } : {}),
+    ...(e.originalUrl != null ? { originalUrl: e.originalUrl } : {}),
     ...(linked.length ? { sessions: linked.map((s) => wsExt(s)) } : {}),
   };
 }

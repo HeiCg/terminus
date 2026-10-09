@@ -10,6 +10,8 @@ import { buildEntryInput, normalizeWsFrame, epochOf, type ProxyIds } from './nor
 import { log } from '../log.js';
 import { redactUrl } from '../redactor.js';
 import type { EntryInput, TunnelInfo } from '../types.js';
+import type { RulesStore } from '../rulesStore.js';
+import { createRuleRunner, ruleEntryFields, type RuleEffects } from './rules.js';
 
 // A collector-internal endpoint the proxy must NOT inspect: its TLS is tunnelled
 // raw (so the device keeps seeing the collector's own pinned certificate, never a
@@ -43,6 +45,10 @@ export type ProxySourceOptions = {
   // listed). Mutually exclusive: setting both throws.
   tlsPassthrough?: string[];
   tlsInterceptOnly?: string[];
+  // U6: the admin's interception rules, read per request (absent: none). They
+  // apply only to intercepted HTTP from an allowed client, never to a
+  // collector-internal endpoint or a raw TLS tunnel (see ./rules.ts).
+  rules?: Pick<RulesStore, 'list'>;
 };
 
 // The cloud metadata service address. A proxy that forwarded to it would let a
@@ -168,12 +174,30 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
   // contacted. Rejecting here (`response: 'close'`) means a disallowed client or a
   // metadata fetch never reaches the network — the allowlist is a real boundary,
   // not just a recording filter.
-  const gate = (req: CompletedRequest): { response: 'close' } | undefined => {
+  // U6: interception rules run after the gate, only on traffic it admitted and
+  // that is not collector-internal (`shouldRecord`).
+  const ruleRunner = createRuleRunner({
+    rules: () => options.rules?.list() ?? [],
+    refuseDestination: (hostname, p) => hostname === CLOUD_METADATA_IP || isExcludedDest({ hostname, port: p }),
+  });
+  const gate = async (req: CompletedRequest) => {
     if (shouldReject(req)) {
       log.warn('proxy: refused HTTP connection', req.destination?.hostname, normalizeIp(req.remoteIpAddress));
-      return { response: 'close' };
+      return { response: 'close' as const };
     }
-    return undefined;
+    return shouldRecord(req) ? ruleRunner.beforeRequest(req) : undefined;
+  };
+  // The entry for a finished exchange, as the rules left it: the request as sent
+  // upstream (or as answered by a mock), plus the applied-rule fields.
+  const ruleAware = async (req: CompletedRequest, fx: RuleEffects | undefined) => {
+    const sent = fx?.sent;
+    const requestBuf = sent?.body ?? (await req.body.getDecodedBuffer().catch(() => req.body.buffer)) ?? null;
+    return { method: sent?.method ?? req.method, url: sent?.url ?? req.url, requestHeaders: sent?.headers ?? req.headers, requestBuf };
+  };
+  const withRuleFields = (e: EntryInput, fx: RuleEffects | undefined): EntryInput => {
+    const mark = { hit: false };
+    const fields = ruleEntryFields(fx, mark);
+    return { ...e, ...fields, ...(mark.hit ? { redacted: { request: true, response: e.redacted?.response ?? false } } : {}) };
   };
 
   async function attach(s: Mockttp): Promise<void> {
@@ -194,31 +218,29 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     });
 
     await s.on('response', async (res: CompletedResponse) => {
+      const fx = ruleRunner.take(res.id);
       const pending = httpIds.get(res.id);
       if (!pending) return;
       httpIds.delete(res.id);
-      const requestBuf = await pending.req.body.getDecodedBuffer().catch(() => pending.req.body.buffer);
       const responseBuf = await res.body.getDecodedBuffer().catch(() => res.body.buffer);
       const t = res.timingEvents;
       const durationMs = t.responseSentTimestamp != null && t.startTimestamp != null ? Math.round(t.responseSentTimestamp - t.startTimestamp) : null;
-      store.addEntryInput(buildEntryInput({
-        ids: pending.ids, startedAt: epochOf(pending.req.timingEvents), method: pending.req.method, url: pending.req.url,
-        requestHeaders: pending.req.headers, requestBuf: requestBuf ?? null,
+      store.addEntryInput(withRuleFields(buildEntryInput({
+        ids: pending.ids, startedAt: epochOf(pending.req.timingEvents), ...(await ruleAware(pending.req, fx)),
         status: res.statusCode, statusText: res.statusMessage, responseHeaders: res.headers, responseBuf: responseBuf ?? null,
         durationMs,
-      }));
+      }), fx));
     });
 
     await s.on('abort', async (req: AbortedRequest) => {
+      const fx = ruleRunner.take(req.id);
       const pending = httpIds.get(req.id);
       if (!pending) return;
       httpIds.delete(req.id);
-      const requestBuf = await pending.req.body.getDecodedBuffer().catch(() => pending.req.body.buffer);
-      store.addEntryInput(buildEntryInput({
-        ids: pending.ids, startedAt: epochOf(pending.req.timingEvents), method: pending.req.method, url: pending.req.url,
-        requestHeaders: pending.req.headers, requestBuf: requestBuf ?? null,
+      store.addEntryInput(withRuleFields(buildEntryInput({
+        ids: pending.ids, startedAt: epochOf(pending.req.timingEvents), ...(await ruleAware(pending.req, fx)),
         error: req.error?.code ? `aborted ${req.error.code}` : 'aborted',
-      }));
+      }), fx));
     });
 
     // ---- WebSocket -------------------------------------------------------
@@ -316,6 +338,11 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     // only ever sees allowed upgrades.
     await s.forAnyWebSocket().matching((req) => shouldReject(req)).thenCloseConnection();
     await s.forAnyWebSocket().thenPassThrough({ ignoreHostHttpsErrors: true });
+    // U6: a request a response-phase rule matches takes the passthrough with
+    // `beforeResponse` (mockttp buffers those responses); everything else keeps the
+    // streaming passthrough. `.always()` keeps this rule first for every match.
+    await s.forAnyRequest().matching((req) => shouldRecord(req) && ruleRunner.wantsResponse(req)).always()
+      .thenPassThrough({ ignoreHostHttpsErrors: true, beforeRequest: gate, beforeResponse: (res, req) => ruleRunner.beforeResponse(res, req) });
     await s.forAnyRequest().thenPassThrough({ ignoreHostHttpsErrors: true, beforeRequest: gate });
   }
 
@@ -367,7 +394,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     },
     async stop() {
       const s = server; server = null;
-      httpIds.clear(); wsIds.clear(); tunnels.clear(); clientSockets.clear();
+      httpIds.clear(); wsIds.clear(); tunnels.clear(); clientSockets.clear(); ruleRunner.clear();
       store.closeWsGeneration(generation);
       if (s) await s.stop();
     },

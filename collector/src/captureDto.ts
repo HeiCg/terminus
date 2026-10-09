@@ -94,6 +94,10 @@ export function storedToEntrySummary(s: StoredEntry, q: EntrySeq): EntrySummary 
     seq: q.seq, firstSeq: q.firstSeq, receivedAt: q.receivedAt,
     redacted: { request: s.redacted?.request === true, response: s.redacted?.response === true },
     ...(s.tunnel ? { tunnel: s.tunnel } : {}),
+    ...(s.rules?.length ? { rules: s.rules } : {}),
+    ...(s.mocked ? { mocked: true } : {}),
+    ...(s.originalMethod != null ? { originalMethod: s.originalMethod } : {}),
+    ...(s.originalUrl != null ? { originalUrl: s.originalUrl } : {}),
   };
 }
 

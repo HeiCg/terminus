@@ -34,6 +34,9 @@ export type EntrySummary = Pick<Entry, 'id' | 'deviceId' | 'source' | 'startedAt
   // U5: present only on a proxy CONNECT entry for a TLS tunnel passed through
   // without interception (see `Entry.tunnel`).
   tunnel?: Entry['tunnel'];
+  // U6: present only on a proxy entry an interception rule touched (see
+  // `Entry.rules`/`mocked`/`originalMethod`/`originalUrl`).
+  rules?: Entry['rules']; mocked?: boolean; originalMethod?: string; originalUrl?: string;
   // Set by the fanout when a device-supplied identity string (id/url/…) exceeded
   // the message cap and was clipped; the record is otherwise intact.
   identityClipped?: true;
