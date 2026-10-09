@@ -105,11 +105,37 @@ Rotation issues a new certificate and device token, so **every** paired device m
 re-pair; `adb reverse` avoids that.
 
 **Linux.** The collector runs on Linux (CI covers Ubuntu). It needs Node.js 20+ and
-OpenSSL 3 on `PATH` (see [OpenSSL missing at startup](#openssl-missing-at-startup)).
-The state directory is `$XDG_STATE_HOME/terminus` (fallback
-`~/.local/state/terminus`). mDNS discovery may be unavailable where multicast is
-blocked, as on most CI runners; pair with the blob instead of relying on discovery.
-The launchd service scripts are macOS-only.
+OpenSSL 3 (see [OpenSSL missing at startup](#openssl-missing-at-startup)). The state
+directory is `$XDG_STATE_HOME/terminus` (fallback `~/.local/state/terminus`). mDNS
+discovery may be unavailable where multicast is blocked, as on most CI runners, or
+when another responder holds UDP 5353: the collector logs one *"mDNS discovery
+unavailable"* warning and keeps running; pair with the QR or the blob. Container and
+VPN interfaces (`docker0`, `br-*`, `veth*`, `virbr*`, `tun*`, …) are left out of the
+certificate SAN and the pairing host for new identities; see
+[Run as a service](../collector/README.md#run-as-a-service) for the systemd
+`--user` unit (launchd on macOS).
+
+## The collector service does not start or stops at logout
+
+**Symptom.** After `collector/scripts/launchd/install.sh` (macOS) or
+`collector/scripts/systemd/install.sh` (Linux) the collector is not running, or on
+Linux it stops when you log out.
+
+**Fix.**
+
+- Build first (`npm run build -w collector`): both services run `dist/main.js`.
+  Reinstall after moving the checkout or changing the Node install, since the unit
+  holds absolute paths.
+- **macOS:** read `~/Library/Logs/Terminus/collector.log` and
+  `launchctl print gui/$UID/com.terminus.collector`.
+- **Linux:** read `journalctl --user -u terminus-collector` and
+  `systemctl --user status terminus-collector`. After 5 failed starts within 60 s
+  (for example a port already in use) systemd stops retrying; fix the cause, then
+  `systemctl --user reset-failed terminus-collector` and
+  `systemctl --user restart terminus-collector`. Settings live in
+  `~/.config/terminus/collector.env`.
+- **Linux, stops at logout:** a user service ends with your last session unless
+  lingering is on: `loginctl enable-linger "$USER"`.
 
 ## Port already in use (`EADDRINUSE`)
 

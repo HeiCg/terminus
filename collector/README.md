@@ -131,10 +131,14 @@ Notes:
 - **`TERMINUS_PROXY_CA`** is read on the **device / M-agent** side (where to load
   the proxy CA), not by the collector.
 
-## Run as a service (macOS)
+## Run as a service
 
-To keep the collector running across logins, install it as a per-user launchd agent.
-It runs the built `dist/main.js`, so build first:
+To keep the collector running across logins, install it as a per-user service:
+a launchd agent on macOS, a systemd `--user` unit on Linux. Both run the built
+`dist/main.js` with the absolute path of your `node` and this checkout, so build
+first and reinstall after moving the checkout or switching Node versions.
+
+### macOS (launchd)
 
 ```sh
 npm run build -w collector
@@ -144,13 +148,43 @@ collector/scripts/launchd/install.sh
 `install.sh` renders `scripts/launchd/com.terminus.collector.plist.template` with the
 absolute paths of your `node` and this checkout, writes
 `~/Library/LaunchAgents/com.terminus.collector.plist`, and bootstraps it under your
-GUI session (`launchctl bootstrap gui/$UID`). Logs (stdout and stderr) go to
+GUI session (`launchctl bootstrap gui/$UID`). launchd restarts it whenever it exits
+(`KeepAlive`). Logs (stdout and stderr) go to
 `~/Library/Logs/Terminus/collector.log`. Check state with
 `launchctl print gui/$UID/com.terminus.collector`.
 
 Remove it with `collector/scripts/launchd/uninstall.sh` (the log file is kept). The
 agent uses fixed ports; set overrides in the plist's `EnvironmentVariables` if the
 defaults collide, then reinstall.
+
+### Linux (systemd)
+
+```sh
+npm run build -w collector
+collector/scripts/systemd/install.sh
+```
+
+`install.sh` renders `scripts/systemd/terminus-collector.service.template` into
+`~/.config/systemd/user/terminus-collector.service` (`$XDG_CONFIG_HOME` is
+honoured), then runs `systemctl --user daemon-reload`, `enable` and `restart`, so a
+reinstall replaces the running service. The unit restarts the collector on failure
+(5 s apart, giving up after 5 failed starts within 60 s, e.g. a port already in use;
+clear that with `systemctl --user reset-failed terminus-collector`). A clean stop
+(`systemctl --user stop terminus-collector`) stays stopped.
+
+- **Logs** go to the journal: `journalctl --user -u terminus-collector -f`.
+- **Settings** go in `~/.config/terminus/collector.env`, one `VAR=value` per line
+  (any variable from [Configuration](#configuration)). The first install seeds it
+  with commented examples (`0600`) and never overwrites it; restart the service
+  after editing. A missing file is ignored.
+- **Status:** `systemctl --user status terminus-collector`.
+- **Running without a login session.** A user service stops when your last session
+  ends. To keep it running after logout and start it at boot, enable lingering
+  once: `loginctl enable-linger "$USER"` (the installer prints this hint when
+  lingering is off).
+
+Remove it with `collector/scripts/systemd/uninstall.sh`, which disables and stops the
+unit and deletes the unit file. The env file and the journal are kept.
 
 ## Migration from argo-netcapture
 
