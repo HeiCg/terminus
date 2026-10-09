@@ -100,8 +100,10 @@ export async function ensureOpenSSL(): Promise<void> {
 
 // LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. Filtered
 // to the addresses the device is likely to dial.
+const LOOPBACK_IPS = ['127.0.0.1', '::1'];
+
 export function lanAddresses(): string[] {
-  const ips = new Set<string>(['127.0.0.1', '::1']);
+  const ips = new Set<string>(LOOPBACK_IPS);
   for (const list of Object.values(os.networkInterfaces())) {
     for (const nic of list ?? []) if (!nic.internal) ips.add(nic.address.replace(/%.*$/, ''));
   }
@@ -121,10 +123,14 @@ export function validateSanTargets(host: string, ips: string[]): void {
 // bogus `DNS:<ip>` entry no client verifies against). `localhost` is always a DNS
 // name; the caller's `ips` are already IPs. An IP host duplicated in `ips` is emitted
 // once. IPv6 loopback/link-local exclusion is unchanged — it is governed by what
-// `lanAddresses()` collects, not by this classifier.
+// `lanAddresses()` collects, not by this classifier. The loopback anchors
+// `127.0.0.1` and `::1` are always present, like `localhost`: an explicit
+// `--ip` list used to replace them, which broke simulator/emulator pairing on
+// loopback (`/api/pairing?host=127.0.0.1`, `adb reverse`).
 export function sanArg(host: string, ips: string[]): string {
   const names: string[] = [];
   const ipList: string[] = [...ips];
+  for (const lo of LOOPBACK_IPS) if (!ipList.includes(lo)) ipList.push(lo);
   if (isIp(host)) { if (!ipList.includes(host)) ipList.unshift(host); }
   else names.push(host);
   if (!names.includes('localhost')) names.push('localhost');

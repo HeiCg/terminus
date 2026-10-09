@@ -68,8 +68,10 @@ example on a CI runner.
 An identity generated with the detected addresses (the default, and a rotation
 without `--ip`) has `localhost`, `127.0.0.1` and `::1` in its certificate SAN
 besides the host name and LAN IPs, so a target on the same machine can dial
-`127.0.0.1` without any change to the identity. (A rotation with explicit `--ip`
-values covers only those IPs plus `localhost`.)
+`127.0.0.1` without any change to the identity. A rotation with explicit `--ip`
+values covers those IPs plus `localhost`, `127.0.0.1` and `::1`, which are always
+kept. (Identities rotated with `--ip` before 0.2.0 lack the loopback IPs; rotate
+again if `GET /api/pairing?host=127.0.0.1` answers 400.)
 
 **iOS simulator.** The simulator shares the Mac's network, so `127.0.0.1` reaches
 the collector directly. Fetch a pairing blob that advertises it (admin token
@@ -97,7 +99,8 @@ Use your own values if you changed `TERMINUS_ATLANTIS_PORT`,
 emulator when several run. The forward lasts until the emulator or adb restarts.
 Do not use the emulator's host alias `10.0.2.2`: it is not in the certificate SAN,
 so the TLS check fails. Adding it means rotating the identity with `10.0.2.2` among
-the `--ip` values (which replace the detected list, so name every other IP too).
+the `--ip` values (which replace the detected LAN list, so name every other LAN IP
+too; loopback is always kept).
 Rotation issues a new certificate and device token, so **every** paired device must
 re-pair; `adb reverse` avoids that.
 

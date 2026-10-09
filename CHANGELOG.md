@@ -79,6 +79,9 @@ All notable changes to this project are documented here. The format is based on
   `creator.version`).
 - The missing-OpenSSL startup error now gives a macOS and a Linux hint instead of
   naming only Homebrew, and the version-too-old error gives the same hints.
+- `identity:rotate --ip ...` no longer drops `127.0.0.1` and `::1` from the
+  certificate SAN; the loopback anchors are always kept, like `localhost`, so
+  simulator and emulator pairing on loopback keeps working after a rotation.
 
 ## 0.1.1 — 2026-09-14
 
