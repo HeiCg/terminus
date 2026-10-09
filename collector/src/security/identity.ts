@@ -98,17 +98,14 @@ export async function ensureOpenSSL(): Promise<void> {
   if (!m || Number(m[1]) < 3) throw new Error(`OpenSSL 3 required, found: ${out.trim()}. ${OPENSSL_HINT}`);
 }
 
-// LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. Filtered
-// to the addresses the device is likely to dial.
-const LOOPBACK_IPS = ['127.0.0.1', '::1'];
+// LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. The
+// interface classifier (virtual/tunnel NICs and IPv6 link-local skipped,
+// Wi-Fi/Ethernet first, TERMINUS_SAN_INTERFACES override) lives in interfaces.ts;
+// re-exported because the collector's callers import it here.
+import { lanAddresses } from './interfaces.js';
+export { lanAddresses };
 
-export function lanAddresses(): string[] {
-  const ips = new Set<string>(LOOPBACK_IPS);
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const nic of list ?? []) if (!nic.internal) ips.add(nic.address.replace(/%.*$/, ''));
-  }
-  return [...ips];
-}
+const LOOPBACK_IPS = ['127.0.0.1', '::1'];
 
 // Reject anything that is not a plain hostname or IP before it reaches the openssl
 // argv; SAN values are attacker-influenced when they come from a rotate CLI.
@@ -300,7 +297,8 @@ function pairingHostOverride(e: typeof env): string | null {
 // endpoint log). Resolved at runtime, not from identity meta:
 //   1. TERMINUS_PAIRING_HOST when set and valid;
 //   2. else the first current LAN IPv4 that is in the cert SAN (so the device's SAN
-//      check passes when it dials it);
+//      check passes when it dials it), in lanAddresses() order: Wi-Fi/Ethernet
+//      first, virtual/tunnel interfaces (docker0, utun, ...) never;
 //   3. else identity meta.host, warning once about the drift.
 // `e`/`lan` are injectable so tests do not depend on the machine's real interfaces.
 export function pairingHost(id: CollectorIdentity, e: typeof env = env, lan: () => string[] = lanAddresses): string {

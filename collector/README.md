@@ -88,6 +88,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_CERT_PORT` | `8789` | collector | Public cert endpoint port (`GET /api/cert`, plain HTTP on the LAN) for QR pairing. | `NETCAPTURE_CERT_PORT` |
 | `TERMINUS_STATE_DIR` | `~/Library/Application Support/Terminus` (macOS) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
 | `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
+| `TERMINUS_SAN_INTERFACES` | unset (classifier picks) | collector | Comma-separated interface names (e.g. `eth0` or `en0,en7`) whose addresses go into the certificate SAN of a **new or rotated** identity, the proxy exclusion list and the pairing-host candidates, used exclusively and in the listed order. IPv6 link-local is still skipped and the loopback anchors are always kept. Unset, virtual and tunnel interfaces are skipped (see [the advertised pairing host](#the-advertised-pairing-host-is-the-machines-lan-ip)). | `NETCAPTURE_SAN_INTERFACES` |
 | `TERMINUS_INGEST_PAUSE_MAX_MS` | `30000` | collector | Max time a back-pressured (read-paused) WSS ingest connection may stay paused before it is closed with `1013` (overload). | `NETCAPTURE_INGEST_PAUSE_MAX_MS` |
 | `TERMINUS_ATLANTIS_PING_MS` | `30000` | collector | Interval between server→client Atlantis `ping` control frames on an authenticated connection; `0` disables pinging. | `NETCAPTURE_ATLANTIS_PING_MS` |
 | `TERMINUS_BODY_BUDGET` | `67108864` (64 MiB) | collector | Total bytes of captured request/response/frame bodies retained across all devices before the store evicts to make room. A positive integer of bytes, optional binary `k`/`m`/`g` suffix (e.g. `256m`); an invalid value is fatal at start. | `NETCAPTURE_BODY_BUDGET` |
@@ -187,14 +188,34 @@ the QA screen. The response also carries `certPort` (the LAN cert listener's por
 so the UI can render the QR below. The terminal only ever prints the admin token,
 never the device token.
 
-### The advertised pairing host is the Mac's LAN IP
+### The advertised pairing host is the machine's LAN IP
 
-The `host` in the pairing blob and QR is **the Mac's LAN IPv4** (e.g. `192.168.1.10`),
-resolved at runtime — not the machine hostname. Phones have no way to resolve the
-Mac's hostname on the LAN (there is no DNS for it, and Android's `fetch` does not do
-mDNS), so a hostname-based pairing fails immediately with a fetch error. The IP is
-chosen as the first current LAN IPv4 that is also in the certificate's SAN, so the
-device's TLS SAN check passes when it dials it.
+The `host` in the pairing blob and QR is **the collector machine's LAN IPv4** (e.g.
+`192.168.1.10`), resolved at runtime — not the machine hostname. Phones have no way
+to resolve the machine's hostname on the LAN (there is no DNS for it, and Android's
+`fetch` does not do mDNS), so a hostname-based pairing fails immediately with a fetch
+error. The IP is chosen as the first current LAN IPv4 that is also in the
+certificate's SAN, so the device's TLS SAN check passes when it dials it.
+
+One interface classifier decides which addresses count, for the certificate SAN of a
+new identity, the proxy exclusion list and the pairing host alike:
+
+- Virtual and tunnel interfaces are skipped by name: Linux `docker*`, `podman*`,
+  `veth*`, `br-*`, `virbr*`, `lxcbr*`/`lxdbr*`, `cni*`, `flannel*`, `cali*`,
+  `vxlan*`, `tun*`, `tap*`, `wg*`; macOS `utun*`, `awdl*`, `llw*`, `bridge*`,
+  `anpi*`, `ap<n>`, `gif*`, `stf*`; VMware/VirtualBox `vmnet*`/`vboxnet*`.
+- IPv6 link-local addresses (`fe80::/10`) are skipped on every interface.
+- Wi-Fi and Ethernet interfaces (`en*` such as `en0`, `enp*`, `eno*`, `ens*`;
+  `eth*`; `wlan*`, `wl*` such as `wlp*`) come first; any other non-virtual
+  interface follows. The loopback anchors `127.0.0.1` and `::1` are always present.
+- `TERMINUS_SAN_INTERFACES=<name>[,<name>…]` replaces the classifier: only the
+  listed interfaces are used, in that order.
+
+The classifier only changes **new or rotated** identities: an existing certificate is
+never reissued, so its SAN keeps whatever addresses it was created with (including a
+`docker0` or `utun` address from an older build). Rotate to apply it, which re-pairs
+every device. The pairing-host order applies at once, but only among addresses the
+existing SAN covers. `TERMINUS_PAIRING_HOST` still wins over all of this.
 
 Because the address is a **DHCP lease**, it can change. When it does, the old cert no
 longer covers the new IP: rotate the identity (which regenerates the cert SAN and the
