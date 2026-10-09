@@ -4,13 +4,14 @@
   "private": true,
   "workspaces": [
     "collector",
-    "cli"
+    "cli",
+    "mcp"
   ],
   "scripts": {
     "start": "npm start -w collector",
-    "test": "npm run test -w collector && npm run test -w cli",
-    "typecheck": "npm run typecheck -w collector && npm run typecheck -w cli",
-    "lint": "npm run lint -w collector && npm run lint:ui -w collector && npm run lint -w cli",
+    "test": "npm run test -w collector && npm run test -w cli && npm run test -w mcp",
+    "typecheck": "npm run typecheck -w collector && npm run typecheck -w cli && npm run typecheck -w mcp",
+    "lint": "npm run lint -w collector && npm run lint:ui -w collector && npm run lint -w cli && npm run lint -w mcp",
     "check:ui": "npm run check:ui -w collector",
     "lint:ui": "npm run lint:ui -w collector",
     "test:browser": "npm run test:browser -w collector"

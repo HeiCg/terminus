@@ -48,6 +48,9 @@ jobs:
       - name: Build CLI
         run: npm run build -w @terminus/cli
 
+      - name: Build MCP server
+        run: npm run build -w @terminus/mcp
+
       # Playwright runs once, on Linux only: --with-deps is Linux-only and the
       # browser suite should not fan out across the OS matrix.
       - name: Install Playwright Chromium
