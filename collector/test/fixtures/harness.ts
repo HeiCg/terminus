@@ -4,6 +4,7 @@ import { Store } from '../../src/store.js';
 import { createHttpServer } from '../../src/http.js';
 import { createIngestShared } from '../../src/deviceServer.js';
 import { createUiAuth } from '../../src/security/uiAuth.js';
+import { RulesStore } from '../../src/rulesStore.js';
 import type { Page, EntrySummary, WsSummary, UiDevice } from '../../src/uiProtocol.js';
 
 // The authenticated snapshot the UI would rebuild from on reconnect, assembled
@@ -21,6 +22,8 @@ export interface CollectorHarness {
   url: string;
   origin: string;
   store: Store;
+  // U6: the interception rules the routes serve.
+  rules: RulesStore;
   adminToken: string;
   // P3: the read-only reader bearer this collector accepts.
   readerToken: string;
@@ -41,7 +44,7 @@ export interface CollectorHarness {
 // is bound to 127.0.0.1 and torn down by close(); callers must await close() in a
 // finally/afterEach so no socket leaks between tests.
 export async function createCollectorHarness(
-  opts: { adminToken?: string; readerToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null; store?: Store; scopeFile?: string } = {},
+  opts: { adminToken?: string; readerToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null; store?: Store; scopeFile?: string; rules?: RulesStore } = {},
 ): Promise<CollectorHarness> {
   const adminToken = opts.adminToken ?? randomBytes(32).toString('base64url');
   const readerToken = opts.readerToken ?? randomBytes(32).toString('base64url');
@@ -49,7 +52,8 @@ export async function createCollectorHarness(
   const store = opts.store ?? new Store();
   const uiAuth = createUiAuth({ adminToken, readerToken, now: opts.now });
   const shared = createIngestShared();
-  const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort, ingest: shared, scopeFile: opts.scopeFile });
+  const rules = opts.rules ?? new RulesStore();
+  const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort, ingest: shared, scopeFile: opts.scopeFile, rules });
 
   await new Promise<void>((r) => handle.server.listen(0, '127.0.0.1', () => r()));
   const port = (handle.server.address() as net.AddressInfo).port;
@@ -74,6 +78,7 @@ export async function createCollectorHarness(
     url,
     origin,
     store,
+    rules,
     adminToken,
     readerToken,
     login,

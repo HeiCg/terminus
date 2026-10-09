@@ -8,6 +8,7 @@ import type { Entry } from '../src/types.js';
 import type { PairingImport } from '../src/security/types.js';
 import { readerAllowed } from '../src/http.js';
 import { createCollectorHarness, type CollectorHarness } from './fixtures/harness.js';
+import { RulesStore } from '../src/rulesStore.js';
 
 // P3: the reader token's scope, as a route × credential matrix. Every route the
 // HTTP server serves has a row here (the coverage test at the bottom parses
@@ -58,6 +59,14 @@ const MATRIX: Row[] = [
   { method: 'PUT', path: '/api/scope', body: '{"include":[],"exclude":["ads.example"]}', expect: adminOnly(200) },
   { method: 'PUT', path: '/api/scope?bad', body: '{"include":["https://x"]}', expect: adminOnly(400) },
   { method: 'POST', path: '/api/scope', expect: adminOnly(405) },
+  // U6 interception rules: admin only, never in the reader allowlist.
+  { method: 'GET', path: '/api/rules', expect: adminOnly(200) },
+  { method: 'PUT', path: '/api/rules', body: '{"rules":[{"id":"r2","name":"slow","phase":"request","action":{"type":"delay","ms":5}}]}', expect: adminOnly(200) },
+  { method: 'PUT', path: '/api/rules?bad', body: '{"rules":[{"id":"r2","name":"x","phase":"request","action":{"type":"delay","ms":0}}]}', expect: adminOnly(400) },
+  { method: 'POST', path: '/api/rules', expect: adminOnly(405) },
+  { method: 'PATCH', path: '/api/rules/seed-rule', body: '{"enabled":false}', expect: adminOnly(200) },
+  { method: 'PATCH', path: '/api/rules/missing', body: '{"enabled":false}', expect: adminOnly(404) },
+  { method: 'GET', path: '/api/rules/seed-rule', expect: adminOnly(405) },
   { method: 'GET', path: '/export.har', expect: adminOnly(200) },
   { method: 'GET', path: '/export.json', expect: adminOnly(200) },
   // Unlisted path: admin-only by default, so a reader never even learns it is a 404.
@@ -121,7 +130,8 @@ describe('reader scope matrix (P3): route × {admin bearer, reader bearer, cooki
   for (const row of MATRIX) {
     for (const cred of CREDS) {
       it(`${row.method} ${row.path} as ${cred} -> ${row.expect[cred]}`, async () => {
-        const h = await createCollectorHarness({ uiDir, getPairing: () => FAKE_PAIRING });
+        const rules = new RulesStore([{ id: 'seed-rule', name: 'seed', enabled: true, match: {}, phase: 'request', action: { type: 'delay', ms: 1 } }]);
+        const h = await createCollectorHarness({ uiDir, getPairing: () => FAKE_PAIRING, rules });
         try {
           seed(h);
           const r = await call(h, row, cred);
@@ -132,6 +142,7 @@ describe('reader scope matrix (P3): route × {admin bearer, reader bearer, cooki
           // A refused reader mutation never touched state.
           if (cred === 'reader' && row.method !== 'GET') {
             expect(h.store.entries('d1')).toHaveLength(1);
+            expect(h.rules.list()).toEqual([expect.objectContaining({ id: 'seed-rule', enabled: true })]);
           }
         } finally { await h.close(); }
       });

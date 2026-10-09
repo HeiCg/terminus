@@ -16,6 +16,8 @@ import { sanCoversHost } from './security/identity.js';
 import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters, storeMatchEnv } from './entryFilters.js';
 import { createEntryWaits } from './entryWait.js';
 import { validateScopeBody, saveScopeFile } from './scope.js';
+import { RulesStore } from './rulesStore.js';
+import { formatRuleError } from './ruleModel.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -146,9 +148,12 @@ export function createHttpServer(
   uiDir: string,
   // `scopeFile`: where `PUT /api/scope` persists the capture scope (main.ts passes
   // `<stateDir>/scope.json`); without it a PUT applies to this process only.
-  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number; ingest?: IngestShared; scopeFile?: string },
+  // `rules`: the interception rules (U6) shared with the proxy source; without it
+  // the routes serve a private in-memory list (the test harness).
+  opts: { uiAuth: UiAuth; getPairing?: () => PairingImport | null; getPairingWarning?: () => string | null; certPort?: number; ingest?: IngestShared; scopeFile?: string; rules?: RulesStore },
 ) {
   const { uiAuth, getPairing, getPairingWarning, certPort, ingest, scopeFile } = opts;
+  const rules = opts.rules ?? new RulesStore();
   // Boot instant, so GET /api/status can report the collector's uptime without a
   // process-global. A server created after boot reports its own age, which is what
   // the operator asked "how long has this been serving".
@@ -292,6 +297,56 @@ export function createHttpServer(
             }
             log.info(`capture scope set: include [${v.value.include.join(', ')}] exclude [${v.value.exclude.join(', ')}]`);
             return json(store.scopeStatus());
+          });
+          return;
+        }
+        // Interception rules (U6), admin only (not in the reader allowlist): they
+        // change what the proxy sends to the network and to the device. GET reads
+        // the list; PUT validates and REPLACES it (400 with the path of the first
+        // error, e.g. `rules[2].action.status`), persisting it (0600) before it
+        // takes effect; PATCH /api/rules/:id sets one rule's `enabled`. Cookie
+        // callers need the exact Origin. PUT bodies are capped at 16 MiB.
+        if (u.pathname === '/api/rules' || u.pathname.startsWith('/api/rules/')) {
+          const id = u.pathname === '/api/rules' ? null : (() => { try { return decodeURIComponent(u.pathname.slice('/api/rules/'.length)); } catch { return ''; } })();
+          if (id === null && method === 'GET') return json({ rules: rules.list() });
+          if (id === null ? method !== 'PUT' : method !== 'PATCH') { res.writeHead(405); return res.end(); }
+          if (!requireMutation(res, origin, auth)) return;
+          const cap = id === null ? 16 * 1024 * 1024 : 4 * 1024;
+          const chunks: Buffer[] = [];
+          let size = 0;
+          let aborted = false;
+          req.on('data', (d: Buffer) => {
+            if (aborted) return;
+            size += d.length;
+            if (size > cap) { aborted = true; res.writeHead(413); res.end('payload too large'); req.destroy(); }
+            else chunks.push(d);
+          });
+          req.on('end', () => {
+            if (aborted) return;
+            const bad = (message: string, path?: string) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'bad_request', message, ...(path !== undefined ? { path } : {}) })); };
+            let body: unknown;
+            try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null'); } catch { return bad('body is not valid JSON'); }
+            // Outside the handler's outer try: a failed write is a logged 500, and
+            // the active list only changes once the file is safely written.
+            try {
+              if (id === null) {
+                const r = rules.replace(body);
+                if (!r.ok) return bad(formatRuleError(r), r.path);
+                log.info(`interception rules set: ${r.rules.length} rule(s), ${r.rules.filter((x) => x.enabled).length} enabled`);
+                return json({ rules: r.rules });
+              }
+              const b = body as { enabled?: unknown } | null;
+              if (typeof b !== 'object' || b === null || Array.isArray(b) || Object.keys(b).some((k) => k !== 'enabled') || typeof b.enabled !== 'boolean') {
+                return bad('body must be {"enabled": true|false}');
+              }
+              const rule = rules.setEnabled(id, b.enabled);
+              if (!rule) { res.writeHead(404, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ error: 'not_found', message: `no rule with id "${id}"` })); }
+              log.info(`interception rule ${rule.enabled ? 'enabled' : 'disabled'}: ${rule.name}`);
+              return json(rule);
+            } catch (e) {
+              log.warn('rules', String(e));
+              if (!res.headersSent) { res.writeHead(500); res.end('rules update failed'); }
+            }
           });
           return;
         }
