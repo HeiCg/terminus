@@ -53,6 +53,11 @@ const MATRIX: Row[] = [
   { method: 'POST', path: '/api/clear', expect: adminOnly(200) },
   { method: 'POST', path: '/api/pause', body: '{"paused":true}', expect: adminOnly(200) },
   { method: 'POST', path: '/api/replay', body: '{"deviceId":"d1","id":"missing"}', expect: adminOnly(404) },
+  // U7 stream replay: admin only, never in the reader allowlist.
+  { method: 'POST', path: '/api/replay/stream', body: '{"deviceId":"d1","wsId":"missing"}', expect: adminOnly(404) },
+  { method: 'POST', path: '/api/replay/stream?ws', body: '{"deviceId":"d1","wsId":"w1"}', expect: adminOnly(422) },
+  { method: 'GET', path: '/api/replay/stream', expect: adminOnly(405) },
+  { method: 'GET', path: '/api/ws?kind=tcp', expect: ok200 },
   // U5 capture scope: admin only, never in the reader allowlist.
   { method: 'GET', path: '/api/scope', expect: adminOnly(200) },
   { method: 'PUT', path: '/api/scope', body: '{"include":[],"exclude":["ads.example"]}', expect: adminOnly(200) },
