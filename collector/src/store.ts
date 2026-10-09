@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import type {
   DeviceMessage, Entry, EntryInput, EntrySeq, StoredEntry, StoredFrame, WsSession, WsSessionInput,
-  Device, DeviceChannels, DeviceIdentity, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot, Source,
+  Device, DeviceChannels, DeviceIdentity, BodyRef, BodyOmitted, EntryKey, WsKey, ExportSelection, ExportSession, ExportSnapshot, Source, WsKind,
 } from './types.js';
 import { DEVICE_IDENTITY_FIELDS, identityField } from './types.js';
 import { createBodyStore, type BodyStore } from './bodyStore.js';
@@ -224,6 +224,11 @@ export class Store extends EventEmitter {
 
   scopeStatus(): ScopeStatus { return { ...this.scope.config(), dropped: { ...this.scopeDropped } }; }
 
+  // Whether a record for `url` would be recorded, WITHOUT counting a drop. For a
+  // second record of one exchange whose first record already went through
+  // admitScope (U7: the stream session beside a TLS tunnel's CONNECT entry).
+  inScope(url: string | null | undefined): boolean { return this.scope.verdict(url) == null; }
+
   // Whether a record for `url` is recorded. When it is not, the drop is counted
   // under its reason, once per `recordKey` (a record arriving in several writes
   // counts once). Exposed so a source can skip its own work for an out-of-scope
@@ -410,6 +415,7 @@ export class Store extends EventEmitter {
     const shell: Omit<WsSession, 'frames'> = {
       wsId: w.wsId, deviceId: w.deviceId, source: w.source, url: w.url, openedAt: w.openedAt,
       kind: w.kind ?? 'websocket', httpEntryKey: w.httpEntryKey ?? null,
+      ...(w.stream ? { stream: w.stream } : {}),
       ...(outcome === 'partial' ? { partial: true } : {}),
       ...(w.resumed === true ? { resumed: true } : {}),
       closedAt: w.closedAt ?? null, closeCode: w.closeCode ?? null, closeReason: w.closeReason ?? '',
@@ -502,7 +508,7 @@ export class Store extends EventEmitter {
     this.flushRetention();
   }
 
-  closeWs(wsId: string, ts: number, code: number, reason: string, deviceId?: string): void {
+  closeWs(wsId: string, ts: number, code: number | null, reason: string, deviceId?: string): void {
     if (deviceId != null) deviceId = this.resolveDeviceKey(deviceId);
     const key = deviceId != null ? keyOf(deviceId, wsId) : this.wsIdToKey.get(wsId);
     const ss = key ? this.sessionsByKey.get(key) : undefined;
@@ -945,12 +951,24 @@ export class Store extends EventEmitter {
   }
 
   // GET /api/ws — paged session summaries; the frame ARRAY is replaced by counts.
-  wsSummaryPage(cursorRaw?: string | null, deviceId?: string, limit = PAGE_MAX_RECORDS): Page<WsSummary> {
+  // `kind` (U7) keeps only sessions of that kind (the cursor still walks the
+  // whole index, so paging stays stable under the filter).
+  wsSummaryPage(cursorRaw?: string | null, deviceId?: string, limit = PAGE_MAX_RECORDS, kind?: WsKind): Page<WsSummary> {
     const index = deviceId ? this.sessionIndexByDevice.get(deviceId) : this.sessionIndexGlobal;
     return this.pageIndex<WsSummary>(index, cursorRaw, limit, (k) => {
       const ss = this.sessionsByKey.get(keyOf(k.deviceId, k.id));
-      return ss ? { sk: this.sessionSk(ss.session), item: this.toWsSummary(ss) } : undefined;
+      if (!ss || (kind != null && ss.session.kind !== kind)) return undefined;
+      return { sk: this.sessionSk(ss.session), item: this.toWsSummary(ss) };
     });
+  }
+
+  // One session's shell and its retained frame summaries, in sequence order, plus
+  // how many of its frames retention already evicted. Used by the stream replay
+  // (U7), which needs every client frame of a session at once; null when unknown.
+  wsSessionFrames(deviceId: string, wsId: string): { session: Omit<WsSession, 'frames'>; frames: FrameSummary[]; droppedFrames: number } | null {
+    const ss = this.sessionsByKey.get(keyOf(deviceId, wsId));
+    if (!ss) return null;
+    return { session: ss.session, frames: ss.frames.map(storedFrameToSummary), droppedFrames: ss.droppedLocal };
   }
 
   // GET /api/devices — devices paged lexicographically by id (opaque cursor is the

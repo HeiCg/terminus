@@ -227,7 +227,7 @@ export function createUiBroadcast(store: Store, opts: UiBroadcastOptions = {}) {
         return { type: 'ws', session: {
           wsId: mclip(s.wsId), deviceId: mclip(s.deviceId), source: clipSource(s.source),
           url: '', openedAt: mnum(s.openedAt),
-          kind: s.kind === 'sse' ? 'sse' : 'websocket', httpEntryKey: null,
+          kind: s.kind === 'sse' || s.kind === 'tcp' || s.kind === 'tls' ? s.kind : 'websocket', httpEntryKey: null,
           closedAt: s.closedAt === null ? null : mnum(s.closedAt),
           closeCode: s.closeCode === null ? null : mnum(s.closeCode), closeReason: '',
           retainedFrames: mnum(s.retainedFrames), totalFrames: mnum(s.totalFrames), droppedFrames: mnum(s.droppedFrames),
