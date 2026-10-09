@@ -90,7 +90,7 @@ const OPENSSL_HINT = 'Install OpenSSL 3, then put it on PATH or set TERMINUS_OPE
   + 'macOS: `brew install openssl@3` (found automatically under /opt/homebrew or /usr/local). '
   + 'Linux: install your distribution\'s OpenSSL 3 package (e.g. `apt install openssl` or `dnf install openssl`).';
 
-// Where to look when `openssl` on PATH is missing or not v3, after TERMINUS_OPENSSL:
+// Where to look when TERMINUS_OPENSSL and `openssl` on PATH are missing or not v3:
 // Homebrew's keg-only openssl@3 (Apple silicon, then Intel), then a linked Homebrew
 // or locally built openssl.
 export const OPENSSL_FALLBACKS: readonly string[] = [
@@ -110,14 +110,16 @@ export type FindOpenSSLOpts = {
   fallbacks?: readonly string[];
 };
 
-// The first OpenSSL 3+ binary among: `openssl` on PATH, TERMINUS_OPENSSL, then
+// The first OpenSSL 3+ binary among: TERMINUS_OPENSSL, `openssl` on PATH, then
 // OPENSSL_FALLBACKS. The error lists every candidate and what it turned out to be.
 export async function findOpenSSL(opts: FindOpenSSLOpts = {}): Promise<string> {
   const probe = opts.probe ?? defaultProbe;
   const e = opts.env ?? env;
   const explicit = e('OPENSSL')?.trim();
-  const candidates: { bin: string; label: string }[] = [{ bin: 'openssl', label: 'openssl on PATH' }];
+  // An explicit TERMINUS_OPENSSL is the user's choice and is tried first.
+  const candidates: { bin: string; label: string }[] = [];
   if (explicit) candidates.push({ bin: explicit, label: `${explicit} from ${envName('OPENSSL')}` });
+  candidates.push({ bin: 'openssl', label: 'openssl on PATH' });
   for (const bin of opts.fallbacks ?? OPENSSL_FALLBACKS) {
     if (!candidates.some((c) => c.bin === bin)) candidates.push({ bin, label: bin });
   }

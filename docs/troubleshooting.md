@@ -192,8 +192,8 @@ runs **before** any listener opens. Stock macOS ships LibreSSL as `/usr/bin/open
 which fails the version check. The collector looks in this order and uses the first
 OpenSSL 3 it finds:
 
-1. `openssl` on `PATH`;
-2. `TERMINUS_OPENSSL` (an explicit path to the binary);
+1. `TERMINUS_OPENSSL` (an explicit path to the binary), when set;
+2. `openssl` on `PATH`;
 3. Homebrew's keg-only `openssl@3`: `/opt/homebrew/opt/openssl@3/bin/openssl`
    (Apple silicon), then `/usr/local/opt/openssl@3/bin/openssl` (Intel);
 4. `/opt/homebrew/bin/openssl`, then `/usr/local/bin/openssl`.

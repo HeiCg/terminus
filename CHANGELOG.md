@@ -27,8 +27,8 @@ All notable changes to this project are documented here. The format is based on
 - `TERMINUS_SAN_INTERFACES`: comma-separated interface names whose addresses go into
   a new identity's certificate SAN, the proxy exclusion list and the pairing-host
   candidates, used exclusively and in the listed order.
-- `TERMINUS_OPENSSL`: path to an OpenSSL 3 binary, tried when `openssl` on `PATH`
-  is missing or not version 3.
+- `TERMINUS_OPENSSL`: path to an OpenSSL 3 binary, tried first (before `openssl`
+  on `PATH`).
 
 ### Changed
 
@@ -52,8 +52,8 @@ All notable changes to this project are documented here. The format is based on
   (no multicast on CI, UDP 5353 held by Avahi) logs one warning and the collector
   keeps running. The advertised DNS-SD instance name is sanitized instead of using
   the raw hostname.
-- OpenSSL discovery on macOS: when `openssl` on `PATH` is LibreSSL or missing, the
-  collector tries `TERMINUS_OPENSSL`, then Homebrew's keg-only `openssl@3`
+- OpenSSL discovery on macOS: after `TERMINUS_OPENSSL` (if set) and `openssl` on
+  `PATH` (LibreSSL on stock macOS), the collector tries Homebrew's keg-only `openssl@3`
   (`/opt/homebrew/opt/openssl@3/bin/openssl`, `/usr/local/opt/openssl@3/bin/openssl`),
   then `/opt/homebrew/bin/openssl` and `/usr/local/bin/openssl`. The startup error
   lists every candidate tried.

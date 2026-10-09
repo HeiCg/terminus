@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { findOpenSSL, OPENSSL_FALLBACKS } from '../src/security/identity.js';
 
-// OpenSSL discovery: `openssl` on PATH first; when it is missing or not v3 (stock
-// macOS ships LibreSSL), TERMINUS_OPENSSL, then the Homebrew locations (openssl@3
+// OpenSSL discovery: TERMINUS_OPENSSL when set, then `openssl` on PATH; when that
+// is missing or not v3 (stock macOS ships LibreSSL), the Homebrew locations (openssl@3
 // is keg-only, so it is usually not on PATH). The probe is injected, so no binary
 // runs and the machine's real OpenSSL never matters.
 
@@ -26,7 +26,7 @@ const LIBRE = 'LibreSSL 3.3.6\n';
 describe('findOpenSSL', () => {
   it('uses `openssl` on PATH when it is v3, probing nothing else', async () => {
     const { probe, calls } = probeFrom({ openssl: V3 });
-    await expect(findOpenSSL({ probe, env: envWith({ OPENSSL: '/x/openssl' }) })).resolves.toBe('openssl');
+    await expect(findOpenSSL({ probe, env: noEnv })).resolves.toBe('openssl');
     expect(calls).toEqual(['openssl']);
   });
 
@@ -37,10 +37,10 @@ describe('findOpenSSL', () => {
     expect(calls).toEqual(['openssl', brew]);
   });
 
-  it('tries TERMINUS_OPENSSL before the built-in locations', async () => {
-    const { probe, calls } = probeFrom({ '/custom/bin/openssl': V3, '/opt/homebrew/opt/openssl@3/bin/openssl': V3 });
+  it('tries TERMINUS_OPENSSL first, even before a v3 openssl on PATH', async () => {
+    const { probe, calls } = probeFrom({ openssl: V3, '/custom/bin/openssl': V3, '/opt/homebrew/opt/openssl@3/bin/openssl': V3 });
     await expect(findOpenSSL({ probe, env: envWith({ OPENSSL: '/custom/bin/openssl' }) })).resolves.toBe('/custom/bin/openssl');
-    expect(calls).toEqual(['openssl', '/custom/bin/openssl']);
+    expect(calls).toEqual(['/custom/bin/openssl']);
   });
 
   it('skips a TERMINUS_OPENSSL that is not v3 and keeps looking', async () => {

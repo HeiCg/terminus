@@ -26,8 +26,8 @@ database), capped at 5 000 HTTP entries per device.
 
 - Node.js ≥ 20
 - OpenSSL 3 (used to generate the collector's identity certificate). The collector
-  uses `openssl` on `PATH` when it is version 3; otherwise it tries
-  `TERMINUS_OPENSSL`, then Homebrew's keg-only `openssl@3`
+  uses `TERMINUS_OPENSSL` when set, else `openssl` on `PATH` when it is version 3;
+  otherwise it tries Homebrew's keg-only `openssl@3`
   (`/opt/homebrew/opt/openssl@3/bin/openssl`, `/usr/local/opt/openssl@3/bin/openssl`),
   then `/opt/homebrew/bin/openssl` and `/usr/local/bin/openssl`. Checked at startup;
   when none is OpenSSL 3 it is a hard, actionable error, listing what was tried,
@@ -93,7 +93,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_STATE_DIR` | macOS `~/Library/Application Support/Terminus`; Linux `$XDG_STATE_HOME/terminus` (fallback `~/.local/state/terminus`) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
 | `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
 | `TERMINUS_SAN_INTERFACES` | unset (classifier picks) | collector | Comma-separated interface names (e.g. `eth0` or `en0,en7`) whose addresses go into the certificate SAN of a **new or rotated** identity, the proxy exclusion list and the pairing-host candidates, used exclusively and in the listed order. IPv6 link-local is still skipped and the loopback anchors are always kept. Unset, virtual and tunnel interfaces are skipped (see [the advertised pairing host](#the-advertised-pairing-host-is-the-machines-lan-ip)). | `NETCAPTURE_SAN_INTERFACES` |
-| `TERMINUS_OPENSSL` | unset | collector | Path to an OpenSSL 3 binary, tried when `openssl` on `PATH` is missing or not version 3 (before the built-in Homebrew locations). | `NETCAPTURE_OPENSSL` |
+| `TERMINUS_OPENSSL` | unset | collector | Path to an OpenSSL 3 binary, tried first (before `openssl` on `PATH` and the built-in Homebrew locations). | `NETCAPTURE_OPENSSL` |
 | `TERMINUS_INGEST_PAUSE_MAX_MS` | `30000` | collector | Max time a back-pressured (read-paused) WSS ingest connection may stay paused before it is closed with `1013` (overload). | `NETCAPTURE_INGEST_PAUSE_MAX_MS` |
 | `TERMINUS_ATLANTIS_PING_MS` | `30000` | collector | Interval between server→client Atlantis `ping` control frames on an authenticated connection; `0` disables pinging. | `NETCAPTURE_ATLANTIS_PING_MS` |
 | `TERMINUS_BODY_BUDGET` | `67108864` (64 MiB) | collector | Total bytes of captured request/response/frame bodies retained across all devices before the store evicts to make room. A positive integer of bytes, optional binary `k`/`m`/`g` suffix (e.g. `256m`); an invalid value is fatal at start. | `NETCAPTURE_BODY_BUDGET` |
