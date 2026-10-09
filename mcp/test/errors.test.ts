@@ -129,6 +129,22 @@ describe('old-collector detection', () => {
     });
   });
 
+  it('terminus_ws_sessions kind= needs the raw-streams capability (never sent to an older collector)', async () => {
+    const fake = await fakeCollector(jsonReply(200, { items: [], nextCursor: null }));
+    await withFake(fake, async (c) => {
+      const r = await call(c, 'terminus_ws_sessions', { kind: 'tcp' });
+      expect(r.isError).toBe(true);
+      expect(text(r)).toContain('lacks the capability "raw-streams"');
+      expect((await call(c, 'terminus_ws_sessions', {})).isError).toBeFalsy();
+      expect(fake.hits.some((x) => x.includes('kind='))).toBe(false);
+    });
+    const fresh = await fakeCollector(jsonReply(200, { items: [], nextCursor: null }), { ...HEALTH, capabilities: [...HEALTH.capabilities, 'raw-streams'] });
+    await withFake(fresh, async (c) => {
+      expect((await call(c, 'terminus_ws_sessions', { kind: 'tcp' })).isError).toBeFalsy();
+      expect(fresh.hits.find((x) => x.startsWith('GET /api/ws?'))).toContain('kind=tcp');
+    });
+  });
+
   it('a missing capability is named', async () => {
     const fake = await fakeCollector(jsonReply(200, {}), { ...HEALTH, capabilities: ['seq'] });
     await withFake(fake, async (c) => {

@@ -112,7 +112,10 @@ token.
 (for example `status >= 500 or (error)`), ANDed with the other filters. It is sent
 only to a collector that advertises the `query` capability; an older one gets a
 tool error instead of an unfiltered answer. `bodyBase64` (raw bytes, binary-safe)
-likewise needs `replay-bytes`.
+likewise needs `replay-bytes`, and `terminus_ws_sessions` `kind` needs
+`raw-streams` (an older collector would ignore `kind=` and list every session).
+When a `matches` glob hit the collector's work bound the result says
+`truncatedMatch=true`: some entries were left out.
 
 An entry line looks like:
 
@@ -126,8 +129,14 @@ before (its response arrived later). A proxy entry that an
 `[rules:<name>(<action>),...]`, plus `[mocked]` when a rule answered without
 contacting upstream; `terminus_entry` lists those rules and the device's original
 method/URL when a rewrite changed them. Rules are edited only in the collector UI
-or its admin API: the MCP server stays read-only. The list tools also return the
-collector's JSON as MCP `structuredContent`.
+or its admin API: the MCP server stays read-only.
+
+Every tool also returns MCP `structuredContent` for programmatic clients, but it
+carries only fields the collector generates itself: cursors (`nextSeq`, `lastSeq`,
+`epoch`, `nextCursor`), counts, ids (`deviceId`, `id`, `wsId`), status codes,
+timings and sizes. Captured content (URLs, headers, bodies, frames, device and app
+names) is never in it: it reaches the model only inside the untrusted-data block
+of the text result. Read it from the collector's API if a client needs it raw.
 
 Bodies come back as UTF-8 text when they decode, otherwise as a hex dump of the
 first bytes (at most 512), and are cut at `maxBodyBytes` with an explicit

@@ -134,7 +134,11 @@ describe('terminus_entry', () => {
     expect(t).toContain('duration: 42ms');
     expect(t).toContain('request headers:\n  content-type: application/json\n  x-trace: abc');
     expect(t).not.toContain('request body');
-    expect((r.structuredContent as any).requestHeaders['x-trace']).toBe('abc');
+    // structuredContent carries ids, cursors, codes, timings and sizes only.
+    expect(r.structuredContent).toEqual({
+      deviceId: 'd1', id: 'r1', seq: 1, firstSeq: 1, status: 201, durationMs: 42, startedAt: expect.any(Number), receivedAt: expect.any(Number),
+      requestSize: 7, responseSize: 11, mocked: false,
+    });
   });
 
   it('lists the applied rules, the mocked marker and the original request (U6)', async () => {
@@ -289,3 +293,34 @@ describe('q filter expression', () => {
     expect(text(r)).toContain('400');
   });
 });
+
+// 0.3.0 review: structuredContent bypassed the untrusted-data fence. It now
+// carries only collector-generated fields, never captured text.
+describe('structuredContent carries no captured content', () => {
+  it('no URL, header, body, frame or device name in any tool result', async () => {
+    const MARK = 'INJECT-MARKER';
+    h.store.touchDevice({ deviceId: 'dev1', platform: 'android', appVersion: MARK, buildProfile: 'dev', dropped: 0, lastSeen: 1, deviceName: MARK, appName: MARK, bundleId: `com.${MARK}`, externalId: MARK }, 'ingest');
+    const from = lastSeq();
+    h.store.addEntry(makeEntry({ id: 'e1', deviceId: 'dev1', url: `https://${MARK.toLowerCase()}.example/${MARK}?q=${MARK}`, requestHeaders: { 'x-evil': MARK }, responseBody: MARK, responseBodySize: MARK.length, statusText: MARK }));
+    h.store.addWsSession({ wsId: 'w1', deviceId: 'dev1', source: 'xhr', url: `wss://x.example/${MARK}`, openedAt: 1, closedAt: null, closeCode: null, closeReason: MARK, kind: 'websocket', httpEntryKey: null });
+    h.store.appendWsFrame('w1', { ts: 2, direction: 'out', data: MARK, size: MARK.length, binary: false }, null, 'dev1');
+    const results = [
+      await call(c, 'terminus_status'),
+      await call(c, 'terminus_devices'),
+      await call(c, 'terminus_entries', { last: 5 }),
+      await call(c, 'terminus_entry', { deviceId: 'dev1', id: 'e1', bodies: 'both' }),
+      await call(c, 'terminus_wait', { afterSeq: from, epoch: epoch(), timeoutMs: 0 }),
+      await call(c, 'terminus_wait', { afterSeq: from, epoch: epoch(), timeoutMs: 0, method: 'DELETE' }),
+      await call(c, 'terminus_ws_sessions'),
+      await call(c, 'terminus_ws_frames', { deviceId: 'dev1', wsId: 'w1' }),
+    ];
+    for (const r of results) {
+      expect(r.isError).toBeFalsy();
+      expect(JSON.stringify(r.structuredContent ?? {}).toLowerCase()).not.toContain(MARK.toLowerCase());
+    }
+    const entries = results[2].structuredContent as any;
+    expect(entries.items[0]).toMatchObject({ deviceId: 'dev1', id: 'e1', status: 201 });
+    expect(results[5].structuredContent).toMatchObject({ matched: false, nearMisses: [{ id: 'e1' }] });
+  });
+});
+
