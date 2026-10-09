@@ -19,19 +19,22 @@ import { loadCaptureDoc } from '../src/loadCapture.js';
 // localhost), reached through CONNECT with the SNI the test chooses.
 
 let CA: { key: string; cert: string };
-let upstream: { port: number; fp: string; secureConnections: () => number; close: () => void };
+let upstream: { port: number; fp: string; secureConnections: () => number; tcpConnections: () => number; close: () => void };
 
 beforeAll(async () => {
   CA = await generateCACertificate();
   const own = await generateCACertificate({ subject: { commonName: 'localhost' } });
   let secure = 0;
+  let tcp = 0;
   const srv = https.createServer({ key: own.key, cert: own.cert }, (req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(`upstream ${req.url}`); });
   srv.on('secureConnection', () => { secure++; });
+  srv.on('connection', () => { tcp++; });
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
   upstream = {
     port: (srv.address() as AddressInfo).port,
     fp: new crypto.X509Certificate(own.cert).fingerprint256,
     secureConnections: () => secure,
+    tcpConnections: () => tcp,
     close: () => srv.close(),
   };
 }, 60_000);
@@ -46,13 +49,15 @@ async function waitFor(pred: () => boolean, ms = 4000): Promise<void> {
 }
 
 async function withProxy<T>(
-  opts: { allow?: string[]; passthrough?: string[]; interceptOnly?: string[]; scope?: ScopeConfig },
+  opts: { allow?: string[]; passthrough?: string[]; interceptOnly?: string[]; scope?: ScopeConfig; allowLocal?: boolean },
   fn: (p: ProxySource, store: Store) => Promise<T>,
 ): Promise<T> {
   const store = new Store(opts.scope ? { scope: opts.scope } : {});
+  // The upstream is on loopback: the local-destination guard is lifted unless a
+  // test says otherwise (TERMINUS_PROXY_ALLOW_LOCAL=1).
   const proxy = createProxySource({
     port: 0, ca: CA, store, deviceAllowlist: opts.allow ?? ['127.0.0.1'], excludedCollectorEndpoints: [],
-    tlsPassthrough: opts.passthrough, tlsInterceptOnly: opts.interceptOnly,
+    tlsPassthrough: opts.passthrough, tlsInterceptOnly: opts.interceptOnly, allowLocalDestinations: opts.allowLocal ?? true,
   });
   await proxy.start();
   try { return await fn(proxy, store); } finally { await proxy.stop(); }
@@ -118,6 +123,34 @@ describe('proxy TLS pass-through (TERMINUS_PROXY_PASSTHROUGH)', () => {
       await waitFor(() => store.entries().some((e) => e.status === 200));
       expect(store.entries().every((e) => e.tunnel === undefined && e.method === 'GET')).toBe(true);
     });
+  }, 30_000);
+
+  it('refuses a disallowed client BEFORE the dial: the upstream never sees a TCP connection', async () => {
+    const before = upstream.tcpConnections();
+    await withProxy({ allow: [], passthrough: ['localhost', '127.0.0.1'] }, async (proxy, store) => {
+      // An IP literal is dialled synchronously: a gate that ran after the dial
+      // (on the opened event) would let this TCP connection through.
+      for (const target of [`127.0.0.1:${upstream.port}`, `localhost:${upstream.port}`]) {
+        const r = await tlsThroughProxy(proxy.port, target, 'localhost');
+        expect(r.fp.startsWith('ERR'), target).toBe(true);
+      }
+      await new Promise((res) => setTimeout(res, 200));
+      expect(store.entries()).toHaveLength(0);
+    });
+    expect(upstream.tcpConnections()).toBe(before);
+  }, 30_000);
+
+  it("refuses a pass-through tunnel to the collector machine's loopback unless TERMINUS_PROXY_ALLOW_LOCAL", async () => {
+    const before = upstream.tcpConnections();
+    await withProxy({ passthrough: ['localhost', '127.0.0.1'], allowLocal: false }, async (proxy, store) => {
+      for (const target of [`localhost:${upstream.port}`, `127.0.0.1:${upstream.port}`]) {
+        const r = await tlsThroughProxy(proxy.port, target, 'localhost');
+        expect(r.fp.startsWith('ERR'), target).toBe(true);
+      }
+      await new Promise((res) => setTimeout(res, 200));
+      expect(store.entries()).toHaveLength(0);
+    });
+    expect(upstream.tcpConnections()).toBe(before);
   }, 30_000);
 
   it('is not an open relay: a client outside the allowlist cannot use a pass-through tunnel', async () => {

@@ -10,11 +10,11 @@ import { buildEntryInput, normalizeWsFrame, epochOf, type ProxyIds } from './nor
 import { log } from '../log.js';
 import { redactUrl } from '../redactor.js';
 import type { EntryInput, TunnelInfo } from '../types.js';
-import { createRawStreamCapture, type RawVerdict } from './rawStreams.js';
+import { createRawStreamCapture } from './rawStreams.js';
 import type { RulesStore } from '../rulesStore.js';
 import { createRuleRunner, ruleEntryFields, type RuleEffects } from './rules.js';
 import { isMetadataHost } from '../netAddr.js';
-import { createMetadataResolver, type Lookup } from './destGuard.js';
+import { createDestGuard, createMetadataResolver, type Lookup } from './destGuard.js';
 
 // A collector-internal endpoint the proxy must NOT inspect: its TLS is tunnelled
 // raw (so the device keeps seeing the collector's own pinned certificate, never a
@@ -49,10 +49,17 @@ export type ProxySourceOptions = {
   tlsPassthrough?: string[];
   tlsInterceptOnly?: string[];
   // U7 (see rawStreams.ts): relay and record non-HTTP TCP/TLS streams inside a
-  // CONNECT/SOCKS tunnel (default on), and accept SOCKS v4/v5 on the same port
+  // CONNECT/SOCKS tunnel (default off; TERMINUS_PROXY_RAW_STREAMS=1; off, such
+  // traffic is closed as in 0.2), and accept SOCKS v4/v5 on the same port
   // (default off; TERMINUS_PROXY_SOCKS=1).
   rawStreams?: boolean;
   socks?: boolean;
+  // Let raw streams, TLS tunnels and SOCKS reach loopback, unspecified,
+  // link-local and the collector's own addresses (default off;
+  // TERMINUS_PROXY_ALLOW_LOCAL=1). The metadata range is refused regardless.
+  allowLocalDestinations?: boolean;
+  // The collector's own addresses for that check (default: every interface).
+  ownAddresses?: () => Iterable<string>;
   // U6: the admin's interception rules, read per request (absent: none). They
   // apply only to intercepted HTTP from an allowed client, never to a
   // collector-internal endpoint or a raw TLS tunnel (see ./rules.ts).
@@ -127,7 +134,6 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
   const userPassthrough = options.tlsPassthrough ?? [];
   const interceptOnly = options.tlsInterceptOnly ?? [];
   if (userPassthrough.length && interceptOnly.length) throw new Error('proxy: tlsPassthrough and tlsInterceptOnly cannot both be set');
-  const userTlsMode = userPassthrough.length > 0 || interceptOnly.length > 0;
   const collectorHosts = new Set(excludedCollectorEndpoints.map((e) => e.host));
   const sessionId = randomUUID();
   const allow = new Set(deviceAllowlist.map(normalizeIp));
@@ -203,15 +209,25 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     return false;
   };
 
-  // U7: the raw stream capture shares the same access decision. A raw relay to a
-  // collector-internal endpoint, or a TLS tunnel to a collector host (the U5 rule),
-  // is relayed but never recorded; otherwise the metadata destination and a client
-  // outside the allowlist are refused.
+  // U7 + 0.3.0 review: the pre-dial gate for every relay mockttp makes itself,
+  // raw streams and TLS pass-through tunnels (whatever carried them: CONNECT or
+  // SOCKS). A collector-internal endpoint is tunnelled on purpose: relayed to the
+  // host the device dialled, never refused, never recorded. Otherwise a client
+  // outside the allowlist and a refused destination (destGuard.ts) are closed
+  // before any upstream connection, and a name is dialled at its checked address.
+  // A TLS tunnel to a collector host on another port is checked like any other
+  // destination, and never recorded (the U5 rule).
+  const rawEnabled = options.rawStreams === true;
+  const allowLocal = options.allowLocalDestinations === true;
+  const destGuard = createDestGuard({ allowLocal, lookup: options.lookup, ownAddresses: options.ownAddresses });
   const rawStreams = createRawStreamCapture({
-    store, generation, deviceIdOf, newRecordId, normalizeIp,
-    classify(ip, host, p, type): RawVerdict {
-      if (type === 'tls' ? collectorHosts.has(host) : isExcludedDest({ hostname: host, port: p })) return 'skip';
-      return shouldReject({ remoteIpAddress: ip, destination: { hostname: host, port: p } }) ? 'refuse' : 'record';
+    store, generation, deviceIdOf, newRecordId, normalizeIp, recordSessions: rawEnabled,
+    async gate(ip, host, p, type) {
+      if (isExcludedDest({ hostname: host, port: p })) return { verdict: 'skip', dialHost: host };
+      if (!isAllowedClient(ip)) return { verdict: 'refuse', reason: 'client not in the allowlist' };
+      const d = await destGuard.check(host);
+      if (!d.ok) return { verdict: 'refuse', reason: d.reason };
+      return { verdict: type === 'tls' && collectorHosts.has(host) ? 'skip' : 'record', dialHost: d.address };
     },
   });
 
@@ -336,24 +352,22 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     // ---- Raw TLS tunnels (U5) --------------------------------------------
     // A TLS connection mockttp passes through WITHOUT interception (a pass-through
     // host, any host outside the intercept-only list, or a collector-internal host)
-    // never reaches the HTTP gate above, so the access boundary is applied here: a
-    // client outside the allowlist, or a tunnel to the metadata address, is closed
-    // as soon as mockttp reports it (before the upstream can answer), so a
-    // pass-through host is never an open relay. Collector-internal tunnels keep
-    // their pre-U5 behaviour: never refused here, never recorded.
+    // never reaches the HTTP gate above. Its access boundary is the pre-dial gate
+    // (rawStreams' passthroughSocket wrapper, mandatory: start() fails without
+    // it): a client outside the allowlist or a refused destination is closed
+    // before mockttp dials, so these events only ever describe admitted tunnels.
+    // `rawStreams.attach` is subscribed first: it restores the host name the
+    // client asked for when the gate handed mockttp a resolved address.
+    // Collector-internal tunnels keep their pre-U5 behaviour: never recorded.
     // A recorded tunnel is a `CONNECT` entry (no headers/bodies; nothing inside the
     // tunnel is visible) whose `tunnel` field carries host, port, SNI and, at close,
     // the client connection's byte counts. It is in flight (status null) while open
     // and gets status 200 and its duration when it closes.
+    await rawStreams.attach(s);
     await s.on('tls-passthrough-opened', (e: TlsPassthroughEvent) => {
       const dest = e.destination;
-      if (collectorHosts.has(dest.hostname)) return;
+      if (collectorHosts.has(dest.hostname) || isExcludedDest(dest)) return;
       const sock = clientSockets.get(sockKey(e.remoteIpAddress, e.remotePort)) ?? null;
-      if (isMetadataHost(dest.hostname) || !isAllowedClient(e.remoteIpAddress)) {
-        log.warn('proxy: refused TLS tunnel', dest.hostname, normalizeIp(e.remoteIpAddress));
-        sock?.destroy();
-        return;
-      }
       const host = dest.hostname;
       const url = `https://${host.includes(':') ? `[${host}]` : host}:${dest.port}`;
       if (!store.admitScope(url)) return;
@@ -363,7 +377,6 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
       if (store.addEntryInput(tunnelEntry(ids, url, info))) tunnels.set(e.id, { ids, url, info, sock });
     });
-    await rawStreams.attach(s);
     await s.on('tls-passthrough-closed', (e: TlsPassthroughEvent) => {
       const t = tunnels.get(e.id);
       if (!t) return;
@@ -419,19 +432,21 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
         ...(raw ? { passthrough: ['unknown-protocol' as const] } : {}),
         ...(options.socks ? { socks: true } : {}),
       });
-      // Raw passthrough only with its access gate in place (fail closed).
-      server = build(options.rawStreams !== false);
-      if (options.rawStreams !== false && !rawStreams.install(server)) {
-        log.warn('proxy: cannot gate raw streams in this mockttp version; non-HTTP traffic will not be relayed');
-        server = build(false);
+      // Every relay mockttp dials itself (TLS tunnels always exist: the
+      // collector's own hosts; raw streams when on) goes through the pre-dial
+      // gate. Without it the proxy would relay ungated: refuse to start.
+      server = build(rawEnabled);
+      if (!rawStreams.install(server)) {
+        server = null;
+        throw new Error('proxy: cannot gate TLS tunnels and raw streams in this mockttp version (no passthroughSocket); refusing to start');
       }
       await server.start(port);
       actualPort = server.port;
       // Observe the client TCP sockets (first sighting wins: mockttp re-emits
-      // `connection` for the same socket after a CONNECT). This reaches into
-      // mockttp's listener because it exposes no socket for a raw tunnel; when that
-      // is impossible and user TLS modes are on, refuse to start (fail closed:
-      // without it a pass-through host would be an open relay).
+      // `connection` for the same socket after a CONNECT), for the byte counts of a
+      // recorded tunnel. This reaches into mockttp's listener because it exposes no
+      // socket for a raw tunnel; access control does not depend on it (the gate
+      // above runs before the dial).
       const raw = (server as unknown as { server?: { prependListener?: unknown } }).server;
       if (raw && typeof raw.prependListener === 'function') {
         (raw as unknown as net.Server).prependListener('connection', (sock: net.Socket) => {
@@ -440,9 +455,6 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
           clientSockets.set(key, sock);
           sock.once('close', () => { if (clientSockets.get(key) === sock) clientSockets.delete(key); });
         });
-      } else if (userTlsMode) {
-        const s = server; server = null; await s.stop();
-        throw new Error('proxy: cannot observe client connections in this mockttp version; TLS pass-through modes are unavailable');
       } else {
         log.warn('proxy: cannot observe client connections; tunnel byte counts are unavailable');
       }
@@ -451,6 +463,8 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       if (userPassthrough.length) log.info(`proxy: TLS pass-through (not intercepted): ${userPassthrough.join(', ')}`);
       if (interceptOnly.length) log.info(`proxy: TLS intercept-only (every other host is tunnelled): ${interceptOnly.join(', ')}`);
       if (options.socks) log.info('proxy: SOCKS v4/v5 accepted on the same port');
+      if (rawEnabled) log.info('proxy: raw TCP/TLS streams are relayed and recorded (TERMINUS_PROXY_RAW_STREAMS=1)');
+      if (allowLocal) log.warn("proxy: TERMINUS_PROXY_ALLOW_LOCAL=1: tunnels may reach this machine's loopback, link-local and own addresses");
     },
     async stop() {
       const s = server; server = null;

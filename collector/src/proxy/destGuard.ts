@@ -80,7 +80,11 @@ export function createDestGuard(opts: DestGuardOptions): DestGuard {
         const why = refuseAddress(a);
         if (why) return { ok: false, reason: `resolves to ${why}` };
       }
-      return { ok: true, address: parseIpLiteral(addresses[0])?.address ?? addresses[0] };
+      // One address is dialled (mockttp takes a single host): IPv4 first, the
+      // usual LAN reachability, since there is no happy-eyeballs fallback here.
+      const lits = addresses.map(parseIpLiteral).filter((x) => x != null);
+      const pick = lits.find((x) => x.family === 4) ?? lits[0];
+      return pick ? { ok: true, address: pick.address } : { ok: false, reason: 'dns returned no usable address' };
     },
   };
 }

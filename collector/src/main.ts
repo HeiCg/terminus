@@ -263,14 +263,18 @@ async function boot() {
         port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow, rules,
         ...(tlsMode.mode === 'passthrough' ? { tlsPassthrough: tlsMode.hosts } : {}),
         ...(tlsMode.mode === 'intercept-only' ? { tlsInterceptOnly: tlsMode.hosts } : {}),
-        // U7: SOCKS v4/v5 on the proxy port, opt-in (raw stream capture is always on).
+        // U7: SOCKS v4/v5 on the proxy port and raw TCP/TLS stream capture, both
+        // opt-in. Tunnels never reach this machine's own loopback, link-local or
+        // interface addresses unless PROXY_ALLOW_LOCAL=1 (metadata: never).
         socks: env('PROXY_SOCKS') === '1',
+        rawStreams: env('PROXY_RAW_STREAMS') === '1',
+        allowLocalDestinations: env('PROXY_ALLOW_LOCAL') === '1',
       });
       await proxy.start();
       log.info(`proxy CA (copy to QA device, trust as user CA): ${ca.certPath}`);
       if (allow.length === 0) log.warn('proxy: TERMINUS_PROXY_ALLOW is empty; every client will be rejected. Set it to the QA device IP(s).');
     } else {
-      for (const name of ['PROXY_PASSTHROUGH', 'PROXY_INTERCEPT_ONLY', 'PROXY_SOCKS']) {
+      for (const name of ['PROXY_PASSTHROUGH', 'PROXY_INTERCEPT_ONLY', 'PROXY_SOCKS', 'PROXY_RAW_STREAMS', 'PROXY_ALLOW_LOCAL']) {
         if (env(name) != null) log.warn(`${envName(name)} is set but the proxy is off (${envName('PROXY')} is not 1); ignoring it`);
       }
     }

@@ -76,7 +76,8 @@ async function withProxy<T>(
   const rs = new RulesStore(rules(list));
   const proxy = createProxySource({
     port: 0, ca: CA, store, deviceAllowlist: opts.allow ?? ['127.0.0.1'], excludedCollectorEndpoints: opts.excluded ?? [],
-    tlsPassthrough: opts.passthrough, rules: rs,
+    // The TLS upstream is on loopback (TERMINUS_PROXY_ALLOW_LOCAL=1).
+    tlsPassthrough: opts.passthrough, rules: rs, allowLocalDestinations: true,
   });
   await proxy.start();
   try { return await fn(proxy, store, rs); } finally { await proxy.stop(); }

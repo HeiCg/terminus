@@ -50,14 +50,23 @@ async function waitFor(pred: () => boolean, ms = 4000): Promise<void> {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function withProxy<T>(
-  opts: { allow?: string[]; passthrough?: string[]; scope?: ScopeConfig; socks?: boolean },
-  fn: (p: ProxySource, store: Store) => Promise<T>,
-): Promise<T> {
+type ProxyOpts = {
+  allow?: string[]; passthrough?: string[]; scope?: ScopeConfig; socks?: boolean;
+  // Raw streams are opt-in (TERMINUS_PROXY_RAW_STREAMS); every upstream here is
+  // on loopback, so the local-destination guard is lifted unless a test says not.
+  raw?: boolean | 'default'; allowLocal?: boolean;
+  excluded?: { host: string; port: number }[];
+  lookup?: (h: string) => Promise<{ address: string; family: number }[]>;
+  own?: string[];
+};
+
+async function withProxy<T>(opts: ProxyOpts, fn: (p: ProxySource, store: Store) => Promise<T>): Promise<T> {
   const store = new Store(opts.scope ? { scope: opts.scope } : {});
   const proxy = createProxySource({
-    port: 0, ca: CA, store, deviceAllowlist: opts.allow ?? ['127.0.0.1'], excludedCollectorEndpoints: [],
+    port: 0, ca: CA, store, deviceAllowlist: opts.allow ?? ['127.0.0.1'], excludedCollectorEndpoints: opts.excluded ?? [],
     tlsPassthrough: opts.passthrough, socks: opts.socks,
+    ...(opts.raw === 'default' ? {} : { rawStreams: opts.raw ?? true }), allowLocalDestinations: opts.allowLocal ?? true,
+    lookup: opts.lookup, ...(opts.own ? { ownAddresses: () => opts.own! } : {}),
   });
   await proxy.start();
   try { return await fn(proxy, store); } finally { await proxy.stop(); }
@@ -235,6 +244,83 @@ describe('raw stream capture: access boundary and scope', () => {
       await sleep(150);
       expect(store.wsSessions()).toHaveLength(0);
       expect(store.scopeStatus().dropped).toEqual({ excluded: 0, notIncluded: 1 });
+    });
+  }, 30_000);
+});
+
+// 0.3.0 review: raw streams are opt-in, and a relay never reaches the collector
+// machine's own services unless TERMINUS_PROXY_ALLOW_LOCAL=1.
+describe('raw streams: opt-in and the local-destination guard', () => {
+  // A tunnel the proxy refuses (or does not relay) closes without an echo; the
+  // upstream never sees a connection.
+  async function expectNotRelayed(opts: ProxyOpts, target: string, via: 'connect' | 'socks' = 'connect'): Promise<void> {
+    const before = echo.connections();
+    await withProxy(opts, async (proxy, store) => {
+      let sock: net.Socket;
+      if (via === 'socks') {
+        const [host, port] = [target.slice(0, target.lastIndexOf(':')), Number(target.slice(target.lastIndexOf(':') + 1))];
+        const r = await socks5(proxy.port, host, port);
+        if (r.reply[0] !== 5 || r.reply[1] !== 0) { r.sock.destroy(); return; }
+        sock = r.sock;
+      } else sock = await connectTunnel(proxy.port, target);
+      expect(await talk(sock, ['\x01nope'])).not.toContain('E:');
+      await sleep(150);
+      expect(store.wsSessions()).toHaveLength(0);
+    });
+    expect(echo.connections()).toBe(before);
+  }
+
+  it('is off by default: non-HTTP bytes in a tunnel are closed (0.2 behaviour), nothing recorded', async () => {
+    await expectNotRelayed({ raw: 'default' }, `127.0.0.1:${echo.port}`);
+  }, 30_000);
+
+  it('refuses loopback in every spelling unless allowLocal', async () => {
+    for (const host of ['127.0.0.1', '127.1', '2130706433', '[::ffff:127.0.0.1]', 'localhost']) {
+      await expectNotRelayed({ allowLocal: false }, `${host}:${echo.port}`);
+    }
+  }, 60_000);
+
+  it('refuses the unspecified address and loopback through SOCKS too', async () => {
+    await expectNotRelayed({ allowLocal: false }, `0.0.0.0:${echo.port}`);
+    await expectNotRelayed({ allowLocal: false, socks: true }, `127.0.0.1:${echo.port}`, 'socks');
+  }, 30_000);
+
+  it("refuses the collector's own interface addresses", async () => {
+    await withProxy({ allowLocal: false, own: ['192.0.2.55'] }, async (proxy, store) => {
+      const sock = await connectTunnel(proxy.port, '192.0.2.55:5432');
+      const t0 = Date.now();
+      await talk(sock, ['\x01pg']);
+      expect(Date.now() - t0).toBeLessThan(1500); // closed by the gate, not a dial timeout
+      await sleep(100);
+      expect(store.wsSessions()).toHaveLength(0);
+    });
+  }, 30_000);
+
+  it('resolves a name before the dial: refused when it resolves to loopback; dials the checked address when allowed', async () => {
+    const lookup = async (h: string) => (h === 'evil.test' ? [{ address: '127.0.0.1', family: 4 }] : Promise.reject(Object.assign(new Error('nx'), { code: 'ENOTFOUND' })));
+    await expectNotRelayed({ allowLocal: false, lookup }, `evil.test:${echo.port}`);
+    await withProxy({ allowLocal: true, lookup }, async (proxy, store) => {
+      // evil.test exists only in the injected lookup: the relay works only because
+      // the proxy dials the address it checked, not the name.
+      const sock = await connectTunnel(proxy.port, `evil.test:${echo.port}`);
+      expect(await talk(sock, ['\x01hi'])).toBe('E:\x01hi');
+      await waitFor(() => store.wsSessions().some((s) => s.closedAt != null));
+      expect(store.wsSummaryPage(null).items[0]).toMatchObject({ url: `tcp://evil.test:${echo.port}`, stream: { host: 'evil.test' } });
+    });
+  }, 30_000);
+
+  it('the metadata range stays refused with allowLocal', async () => {
+    const lookup = async () => [{ address: '169.254.169.254', family: 4 }];
+    await expectNotRelayed({ allowLocal: true, lookup }, 'evil.test:80');
+    await expectNotRelayed({ allowLocal: true }, 'metadata.google.internal:80');
+  }, 30_000);
+
+  it('a collector-internal endpoint is still relayed (never recorded) with the guard on', async () => {
+    await withProxy({ allowLocal: false, excluded: [{ host: '127.0.0.1', port: echo.port }] }, async (proxy, store) => {
+      const sock = await connectTunnel(proxy.port, `127.0.0.1:${echo.port}`);
+      expect(await talk(sock, ['\x01own'])).toBe('E:\x01own');
+      await sleep(150);
+      expect(store.wsSessions()).toHaveLength(0);
     });
   }, 30_000);
 });
