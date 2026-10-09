@@ -408,7 +408,7 @@ export function createHttpServer(
                 return res.end(JSON.stringify({ error: result.message }));
               }
               res.writeHead(201, { 'content-type': 'application/json' });
-              res.end(JSON.stringify({ key: result.key, status: result.status, durationMs: result.durationMs, error: result.error, stripped: result.stripped }));
+              res.end(JSON.stringify({ key: result.key, status: result.status, durationMs: result.durationMs, error: result.error, stripped: result.stripped, stored: result.stored }));
             }).catch((e) => {
               log.warn('replay', String(e));
               if (!res.headersSent) { res.writeHead(500); res.end('replay failed'); }

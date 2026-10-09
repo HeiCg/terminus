@@ -24,7 +24,8 @@ export type ReplayOverrides = { method?: string; url?: string; headers?: Record<
 export type ReplayRequest = { deviceId: string; id: string; credentials?: ReplayCredentials; overrides?: ReplayOverrides };
 
 export type ReplayResult =
-  | { ok: true; key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null; stripped: string[] }
+  // `stored`: whether the result entry was recorded (false when out of the capture scope).
+  | { ok: true; key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null; stripped: string[]; stored: boolean }
   | { ok: false; code: 400 | 404 | 422; message: string };
 
 // What counts as a credential when stripping: the shared P5 matcher
@@ -228,7 +229,9 @@ export async function performReplay(
     replayOf: { id, credentials, stripped },
     ...redactionMarker(reqMark, resMark),
   };
-  store.addEntryInput(input);
+  // `stored` is false when the capture scope (U5) keeps the result out of the
+  // store: the request was still sent and its outcome is still reported here.
+  const stored = store.addEntryInput(input);
 
-  return { ok: true, key: { deviceId, id: newId }, status: res ? res.status : null, durationMs, error, stripped };
+  return { ok: true, key: { deviceId, id: newId }, status: res ? res.status : null, durationMs, error, stripped, stored };
 }
