@@ -6,6 +6,7 @@
   import MethodTag from '../../components/MethodTag.svelte';
   import KindBadge from '../../components/KindBadge.svelte';
   import SourceDot from '../../components/SourceDot.svelte';
+  import RuleBadge from './RuleBadge.svelte';
 
   type Props = { row: Row; selected: boolean; onselect: (row: Row) => void };
   let { row, selected, onselect }: Props = $props();
@@ -47,6 +48,7 @@
   <span class="c path">
     <span class="badge-slot">{#if row.kind !== 'xhr'}<KindBadge kind={row.kind} />{/if}</span>
     <span class="path-text" title={row.path}>{row.path}</span>
+    {#if row.rules?.length}<RuleBadge rules={row.rules} mocked={row.mocked} />{/if}
   </span>
   <span class="c src"><SourceDot source={row.source} /></span>
   <span class="c size">{fmtBytes(row.size)}</span>

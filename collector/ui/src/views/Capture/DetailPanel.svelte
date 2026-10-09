@@ -13,9 +13,11 @@
   import CurlTab from './CurlTab.svelte';
   import ReplayButton from './ReplayButton.svelte';
   import ReplayEditor from './ReplayEditor.svelte';
-  import { useCache } from '../../lib/context.js';
+  import { useCache, useNav } from '../../lib/context.js';
   import { ReplayDraft, capturedBodyOf } from '../../lib/state/ReplayDraft.svelte.js';
   import TunnelInfo from './TunnelInfo.svelte';
+  import AppliedRules from './AppliedRules.svelte';
+  import { offerRuleSeed } from '../../lib/state/RuleDraft.svelte.js';
 
   type Props = { selection: Selection };
   let { selection }: Props = $props();
@@ -29,6 +31,25 @@
   ];
 
   const cache = useCache();
+  const nav = useNav();
+
+  // U6: open Settings with a new interception rule prefilled from this request
+  // (method, host and path of what the device sent).
+  function createRule(): void {
+    const row = selection.current;
+    if (!row) return;
+    let host = row.host;
+    let path = row.path;
+    try {
+      const u = new URL(row.originalUrl ?? row.url);
+      host = u.hostname;
+      path = u.pathname;
+    } catch {
+      /* keep the row's split */
+    }
+    offerRuleSeed({ method: row.originalMethod ?? row.method, host, path });
+    nav?.go('settings');
+  }
 
   // U4 replay editor: the draft being edited (null = closed). Opening loads the
   // request body first (as Copy as cURL does) so the editor is prefilled with it.
@@ -95,6 +116,7 @@
         <span class="time">{fmtTime(row.startedAt)}</span>
         <button type="button" class="curl-btn" onclick={copyCurl}>Copy as cURL</button>
         {#if !row.tunnel}
+          <button type="button" class="curl-btn rule-btn" onclick={createRule} data-testid="create-rule">Create rule</button>
           <!-- A raw tunnel has no request to re-send. -->
           <ReplayButton deviceId={row.deviceId} id={row.id} onedit={openEditor} editBusy={opening} />
         {/if}
@@ -103,6 +125,9 @@
 
     {#if row.tunnel}
       <div class="tunnel-slot"><TunnelInfo tunnel={row.tunnel} /></div>
+    {/if}
+    {#if row.rules?.length}
+      <div class="rules-slot"><AppliedRules {row} /></div>
     {/if}
 
     <div class="tabs">
@@ -217,6 +242,13 @@
   }
   .tabs {
     padding: 0 8px;
+  }
+  .rules-slot {
+    padding-top: 12px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .rule-btn {
+    margin-left: 0;
   }
   .tunnel-slot {
     padding-top: 12px;

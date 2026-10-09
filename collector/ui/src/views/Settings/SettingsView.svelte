@@ -1,8 +1,10 @@
 <script lang="ts">
   import ScopeCard from './ScopeCard.svelte';
+  import RulesCard from './RulesCard.svelte';
 
-  // Settings (U5): collector-side configuration the admin can change at runtime.
-  // Today that is the capture scope; each card owns its own load/save.
+  // Settings (U5): collector-side configuration the admin can change at runtime:
+  // the capture scope and the proxy's interception rules (U6). Each card owns its
+  // own load/save.
 </script>
 
 <div class="settings">
@@ -10,6 +12,7 @@
     <h1 class="page-title">Settings</h1>
     <div class="cards">
       <ScopeCard />
+      <RulesCard />
     </div>
   </div>
 </div>
