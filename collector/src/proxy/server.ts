@@ -355,7 +355,9 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     // non-allowlisted LAN client's ws:// or post-MITM wss:// upgrade is rejected at
     // the rule, not merely dropped from recording. The passthrough rule below then
     // only ever sees allowed upgrades.
-    await s.forAnyWebSocket().matching((req) => shouldReject(req)).thenCloseConnection();
+    // `.always()`: without it mockttp completes the rule after its first match and
+    // the passthrough below takes every later refused upgrade.
+    await s.forAnyWebSocket().matching((req) => shouldReject(req)).always().thenCloseConnection();
     await s.forAnyWebSocket().thenPassThrough({ ignoreHostHttpsErrors: true });
     // U6: a request a response-phase rule matches takes the passthrough with
     // `beforeResponse` (mockttp buffers those responses); everything else keeps the

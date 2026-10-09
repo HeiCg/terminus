@@ -160,6 +160,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Security: the proxy closed only the FIRST WebSocket upgrade from a client outside
+  `TERMINUS_PROXY_ALLOW` (or to a metadata address); mockttp completed the guard
+  rule after one match, so later refused upgrades reached the passthrough. The
+  guard now matches every time. Affects 0.1.x and 0.2.0 with `TERMINUS_PROXY=1`.
 - mDNS discovery failure is non-fatal: a responder that cannot bind or advertise
   (no multicast on CI, UDP 5353 held by Avahi) logs one warning and the collector
   keeps running. The advertised DNS-SD instance name is sanitized instead of using

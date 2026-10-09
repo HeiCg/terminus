@@ -201,8 +201,12 @@ describe('proxy source — access boundary', () => {
       // Empty allowlist => 127.0.0.1 is not permitted: the WS upgrade is closed and
       // never reaches the upstream ws server (no open WS relay on the LAN).
       await withProxy({ allow: [] }, async (proxy) => {
-        const line = await wsUpgradeThroughProxy(proxy.port, upPort);
-        expect(line).not.toContain('101');
+        // Every refused upgrade is closed, not only the first (the guard rule
+        // must not complete after one match).
+        for (let i = 0; i < 3; i++) {
+          const line = await wsUpgradeThroughProxy(proxy.port, upPort);
+          expect(line).not.toContain('101');
+        }
       });
       await new Promise((r) => setTimeout(r, 150));
       expect(upstreamConns).toBe(0);
