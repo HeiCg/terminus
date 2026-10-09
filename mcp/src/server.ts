@@ -263,12 +263,15 @@ export function createTerminusServer(settings: Settings, opts: ServerOptions = {
   }));
 
   server.registerTool('terminus_ws_sessions', {
-    title: 'Captured WebSocket/SSE sessions',
+    title: 'Captured WebSocket/SSE/stream sessions',
     description:
-      'List captured WebSocket and server-sent-event sessions (most recent last), one line each with ws=<wsId>, device, URL, '
-      + `open/closed state and frame counts. Use terminus_ws_frames with deviceId and wsId to read frames. ${UNTRUSTED_NOTE}`,
+      'List captured WebSocket, server-sent-event and raw TCP/TLS stream sessions (most recent last), one line each with ws=<wsId>, '
+      + 'device, kind (websocket, sse, tcp or tls), URL, open/closed state and frame counts; a stream also shows its sni= and '
+      + '[metadata-only] for a TLS pass-through tunnel (no frames). '
+      + `Use terminus_ws_frames with deviceId and wsId to read frames. ${UNTRUSTED_NOTE}`,
     inputSchema: {
       device: z.string().min(1).optional().describe('Only this raw deviceId (no alias resolution here).'),
+      kind: z.enum(['websocket', 'sse', 'tcp', 'tls']).optional().describe('Only sessions of this kind.'),
       last: z.number().int().min(1).max(200).default(20).describe('How many of the most recent sessions (default 20).'),
     },
     annotations: READ_ONLY,
@@ -276,7 +279,7 @@ export function createTerminusServer(settings: Settings, opts: ServerOptions = {
     let all: WsSummary[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < 100; page++) {
-      const p = await api.getJson<{ items: WsSummary[]; nextCursor: string | null }>(`/api/ws${query({ device: a.device, cursor })}`, signal);
+      const p = await api.getJson<{ items: WsSummary[]; nextCursor: string | null }>(`/api/ws${query({ device: a.device, kind: a.kind, cursor })}`, signal);
       all = all.concat(p.items).slice(-a.last);
       if (!p.nextCursor) break;
       cursor = p.nextCursor;

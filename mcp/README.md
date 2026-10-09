@@ -104,7 +104,7 @@ token.
 | `terminus_entries` | `afterSeq?`, `last?`, `epoch?`, `newOnly?`, `device?`, `externalId?`, `bundleId?`, `method?`, `urlContains?`, `status?`, `source?`, `completed?`, `q?`, `limit?` | A header line (`nextSeq`, `lastSeq`, `epoch`, `gap`, `hasMore`) and one compact line per entry. Without `afterSeq` or `last`, the last 20. |
 | `terminus_entry` | `deviceId`, `id`, `bodies?` (`none`, `request`, `response`, `both`; default `none`), `maxBodyBytes?` (default 16384) | Method, URL, status, timings, headers, the redaction marker, and optionally the bodies. |
 | `terminus_wait` | `afterSeq`, `epoch?`, `timeoutMs?` (default 10000, max 30000), `newOnly?` (default true), `completed?` (default true), scope and filters, `q?`, `limit?` | The matching entries, or on timeout the `nearMisses` and the `nextSeq` to chain with. |
-| `terminus_ws_sessions` | `device?`, `last?` (default 20) | One line per WebSocket/SSE session. |
+| `terminus_ws_sessions` | `device?`, `kind?` (`websocket`, `sse`, `tcp`, `tls`), `last?` (default 20) | One line per WebSocket/SSE session or raw TCP/TLS stream session, with its kind (a stream also shows `sni=` and `[metadata-only]` for a TLS pass-through tunnel). |
 | `terminus_ws_frames` | `deviceId`, `wsId`, `after?`, `limit?` (default 50), `maxFrameBytes?` (default 2048) | One line per frame with its payload. |
 | `terminus_replay` | `deviceId`, `id`, `overrides?` (`method`, `url`, `headers`, `body` or `bodyBase64`), `withCredentials?` (default false) | Only registered with the admin token and the opt-in. The new entry's line. |
 
