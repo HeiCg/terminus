@@ -122,3 +122,40 @@ export async function fetchPairing(): Promise<PairingInfo | null> {
 // Export links are plain hrefs the browser follows with the cookie attached; the
 // device scope is appended by the caller (a later task's toolbar).
 export const exportUrl = (kind: 'har' | 'json'): string => (kind === 'har' ? '/export.har' : '/export.json');
+
+// The capture scope (U5) as GET/PUT /api/scope report it: the active host
+// patterns and how many records each rule kept out since boot.
+export type ScopeStatus = {
+  include: string[]; exclude: string[];
+  dropped: { excluded: number; notIncluded: number };
+};
+
+export async function fetchScope(): Promise<ScopeStatus | null> {
+  try {
+    const r = await fetch('/api/scope', SAME_ORIGIN);
+    if (!r.ok) return null;
+    return await r.json() as ScopeStatus;
+  } catch { return null; }
+}
+
+// Replace the scope. A 400 carries the server's validation message (which pattern
+// is wrong) so the panel can show it; any other failure is a generic error.
+export async function saveScope(cfg: { include: string[]; exclude: string[] }): Promise<{ ok: true; scope: ScopeStatus } | { ok: false; message: string }> {
+  try {
+    const r = await fetch('/api/scope', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin', body: JSON.stringify(cfg),
+    });
+    if (r.ok) return { ok: true, scope: await r.json() as ScopeStatus };
+    if (r.status === 400) {
+      const body = await r.json().catch(() => null) as { message?: string } | null;
+      return { ok: false, message: body?.message ?? 'invalid scope' };
+    }
+    return { ok: false, message: `save failed (${r.status})` };
+  } catch { return { ok: false, message: 'save failed (collector unreachable)' }; }
+}
+
+// One pattern per line (commas also split), blanks dropped: the textarea form of
+// a pattern list.
+export const parsePatternLines = (text: string): string[] =>
+  text.split(/[\n,]/).map((s) => s.trim()).filter((s) => s !== '');

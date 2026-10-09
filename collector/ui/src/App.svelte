@@ -8,11 +8,11 @@
   import Banner from './components/Banner.svelte';
   import CommandPalette from './components/CommandPalette.svelte';
   import ShortcutsSheet from './components/ShortcutsSheet.svelte';
-  import EmptyState from './components/EmptyState.svelte';
   import Login from './views/Login.svelte';
   import CaptureView from './views/Capture/CaptureView.svelte';
   import SocketsView from './views/Sockets/SocketsView.svelte';
   import DevicesView from './views/Devices/DevicesView.svelte';
+  import SettingsView from './views/Settings/SettingsView.svelte';
 
   // The runtime singletons are seeded into context at mount (main.ts / the test
   // harness); the shell just reads what it needs. Filters/Selection are now
@@ -25,10 +25,6 @@
   const clock = useClock();
   const filters = useFilters();
   const selection = useSelection();
-
-  // Settings lands in a later task; until then that tab shows a placeholder so the
-  // switch is total and the shell renders.
-  const placeholder = 'Settings — coming soon';
 
   let paletteOpen = $state(false);
   let shortcutsOpen = $state(false);
@@ -101,7 +97,7 @@
           {:else if nav.view === 'devices'}
             <DevicesView />
           {:else}
-            <EmptyState title={placeholder} />
+            <SettingsView />
           {/if}
         </main>
       </div>
