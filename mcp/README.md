@@ -101,12 +101,18 @@ token.
 | --- | --- | --- |
 | `terminus_status` | none | Version, `epoch`, `lastSeq`, `now`, paused, connected devices, retention counters. |
 | `terminus_devices` | `externalId?`, `bundleId?` | One line per device: id, platform, app, bundle id, external id, last seen. |
-| `terminus_entries` | `afterSeq?`, `last?`, `epoch?`, `newOnly?`, `device?`, `externalId?`, `bundleId?`, `method?`, `urlContains?`, `status?`, `source?`, `completed?`, `limit?` | A header line (`nextSeq`, `lastSeq`, `epoch`, `gap`, `hasMore`) and one compact line per entry. Without `afterSeq` or `last`, the last 20. |
+| `terminus_entries` | `afterSeq?`, `last?`, `epoch?`, `newOnly?`, `device?`, `externalId?`, `bundleId?`, `method?`, `urlContains?`, `status?`, `source?`, `completed?`, `q?`, `limit?` | A header line (`nextSeq`, `lastSeq`, `epoch`, `gap`, `hasMore`) and one compact line per entry. Without `afterSeq` or `last`, the last 20. |
 | `terminus_entry` | `deviceId`, `id`, `bodies?` (`none`, `request`, `response`, `both`; default `none`), `maxBodyBytes?` (default 16384) | Method, URL, status, timings, headers, the redaction marker, and optionally the bodies. |
-| `terminus_wait` | `afterSeq`, `epoch?`, `timeoutMs?` (default 10000, max 30000), `newOnly?` (default true), `completed?` (default true), scope and filters, `limit?` | The matching entries, or on timeout the `nearMisses` and the `nextSeq` to chain with. |
+| `terminus_wait` | `afterSeq`, `epoch?`, `timeoutMs?` (default 10000, max 30000), `newOnly?` (default true), `completed?` (default true), scope and filters, `q?`, `limit?` | The matching entries, or on timeout the `nearMisses` and the `nextSeq` to chain with. |
 | `terminus_ws_sessions` | `device?`, `last?` (default 20) | One line per WebSocket/SSE session. |
 | `terminus_ws_frames` | `deviceId`, `wsId`, `after?`, `limit?` (default 50), `maxFrameBytes?` (default 2048) | One line per frame with its payload. |
-| `terminus_replay` | `deviceId`, `id`, `overrides?` (`method`, `url`, `headers`, `body`), `withCredentials?` (default false) | Only registered with the admin token and the opt-in. The new entry's line. |
+| `terminus_replay` | `deviceId`, `id`, `overrides?` (`method`, `url`, `headers`, `body` or `bodyBase64`), `withCredentials?` (default false) | Only registered with the admin token and the opt-in. The new entry's line. |
+
+`q` is an expression in the collector's [filter language](../docs/read-api.md#filter-language)
+(for example `status >= 500 or (error)`), ANDed with the other filters. It is sent
+only to a collector that advertises the `query` capability; an older one gets a
+tool error instead of an unfiltered answer. `bodyBase64` (raw bytes, binary-safe)
+likewise needs `replay-bytes`.
 
 An entry line looks like:
 

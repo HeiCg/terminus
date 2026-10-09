@@ -382,7 +382,8 @@ export function createHttpServer(
         // needs an exact Origin; a bearer CLI need not. The
         // JSON body is bounded (an override body can be sizeable, but not unbounded)
         // and read fully before the replay runs. Codes: 201 (key of the new entry),
-        // 400 (malformed body), 404 (unknown entry), 422 (nothing replayable).
+        // 400 (malformed body), 404 (unknown entry), 413 (override body over the
+        // per-body cap), 422 (nothing replayable).
         if (u.pathname === '/api/replay') {
           if (method !== 'POST') { res.writeHead(405); return res.end(); }
           if (!requireMutation(res, origin, auth)) return;

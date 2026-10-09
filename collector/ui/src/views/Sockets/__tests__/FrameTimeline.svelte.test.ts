@@ -181,3 +181,23 @@ describe('FrameTimeline', () => {
     expect(sockets.currentMatchSeq).toBe(0);
   });
 });
+
+describe('FrameTimeline binary frames (U4)', () => {
+  it('an expanded binary frame shows its bytes as a hex dump via the frame body route', async () => {
+    const bin: BodyRef = { state: 'captured', sha256: 'hb', size: 4, storedSize: 4, encoding: 'binary', omitted: null };
+    const api = {
+      fetchFrames: vi.fn(async () => page([frame(0, { binary: true, body: bin })])),
+      fetchFrameBody: vi.fn(async () => ({ kind: 'ok', text: 'AP8QgA==' }) as const), // 00 ff 10 80
+    };
+    const sockets = new Sockets({ store, cache, api });
+    store.apply([{ type: 'ws', session: ws({ wsId: 'w1' }) }]);
+    await sockets.select('w1');
+    renderTimeline(sockets);
+
+    await fireEvent.click(screen.getByTestId('ws-frame-0'));
+    expect(api.fetchFrameBody).toHaveBeenCalledWith('d1', 'w1', 0);
+    expect(await screen.findByTestId('frame-body-hex')).toBeInTheDocument();
+    expect(screen.getByTestId('hex-row')).toHaveTextContent('00000000 00 ff 10 80');
+    expect(screen.queryByTestId('frame-body-text')).toBeNull();
+  });
+});

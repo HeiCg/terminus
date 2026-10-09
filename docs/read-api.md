@@ -97,7 +97,7 @@ restart.
 
 ```json
 {"status":"ok","version":"0.2.0","apiVersion":1,
- "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query"]}
+ "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes"]}
 ```
 
 ```bash
@@ -117,6 +117,7 @@ two fields also appear on `GET /api/status`.
 | `wait` | `GET /api/entries/wait`. |
 | `redaction-marker` | The `redacted` field on entry summaries, details and exports. |
 | `query` | The `q` parameter: a [filter-language](#filter-language) expression on `afterSeq`, `last` and `wait`. |
+| `replay-bytes` | Binary-safe [replay](#post-apireplay-admin): `overrides.bodyBase64`, a captured binary request body re-sent without an override, binary responses stored as bytes, and the `413` override-body cap. |
 
 To feature-detect, call `GET /health` once at startup. A collector older than
 0.2.0 answers without `apiVersion` and `capabilities` and has none of the features
@@ -430,6 +431,42 @@ its frames do not.) The routes keep the legacy paging:
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8787/api/ws?device=com.acme.app-Pixel"
+```
+
+## `POST /api/replay` (admin)
+
+Re-sends a captured request from the collector's machine and stores the result as
+a new `replay` entry. It needs the admin token (the reader token gets `403
+forbidden_scope`) and leaves the machine: read the
+[replay section of security.md](security.md#replay-re-sends-captured-requests)
+first.
+
+```json
+{"deviceId":"com.acme.app-Pixel","id":"req-42","credentials":"strip",
+ "overrides":{"method":"PUT","url":"https://api.acme.test/v1/x",
+              "headers":{"content-type":"application/octet-stream"},
+              "bodyBase64":"AAEC/w=="}}
+```
+
+- `credentials`: `strip` (default) or `keep`.
+- `overrides` (all optional): `method`, `url`, `headers` (replaces the whole
+  captured header map), and the body as **one** of `body` (a UTF-8 string) or
+  `bodyBase64` (standard base64 of raw bytes). Both at once is a `400`, and so is a
+  `bodyBase64` that is not base64.
+- Without a body override the captured request body is re-sent as stored, text or
+  binary. A body that was not retained (`size`, `budget`, `not-captured`) answers
+  `422`: send `body` or `bodyBase64`.
+- An override body over the per-body cap (1 MiB, measured in bytes) answers `413`.
+- `201` returns `{ key: {deviceId, id}, status, durationMs, error, stripped }`; the
+  new entry is readable like any other. Both sides are stored as bytes: text is
+  redacted (and sets `redacted`), binary content (a binary `Content-Type`, a NUL
+  byte, or invalid UTF-8) is kept verbatim and served by the body route as
+  `application/octet-stream`.
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"deviceId":"com.acme.app-Pixel","id":"req-42","overrides":{"bodyBase64":"AAEC/w=="}}' \
+  http://127.0.0.1:8787/api/replay
 ```
 
 ## `GET /api/entries/wait`

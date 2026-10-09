@@ -5,18 +5,35 @@ import { Store } from '../src/store.js';
 import { performReplay, stripCredentials } from '../src/replay.js';
 import { configureRedaction } from '../src/security/sensitiveNames.js';
 import { createCollectorHarness, type CollectorHarness } from './fixtures/harness.js';
-import type { Entry } from '../src/types.js';
+import type { Entry, EntryInput } from '../src/types.js';
+import { PER_BODY_MAX } from '../src/atlantis/decode.js';
+import { CAPABILITIES } from '../src/version.js';
 
 // A local target the replay fetch actually hits: it echoes the method, url, a
 // chosen request header and the request body back as JSON so a test can assert
 // what the collector re-sent. `/boom` closes the socket to force a network error.
 let target: http.Server;
 let targetUrl = '';
-const seen: { method: string; url: string; auth: string | null; cookie: string | null; headers: http.IncomingHttpHeaders; body: string }[] = [];
+const seen: { method: string; url: string; auth: string | null; cookie: string | null; headers: http.IncomingHttpHeaders; body: string; raw: Buffer }[] = [];
+// Fixed non-UTF-8 bytes the `/octet` route answers with (a NUL and invalid UTF-8).
+const OCTET = Buffer.from([0x00, 0xff, 0xfe, 0x10, 0x80, 0x41, 0x42, 0x00]);
+// UTF-8-valid, NUL-free bytes labelled as protobuf: they must be stored verbatim,
+// never run through the text redactor (which would rewrite the `token=` value).
+const PROTO_TEXTLIKE = Buffer.from('token="abcdef"', 'utf8');
 
 beforeAll(async () => {
   target = http.createServer((req, res) => {
     if (req.url === '/boom') { req.socket.destroy(); return; }
+    if (req.url === '/octet') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(OCTET);
+      return;
+    }
+    if (req.url === '/proto') {
+      res.writeHead(200, { 'content-type': 'application/x-protobuf' });
+      res.end(PROTO_TEXTLIKE);
+      return;
+    }
     if (req.url === '/login') {
       // A response carrying credentials on both channels the redactor covers.
       res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'sid=s3cr3t', 'x-request-id': 'rid-1' });
@@ -26,8 +43,14 @@ beforeAll(async () => {
     const chunks: Buffer[] = [];
     req.on('data', (d) => chunks.push(d));
     req.on('end', () => {
-      const body = Buffer.concat(chunks).toString('utf8');
-      seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization ?? null, cookie: req.headers.cookie ?? null, headers: req.headers, body });
+      const raw = Buffer.concat(chunks);
+      const body = raw.toString('utf8');
+      seen.push({ method: req.method ?? '', url: req.url ?? '', auth: req.headers.authorization ?? null, cookie: req.headers.cookie ?? null, headers: req.headers, body, raw });
+      if (req.url === '/bin-echo') {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(raw);
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ method: req.method, url: req.url, echoed: body }));
     });
@@ -46,6 +69,19 @@ function entry(over: Partial<Entry> = {}): Entry {
     status: 200, statusText: 'OK', responseHeaders: { 'content-type': 'application/json' },
     responseBody: '{"ok":true}', responseBodySize: 11, responseBodyOmitted: null,
     durationMs: 42, error: null, ...over,
+  };
+}
+
+// A captured exchange whose request body is binary (stored as bytes, `binary`).
+function binaryInput(bytes: Uint8Array, over: Partial<EntryInput> = {}): EntryInput {
+  return {
+    id: 'b1', deviceId: 'd1', source: 'xhr', startedAt: 1_700_000_000_000,
+    method: 'POST', url: `${targetUrl}/bin-echo`,
+    requestHeaders: { 'content-type': 'application/octet-stream' },
+    requestBytes: bytes, requestBodySize: bytes.length, requestBodyOmitted: 'binary',
+    status: 200, statusText: 'OK', responseHeaders: { 'content-type': 'application/json' },
+    responseBytes: null, responseBodySize: 0, responseBodyOmitted: null,
+    durationMs: 1, error: null, ...over,
   };
 }
 
@@ -398,5 +434,187 @@ describe('POST /api/replay route (T7.1)', () => {
       body: JSON.stringify({ deviceId: 'd1', id: 'route2' }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+// U4: binary-safe replay. `overrides.bodyBase64` carries raw bytes, a captured
+// binary request body replays as-is, and binary responses are stored as bytes.
+describe('performReplay binary bodies (U4)', () => {
+  it('overrides.bodyBase64 reaches the target byte-exact and the response is stored as bytes', async () => {
+    const store = new Store();
+    store.addEntry(entry({ url: `${targetUrl}/bin-echo` }));
+    const bytes = Buffer.from([0x00, 0x01, 0xff, 0xfe, 0x7f, 0x80, 0x0a, 0x00, 0xc3]);
+    const before = seen.length;
+    const result = await performReplay(store, {
+      deviceId: 'd1', id: 'r1', overrides: { headers: { 'content-type': 'application/octet-stream' }, bodyBase64: bytes.toString('base64') },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Buffer.compare(seen[before].raw, bytes)).toBe(0);
+    const req = store.entryBody('d1', result.key.id, 'request')!;
+    expect(req.state).toBe('captured');
+    expect(req.encoding).toBe('binary');
+    expect(Buffer.compare(Buffer.from(req.bytes!), bytes)).toBe(0);
+    const res = store.entryBody('d1', result.key.id, 'response')!;
+    expect(res.state).toBe('captured');
+    expect(res.encoding).toBe('binary');
+    expect(Buffer.compare(Buffer.from(res.bytes!), bytes)).toBe(0);
+  });
+
+  it('400 when both overrides.body and overrides.bodyBase64 are given', async () => {
+    const store = new Store();
+    store.addEntry(entry());
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1', overrides: { body: 'x', bodyBase64: 'eA==' } });
+    expect(result).toEqual({ ok: false, code: 400, message: 'pass only one of overrides.body and overrides.bodyBase64' });
+  });
+
+  it('400 when overrides.bodyBase64 is not base64', async () => {
+    const store = new Store();
+    store.addEntry(entry());
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1', overrides: { bodyBase64: 'not base64!' } });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe(400);
+  });
+
+  it('413 when an override body is over the per-body cap (bytes, either field)', async () => {
+    const store = new Store();
+    store.addEntry(entry());
+    const big = Buffer.alloc(PER_BODY_MAX + 1, 0x61);
+    const viaB64 = await performReplay(store, { deviceId: 'd1', id: 'r1', overrides: { bodyBase64: big.toString('base64') } });
+    expect(viaB64.ok).toBe(false);
+    if (!viaB64.ok) expect(viaB64.code).toBe(413);
+    const viaText = await performReplay(store, { deviceId: 'd1', id: 'r1', overrides: { body: big.toString('utf8') } });
+    expect(viaText.ok).toBe(false);
+    if (!viaText.ok) expect(viaText.code).toBe(413);
+    // Exactly at the cap is accepted.
+    const atCap = await performReplay(store, { deviceId: 'd1', id: 'r1', overrides: { bodyBase64: Buffer.alloc(PER_BODY_MAX, 0x61).toString('base64') } });
+    expect(atCap.ok).toBe(true);
+  });
+
+  it('a captured binary request body is replayed as-is without an override', async () => {
+    const store = new Store();
+    const bytes = new Uint8Array([0xde, 0xad, 0x00, 0xbe, 0xef, 0xff]);
+    store.addEntryInput(binaryInput(bytes));
+    const before = seen.length;
+    const result = await performReplay(store, { deviceId: 'd1', id: 'b1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Buffer.compare(seen[before].raw, Buffer.from(bytes))).toBe(0);
+    const req = store.entryBody('d1', result.key.id, 'request')!;
+    expect(req.encoding).toBe('binary');
+    expect(Buffer.compare(Buffer.from(req.bytes!), Buffer.from(bytes))).toBe(0);
+  });
+
+  it('an omitted (not retained) request body still answers 422 with a clear message', async () => {
+    const store = new Store();
+    store.addEntryInput(binaryInput(new Uint8Array(0), { requestBytes: null, requestBodyOmitted: 'budget', requestBodySize: 4096 }));
+    const result = await performReplay(store, { deviceId: 'd1', id: 'b1' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe(422);
+    expect(result.message).toContain('budget');
+    expect(result.message).toContain('overrides.bodyBase64');
+  });
+
+  it('a binary response is stored byte-exact with the binary encoding', async () => {
+    const store = new Store();
+    store.addEntry(entry({ method: 'GET', url: `${targetUrl}/octet`, requestHeaders: {}, requestBody: null, requestBodySize: 0 }));
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const res = store.entryBody('d1', result.key.id, 'response')!;
+    expect(res.state).toBe('captured');
+    expect(res.encoding).toBe('binary');
+    expect(Buffer.compare(Buffer.from(res.bytes!), OCTET)).toBe(0);
+    expect(store.entry('d1', result.key.id)!.responseBodySize).toBe(OCTET.length);
+  });
+
+  it('a binary content type is stored verbatim even when its bytes are valid UTF-8', async () => {
+    const store = new Store();
+    store.addEntry(entry({ method: 'GET', url: `${targetUrl}/proto`, requestHeaders: {}, requestBody: null, requestBodySize: 0 }));
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const res = store.entryBody('d1', result.key.id, 'response')!;
+    expect(res.encoding).toBe('binary');
+    expect(Buffer.compare(Buffer.from(res.bytes!), PROTO_TEXTLIKE)).toBe(0);
+    expect(store.entry('d1', result.key.id)!.redacted).toBeUndefined();
+  });
+
+  it('a text response is still redacted and marked', async () => {
+    const store = new Store();
+    store.addEntry(entry({ method: 'GET', url: `${targetUrl}/login`, requestHeaders: { accept: 'application/json' }, requestBody: null, requestBodySize: 0 }));
+    const result = await performReplay(store, { deviceId: 'd1', id: 'r1' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const res = store.entryBody('d1', result.key.id, 'response')!;
+    expect(res.encoding).toBe('utf8');
+    expect(Buffer.from(res.bytes!).toString('utf8')).toBe('{"access_token":"***","user":"u"}');
+    expect(store.entry('d1', result.key.id)!.redacted?.response).toBe(true);
+  });
+
+  it('a text override body is still redacted when stored (bodyBase64 of JSON too)', async () => {
+    const store = new Store();
+    store.addEntry(entry());
+    const json = '{"password":"hunter2"}';
+    const before = seen.length;
+    const result = await performReplay(store, {
+      deviceId: 'd1', id: 'r1',
+      overrides: { headers: { 'content-type': 'application/json' }, bodyBase64: Buffer.from(json).toString('base64') },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(seen[before].body).toBe(json);
+    expect(store.entry('d1', result.key.id)!.requestBody).toBe('{"password":"***"}');
+  });
+});
+
+describe('performReplay protected override headers (U4)', () => {
+  it('an override header equal to the captured value is still stripped (it was not chosen)', async () => {
+    const store = new Store();
+    store.addEntry(credentialEntry());
+    const before = seen.length;
+    const result = await performReplay(store, {
+      deviceId: 'd1', id: 'r1',
+      overrides: { headers: { authorization: 'Bearer secret', 'x-request-id': 'keep-me', 'x-extra': '1' } },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(seen[before].auth).toBeNull();
+    expect(seen[before].headers['x-extra']).toBe('1');
+    expect(result.stripped).toContain('authorization');
+  });
+});
+
+describe('POST /api/replay binary (U4)', () => {
+  it('advertises replay-bytes', () => { expect(CAPABILITIES).toContain('replay-bytes'); });
+
+  let h: CollectorHarness;
+  beforeAll(async () => { h = await createCollectorHarness(); });
+  afterAll(async () => { await h.close(); });
+  const post = (body: unknown) => fetch(`${h.url}/api/replay`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${h.adminToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  it('413 for an override body over the cap, 400 for both body fields', async () => {
+    h.store.addEntry(entry({ id: 'cap1' }));
+    const big = await post({ deviceId: 'd1', id: 'cap1', overrides: { bodyBase64: Buffer.alloc(PER_BODY_MAX + 1).toString('base64') } });
+    expect(big.status).toBe(413);
+    expect(((await big.json()) as { error: string }).error).toContain('cap');
+    const both = await post({ deviceId: 'd1', id: 'cap1', overrides: { body: 'a', bodyBase64: 'YQ==' } });
+    expect(both.status).toBe(400);
+  });
+
+  it('201 for bodyBase64, and the stored binary body reads back over the body route', async () => {
+    h.store.addEntry(entry({ id: 'bin1', url: `${targetUrl}/bin-echo` }));
+    const bytes = Buffer.from([1, 2, 3, 0, 255]);
+    const res = await post({ deviceId: 'd1', id: 'bin1', overrides: { bodyBase64: bytes.toString('base64') } });
+    expect(res.status).toBe(201);
+    const { key } = await res.json() as { key: { id: string } };
+    const body = await fetch(`${h.url}/api/entries/d1/${encodeURIComponent(key.id)}/body?side=response`, { headers: { authorization: `Bearer ${h.adminToken}` } });
+    expect(body.headers.get('content-type')).toBe('application/octet-stream');
+    expect(Buffer.compare(Buffer.from(await body.arrayBuffer()), bytes)).toBe(0);
   });
 });

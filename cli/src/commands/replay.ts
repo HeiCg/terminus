@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { postJson } from '../http.js';
+import { postJson, getJsonOr404 } from '../http.js';
 import { line, jsonLine, type Ctx } from '../context.js';
 import { flagString, flagList, flagBool } from '../args.js';
 import { generalError } from '../errors.js';
@@ -44,8 +44,17 @@ export async function runReplay(ctx: Ctx): Promise<number> {
   if (bodyStr !== undefined && bodyFile !== undefined) throw generalError('pass only one of --body / --body-file');
   if (bodyStr !== undefined) overrides.body = bodyStr;
   else if (bodyFile !== undefined) {
-    try { overrides.body = await readFile(bodyFile, 'utf8'); }
+    // The file's exact bytes travel as base64 (binary-safe, U4). An older
+    // collector would ignore `bodyBase64` and silently replay the captured body,
+    // so the capability is checked first.
+    let bytes: Buffer;
+    try { bytes = await readFile(bodyFile); }
     catch { throw generalError(`cannot read --body-file ${bodyFile}`); }
+    const health = await getJsonOr404<{ capabilities?: string[] }>(ctx.config, '/health');
+    if (!health?.capabilities?.includes('replay-bytes')) {
+      throw generalError('this collector does not support binary replay bodies (capability replay-bytes); upgrade it, or pass the body as text with --body');
+    }
+    overrides.bodyBase64 = bytes.toString('base64');
   }
 
   // Credentials are stripped by default; --with-credentials re-sends them verbatim.

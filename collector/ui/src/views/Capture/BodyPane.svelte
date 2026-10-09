@@ -5,6 +5,8 @@
   import Segmented from '../../components/Segmented.svelte';
   import JsonView from '../../components/JsonView.svelte';
   import OmittedCard from '../../components/OmittedCard.svelte';
+  import HexView from '../../components/HexView.svelte';
+  import { base64ToBytes as decodeBase64, utf8Encode } from '../../lib/bytes.js';
 
   // One side of the exchange, rendered for the Response and Payload tabs alike.
   // `testid` is the container the browser spec reads the rendered body from.
@@ -181,6 +183,19 @@
     setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
+  // U4: the body's bytes for the hex viewer. A binary body is cached as base64
+  // (decoded here); a text body is its UTF-8 bytes. Non-touching peek: this is a
+  // $derived and must not reorder the cache LRU. Null when not resident/decodable.
+  let hexOn = $state(false);
+  const bodyBytes = $derived.by((): Uint8Array | null => {
+    const b = bs;
+    if (b.kind !== 'ok') return null;
+    if (!isBinary && !hexOn) return null; // only decode what is on screen
+    const raw = cache.peek(b.hash);
+    if (raw == null) return null;
+    return b.encoding === 'binary' ? decodeBase64(raw) : utf8Encode(raw);
+  });
+
   const MODES = [
     { id: 'json', label: 'Pretty' },
     { id: 'raw', label: 'Raw' },
@@ -225,10 +240,14 @@
         <button type="button" class="bin-download" onclick={downloadBinary}>Download</button>
       {/if}
     </div>
+    {#if bodyBytes}<HexView bytes={bodyBytes} label="{side} body" />{/if}
   </div>
 {:else if bs.kind === 'ok'}
   <div class="toolbar">
-    <Segmented options={MODES} value={selection.mode} onchange={(m) => (selection.mode = m as 'json' | 'raw')} />
+    {#if !hexOn}
+      <Segmented options={MODES} value={selection.mode} onchange={(m) => (selection.mode = m as 'json' | 'raw')} />
+    {/if}
+    <button type="button" class={['ghost', { on: hexOn }]} aria-pressed={hexOn} onclick={() => (hexOn = !hexOn)}>Hex</button>
     <button type="button" class="ghost" onclick={copy}>Copy</button>
     <button type="button" class="ghost" onclick={download}>Download</button>
     <span class="meta">
@@ -237,7 +256,11 @@
     </span>
   </div>
   <div class="body" data-testid={testid}>
-    <JsonView hash={bs.hash} mode={selection.mode} {cache} />
+    {#if hexOn && bodyBytes}
+      <HexView bytes={bodyBytes} label="{side} body" />
+    {:else}
+      <JsonView hash={bs.hash} mode={selection.mode} {cache} />
+    {/if}
   </div>
 {:else}
   <p class="loading">Loading…</p>
@@ -269,6 +292,10 @@
     cursor: pointer;
   }
   .ghost:hover {
+    color: var(--fg-primary);
+    background: var(--bg-elevated);
+  }
+  .ghost.on {
     color: var(--fg-primary);
     background: var(--bg-elevated);
   }

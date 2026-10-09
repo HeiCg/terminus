@@ -45,6 +45,24 @@ All notable changes to this project are documented here. The format is based on
   candidates, used exclusively and in the listed order.
 - `TERMINUS_OPENSSL`: path to an OpenSSL 3 binary, tried first (before `openssl`
   on `PATH`).
+- Hex viewer in the UI: offset, hex and ASCII columns, 16 bytes per row, rendered
+  4 KiB at a time, with copy as hex or base64. Binary request and response bodies
+  show it under their card (type, size, preview and download stay), any text body
+  gets a Hex toggle, and an expanded binary WebSocket frame shows its bytes.
+- Replay editor in the UI: Edit… beside Replay opens a dialog prefilled from the
+  captured request (method, URL, header rows, and the body as text or as an
+  editable hex grid with insert, delete and hex/base64 paste, plus a byte
+  counter). Send posts only what changed, keeps the credential toggle and its
+  confirming click, and selects the new replay entry. The one-click Replay stays.
+- `POST /api/replay` accepts `overrides.bodyBase64` (raw bytes; `400` together
+  with `overrides.body`). Override bodies are capped at 1 MiB (`413`). New
+  capability `replay-bytes`.
+- `terminus replay --body-file <path>` sends the file's exact bytes as
+  `bodyBase64` (it refuses a collector without `replay-bytes`); `--body` is
+  unchanged.
+- `terminus-mcp`: `terminus_entries` and `terminus_wait` take `q` (a filter
+  expression, sent only to a collector advertising `query`), and `terminus_replay`
+  takes `overrides.bodyBase64`.
 
 ### Changed
 
@@ -61,6 +79,17 @@ All notable changes to this project are documented here. The format is based on
 - Docs and package metadata describe the collector as macOS and Linux, with the
   Linux state directory shown next to the macOS one.
 - CI runs on Node 20, 22 and 24 on Linux and Node 22 on macOS.
+- A captured binary request body is replayed as stored without an override; only
+  a body that was not retained (size, budget, not captured) still answers `422`.
+- Replay responses and request bodies of any content type are stored as bytes:
+  text is still redacted and marked, binary content types (and non-UTF-8 or
+  NUL-bearing payloads) are kept verbatim instead of going through the text
+  redactor.
+- An `overrides.headers` value that repeats the captured value verbatim is no
+  longer protected from the replay credential strip (only values the caller
+  changed are).
+- The UI fetches binary bodies and frames as bytes; they used to be decoded as
+  UTF-8 text, which corrupted them.
 
 ### Fixed
 

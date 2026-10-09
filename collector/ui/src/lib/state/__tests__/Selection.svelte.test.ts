@@ -235,3 +235,42 @@ describe('Selection', () => {
     expect(sel.current?.id).toBe('r1'); // listener removed: selection is kept
   });
 });
+
+describe('Selection.focusEntry (U4 replay navigation)', () => {
+  it('selects an entry already in the store at once', async () => {
+    const api = makeApi();
+    const sel = new Selection({ store, cache, api });
+    store.apply([{ type: 'entry', entry: summary(row({ id: 'replay-1', source: 'replay' })) }]);
+    const scrolled: string[] = [];
+    sel.scrollToKey = (k) => scrolled.push(k);
+    sel.focusEntry('d1', 'replay-1');
+    expect(sel.current?.id).toBe('replay-1');
+    expect(sel.current?.host).toBe('api.test');
+    expect(scrolled).toHaveLength(1);
+  });
+
+  it('waits for the batch that brings the entry, then stops listening', async () => {
+    const api = makeApi();
+    const sel = new Selection({ store, cache, api });
+    sel.focusEntry('d1', 'replay-2');
+    expect(sel.current).toBeNull();
+    store.apply([{ type: 'entry', entry: summary(row({ id: 'other' })) }]);
+    expect(sel.current).toBeNull();
+    store.apply([{ type: 'entry', entry: summary(row({ id: 'replay-2', source: 'replay' })) }]);
+    expect(sel.current?.id).toBe('replay-2');
+    await sel.select(null);
+    store.apply([{ type: 'entry', entry: summary(row({ id: 'replay-2', status: 201 })) }]);
+    expect(sel.current).toBeNull(); // the one-shot wait is over
+  });
+
+  it('gives up after the timeout', () => {
+    vi.useFakeTimers();
+    try {
+      const sel = new Selection({ store, cache, api: makeApi() });
+      sel.focusEntry('d1', 'late', 1000);
+      vi.advanceTimersByTime(1001);
+      store.apply([{ type: 'entry', entry: summary(row({ id: 'late' })) }]);
+      expect(sel.current).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+});

@@ -67,3 +67,38 @@ describe('DetailPanel', () => {
     expect(screen.queryByTestId('detail-panel')).toBeNull();
   });
 });
+
+describe('DetailPanel replay editor (U4)', () => {
+  it('Edit… opens the editor prefilled with the captured binary body, Send navigates to the replay', async () => {
+    const cache = new BodyCache();
+    const bin: BodyRef = { state: 'captured', sha256: 'req-bin', size: 2, storedSize: 2, encoding: 'binary', omitted: null };
+    const api = {
+      fetchEntryDetail: vi.fn(async () => ({ ...detail, requestHeaders: { 'content-type': 'application/octet-stream' } })),
+      fetchBody: vi.fn(async () => ({ kind: 'ok', text: 'AP8=' }) as const),
+    };
+    const sel = new Selection({ store: new Store(), cache, api });
+    await sel.select({ ...row(), requestBody: bin });
+    const focus = vi.spyOn(sel, 'focusEntry').mockImplementation(() => {});
+    const sent: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_u: string, init: RequestInit) => {
+      sent.push(JSON.parse(init.body as string));
+      return { ok: true, json: async () => ({ key: { deviceId: 'd1', id: 'replay-9' }, status: 200, error: null, stripped: [] }) } as unknown as Response;
+    }));
+    try {
+      render(DetailPanel, { props: { selection: sel }, context: new Map<symbol, unknown>([[CTX.cache, cache]]) });
+      await fireEvent.click(screen.getByRole('button', { name: 'Edit…' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(dialog).toHaveTextContent('Edit and replay');
+      expect(screen.getByRole('textbox', { name: 'URL' })).toHaveValue('https://api.test/thing');
+      expect(screen.getByTestId('replay-byte-count')).toHaveTextContent('2 bytes');
+      // Edit one byte in the grid, then send.
+      const grid = screen.getByRole('grid');
+      await fireEvent.keyDown(grid, { key: '4' });
+      await fireEvent.keyDown(grid, { key: '1' });
+      await fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await vi.waitFor(() => expect(focus).toHaveBeenCalledWith('d1', 'replay-9'));
+      expect(sent[0]).toEqual({ deviceId: 'd1', id: 'r1', credentials: 'strip', overrides: { bodyBase64: 'Qf8=' } });
+      expect(screen.getByRole('status')).toHaveTextContent('sent · 200');
+    } finally { vi.unstubAllGlobals(); }
+  });
+});

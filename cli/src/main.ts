@@ -103,7 +103,7 @@ const COMMANDS: Record<string, Command> = {
         url: { type: 'string', arg: '<url>', help: 'override the target URL' },
         header: { type: 'string', arg: '<K:V>', help: 'override/add a request header (repeatable)' },
         body: { type: 'string', arg: '<string>', help: 'override the request body (utf-8)' },
-        'body-file': { type: 'string', arg: '<path>', help: 'override the request body from a file' },
+        'body-file': { type: 'string', arg: '<path>', help: 'override the request body with the file\'s exact bytes (binary-safe)' },
         'with-credentials': { type: 'boolean', help: 'replay with the captured credentials (default: strip auth headers/cookies and token query params)' },
       },
     },

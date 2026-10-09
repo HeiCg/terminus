@@ -3,6 +3,7 @@ import type { Store } from './store.js';
 import type { EntryInput } from './types.js';
 import { isSensitiveName } from './security/sensitiveNames.js';
 import { redactHeaders, redactUrl, redactText, contentTypeOf, redactionMarker, type RedactMark } from './redactor.js';
+import { PER_BODY_MAX } from './atlantis/decode.js';
 
 // T7.1 request replay. The collector re-sends a captured request to its original
 // host from the operator's Mac and stores the result as a NEW entry
@@ -18,14 +19,24 @@ import { redactHeaders, redactUrl, redactText, contentTypeOf, redactionMarker, t
 //
 // T6: the stored replay entry (both sides) is redacted like every other source
 // before it reaches the store; redaction never changes the request that is sent.
+//
+// U4: replay is binary-safe. `overrides.bodyBase64` carries raw bytes (mutually
+// exclusive with the UTF-8 `overrides.body`), a captured binary request body is
+// re-sent as-is from the body store, and both sides are stored as bytes: text
+// content goes through the redactor, binary content is kept verbatim.
 
 export type ReplayCredentials = 'strip' | 'keep';
-export type ReplayOverrides = { method?: string; url?: string; headers?: Record<string, string>; body?: string };
+export type ReplayOverrides = { method?: string; url?: string; headers?: Record<string, string>; body?: string; bodyBase64?: string };
 export type ReplayRequest = { deviceId: string; id: string; credentials?: ReplayCredentials; overrides?: ReplayOverrides };
 
 export type ReplayResult =
   | { ok: true; key: { deviceId: string; id: string }; status: number | null; durationMs: number; error: string | null; stripped: string[] }
-  | { ok: false; code: 400 | 404 | 422; message: string };
+  | { ok: false; code: 400 | 404 | 413 | 422; message: string };
+
+// An override body (either field) may not exceed the per-body cap every capture
+// path enforces (1 MiB): a bigger one could not be stored as the replay's request
+// side anyway. Over it the replay is refused 413 before anything leaves.
+export const REPLAY_BODY_MAX = PER_BODY_MAX;
 
 // What counts as a credential when stripping: the shared P5 matcher
 // (security/sensitiveNames.ts, also used by the ingest redactor, honouring
@@ -93,8 +104,34 @@ function stripHeaders(h: Record<string, string>): Record<string, string> {
   return out;
 }
 
-function isUtf8(bytes: Uint8Array): boolean {
-  try { new TextDecoder('utf8', { fatal: true }).decode(bytes); return true; } catch { return false; }
+const strictUtf8 = new TextDecoder('utf8', { fatal: true });
+
+// Content types that are bytes by declaration: stored verbatim and never run
+// through the text redactor, even when the payload happens to be valid UTF-8 (a
+// short protobuf message often is, and a regex pass would rewrite it).
+const BINARY_TYPE = /^(image|audio|video|font)\/|^application\/(octet-stream|pdf|zip|gzip|x-protobuf|protobuf|vnd\.google\.protobuf|grpc|x-tar|wasm|msgpack|x-msgpack|cbor)\b/i;
+function isBinaryType(ct: string | null): boolean {
+  return ct != null && BINARY_TYPE.test(ct.split(';', 1)[0].trim());
+}
+
+// Classify one side's bytes for STORAGE: a binary content type, a NUL byte or
+// invalid UTF-8 keeps the bytes verbatim (`binary`); text is redacted (feeding
+// `mark`) and re-encoded. The cap itself is the store's (oversize is omitted there).
+function storedBody(bytes: Uint8Array | null, contentType: string | null, mark: RedactMark): { bytes: Uint8Array | null; omitted: 'binary' | null } {
+  if (bytes == null) return { bytes: null, omitted: null };
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (isBinaryType(contentType) || buf.includes(0)) return { bytes, omitted: 'binary' };
+  let text: string;
+  try { text = strictUtf8.decode(buf); } catch { return { bytes, omitted: 'binary' }; }
+  return { bytes: Buffer.from(redactText(text, contentType, mark) ?? text, 'utf8'), omitted: null };
+}
+
+// Strict base64 (standard alphabet, padded, whitespace tolerated). Buffer.from
+// would silently skip junk characters, so the shape is checked first.
+function decodeBase64(s: string): Buffer | null {
+  const t = s.replace(/\s+/g, '');
+  if (t.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(t)) return null;
+  return Buffer.from(t, 'base64');
 }
 
 // Collect a fetch Response's headers into a plain object (last value wins for a
@@ -129,6 +166,8 @@ function parseRequest(body: unknown): ReplayRequest | { ok: false; code: 400; me
     if (o.method !== undefined && typeof o.method !== 'string') return { ok: false, code: 400, message: 'overrides.method must be a string' };
     if (o.url !== undefined && typeof o.url !== 'string') return { ok: false, code: 400, message: 'overrides.url must be a string' };
     if (o.body !== undefined && typeof o.body !== 'string') return { ok: false, code: 400, message: 'overrides.body must be a string' };
+    if (o.bodyBase64 !== undefined && typeof o.bodyBase64 !== 'string') return { ok: false, code: 400, message: 'overrides.bodyBase64 must be a string' };
+    if (o.body !== undefined && o.bodyBase64 !== undefined) return { ok: false, code: 400, message: 'pass only one of overrides.body and overrides.bodyBase64' };
     if (o.headers !== undefined) {
       if (typeof o.headers !== 'object' || o.headers === null) return { ok: false, code: 400, message: 'overrides.headers must be an object' };
       for (const v of Object.values(o.headers as Record<string, unknown>)) {
@@ -165,26 +204,45 @@ export async function performReplay(
   let resolvedHeaders = overrides.headers ?? original.requestHeaders;
   const stripped: string[] = [];
   if (credentials === 'strip') {
-    const protectedNames = new Set(Object.keys(overrides.headers ?? {}).map((k) => k.toLowerCase()));
+    // An override header is protected only when the caller CHOSE its value: one
+    // that repeats the captured value verbatim (an editor sending the whole
+    // prefilled map back) is still a captured credential and is stripped.
+    const captured = new Map(Object.entries(original.requestHeaders).map(([k, v]) => [k.toLowerCase(), v]));
+    const protectedNames = new Set(Object.entries(overrides.headers ?? {})
+      .filter(([k, v]) => captured.get(k.toLowerCase()) !== v)
+      .map(([k]) => k.toLowerCase()));
     const s = stripCredentials(resolvedHeaders, url, protectedNames);
     resolvedHeaders = s.headers; url = s.url; stripped.push(...s.stripped);
   }
   const headers = stripHeaders(resolvedHeaders);
 
-  // Resolve the request body to send. An override always wins. Otherwise the
-  // original text body is reused — but if it was never captured as recoverable
-  // text (omitted for size/budget/binary/not-captured) there is nothing to send,
-  // so the replay is rejected 422 unless the caller supplies an override.
-  let bodyText: string | null;
-  if (overrides.body !== undefined) {
-    bodyText = overrides.body;
-  } else if (original.requestBodyOmitted != null) {
-    return { ok: false, code: 422, message: `original request body is not replayable (${original.requestBodyOmitted}); provide an override body` };
+  // Resolve the request body BYTES to send. An override always wins (`body` as
+  // UTF-8, `bodyBase64` as raw bytes), capped at REPLAY_BODY_MAX. Otherwise the
+  // captured body is re-sent from the body store as-is, text or binary; one that
+  // was never retained (size/budget/not-captured) cannot be replayed without an
+  // override, so that is a 422.
+  let bodyBytes: Uint8Array | null;
+  if (overrides.body !== undefined || overrides.bodyBase64 !== undefined) {
+    if (overrides.bodyBase64 !== undefined) {
+      const decoded = decodeBase64(overrides.bodyBase64);
+      if (decoded == null) return { ok: false, code: 400, message: 'overrides.bodyBase64 must be standard base64' };
+      bodyBytes = decoded;
+    } else {
+      bodyBytes = Buffer.from(overrides.body!, 'utf8');
+    }
+    if (bodyBytes.length > REPLAY_BODY_MAX) {
+      return { ok: false, code: 413, message: `override body is ${bodyBytes.length} bytes, over the ${REPLAY_BODY_MAX}-byte per-body cap` };
+    }
   } else {
-    bodyText = original.requestBody;
+    const captured = store.entryBody(deviceId, id, 'request');
+    if (!captured || captured.state === 'omitted') {
+      const reason = captured?.omitted ?? original.requestBodyOmitted ?? 'not-captured';
+      return { ok: false, code: 422, message: `original request body was not retained (${reason}); provide overrides.body or overrides.bodyBase64` };
+    }
+    bodyBytes = captured.state === 'captured' ? captured.bytes : null;
   }
 
-  const sendBody = !BODYLESS.has(method) && bodyText != null ? bodyText : undefined;
+  const sendBody = !BODYLESS.has(method) && bodyBytes != null ? bodyBytes : undefined;
 
   const doFetch = deps.fetch ?? fetch;
   const controller = new AbortController();
@@ -193,7 +251,10 @@ export async function performReplay(
   let res: Response | null = null;
   let error: string | null = null;
   try {
-    res = await doFetch(url, { method, headers, body: sendBody, redirect: 'manual', signal: controller.signal });
+    // A fresh ArrayBuffer-backed copy: the BodyInit typing rejects a view over a
+    // possibly shared buffer, and the body store's bytes are never handed out.
+    const body = sendBody ? new Uint8Array(sendBody) : undefined;
+    res = await doFetch(url, { method, headers, body, redirect: 'manual', signal: controller.signal });
   } catch (e) {
     error = classifyError(e);
   } finally {
@@ -207,23 +268,20 @@ export async function performReplay(
 
   // T6: what is STORED goes through the same redactor as the other sources (URL
   // query, headers, text bodies), one sink per side for the `redacted` marker. The
-  // request above already left with whatever the credential mode decided.
+  // request above already left with whatever the credential mode decided. U4:
+  // binary content on either side is stored as its exact bytes.
   const reqMark: RedactMark = { hit: false }; const resMark: RedactMark = { hit: false };
-  const storedRequestBody = sendBody != null ? redactText(sendBody, contentTypeOf(headers), reqMark) : null;
-  const requestBytes = storedRequestBody != null ? Buffer.from(storedRequestBody, 'utf8') : null;
-  const responseBinary = rawResponse != null && !isUtf8(rawResponse);
-  const responseBytes = rawResponse == null || responseBinary
-    ? rawResponse
-    : Buffer.from(redactText(Buffer.from(rawResponse).toString('utf8'), contentTypeOf(responseHeaders), resMark) ?? '', 'utf8');
+  const req = storedBody(sendBody ?? null, contentTypeOf(headers), reqMark);
+  const resp = storedBody(rawResponse, contentTypeOf(responseHeaders), resMark);
 
   const input: EntryInput = {
     id: newId, deviceId, source: 'replay', startedAt,
     method, url: redactUrl(url, reqMark),
-    requestHeaders: redactHeaders(headers, reqMark), requestBytes, requestBodySize: requestBytes?.length ?? 0, requestBodyOmitted: null,
+    requestHeaders: redactHeaders(headers, reqMark), requestBytes: req.bytes, requestBodySize: req.bytes?.length ?? 0, requestBodyOmitted: req.omitted,
     status: res ? res.status : null, statusText: res ? res.statusText : '',
     responseHeaders: redactHeaders(responseHeaders, resMark),
-    responseBytes, responseBodySize: responseBytes?.length ?? 0,
-    responseBodyOmitted: responseBinary ? 'binary' : null,
+    responseBytes: resp.bytes, responseBodySize: resp.bytes?.length ?? 0,
+    responseBodyOmitted: resp.omitted,
     durationMs, error,
     replayOf: { id, credentials, stripped },
     ...redactionMarker(reqMark, resMark),

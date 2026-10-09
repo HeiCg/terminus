@@ -256,10 +256,17 @@ distinct from passive capture:
   "Include captured credentials" toggle) to re-send them as stored. Values that
   redaction already masked at capture were stored as `***`, so `keep` re-sends
   `***` for those. Headers the caller supplies explicitly via `overrides.headers`
-  are never stripped (the caller chose them).
+  are never stripped (the caller chose them), unless the value is the captured one
+  repeated verbatim: an editor that sends the whole prefilled header map back still
+  gets the captured credentials stripped.
 - **Hop-by-hop headers are always recomputed.** `host`/`content-length` and RFC 7230
   hop-by-hop headers are stripped and recomputed regardless of the `credentials`
   choice.
+- **Bodies are re-sent as bytes.** Without an override the captured request body,
+  text or binary, is re-sent exactly as stored (a text body as stored means after
+  capture-time redaction). `overrides.bodyBase64` sends arbitrary bytes; an override
+  body is capped at the 1 MiB per-body limit (`413` above it). A body that was not
+  retained is never guessed at: the replay is refused `422` until one is supplied.
 - **It still repeats side effects.** Even with credentials stripped, replaying a
   state-changing request (POST/PUT/DELETE) re-issues it against the target and repeats
   its side effect. Only replay what you intend to re-issue.
@@ -275,7 +282,9 @@ distinct from passive capture:
   redaction as captured traffic, on both sides (URL, headers, text bodies), and
   carries the `redacted` marker. This applies only to what is stored: the request
   that leaves the machine carries exactly what the `credentials` mode decided, so an
-  override body or header is sent as given and stored masked.
+  override body or header is sent as given and stored masked. Binary content (a
+  binary `Content-Type`, a NUL byte, or invalid UTF-8) is stored verbatim and is
+  not scanned, like any other binary body.
 
 ## Residual risks
 

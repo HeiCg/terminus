@@ -105,6 +105,30 @@ describe('old-collector detection', () => {
     });
   });
 
+  it('q is never sent to a collector without the query capability', async () => {
+    const fake = await fakeCollector(jsonReply(200, { items: [], nextSeq: 0, lastSeq: 0, epoch: 'E', gap: false, hasMore: false }));
+    await withFake(fake, async (c) => {
+      const r = await call(c, 'terminus_entries', { last: 5, q: 'status >= 500' });
+      expect(r.isError).toBe(true);
+      expect(text(r)).toContain('lacks the capability "query"');
+      const w = await call(c, 'terminus_wait', { afterSeq: 0, epoch: 'E', q: 'status >= 500' });
+      expect(w.isError).toBe(true);
+      expect(text(w)).toContain('"query"');
+      // Without q the same collector still answers, and no request ever carried q=.
+      expect((await call(c, 'terminus_entries', { last: 5 })).isError).toBeFalsy();
+      expect(fake.hits.some((x) => x.includes('q='))).toBe(false);
+    });
+  });
+
+  it('q passes through as q= when the collector advertises query', async () => {
+    const fake = await fakeCollector(jsonReply(200, { items: [], nextSeq: 0, lastSeq: 0, epoch: 'E', gap: false, hasMore: false }),
+      { ...HEALTH, capabilities: [...HEALTH.capabilities, 'query'] });
+    await withFake(fake, async (c) => {
+      expect((await call(c, 'terminus_entries', { last: 5, q: 'status >= 500' })).isError).toBeFalsy();
+      expect(fake.hits.find((x) => x.startsWith('GET /api/entries?'))).toContain(`q=${encodeURIComponent('status >= 500').replace(/%20/g, '+')}`);
+    });
+  });
+
   it('a missing capability is named', async () => {
     const fake = await fakeCollector(jsonReply(200, {}), { ...HEALTH, capabilities: ['seq'] });
     await withFake(fake, async (c) => {
