@@ -30,14 +30,14 @@ During QR pairing the app fetches the certificate DER from
   Rotation regenerates the certificate (and its SAN), the device token, and the
   collector UUID, so **every** device must re-pair.
 
-## Device cannot reach the Mac's LAN IP
+## Device cannot reach the collector's LAN IP
 
 **Symptom.** The device fails to connect immediately (a fetch/TLS error), or the
 collector logs a drift warning at boot such as *"no current LAN IPv4 is in the
 certificate SAN … run `npm run identity:rotate`"*.
 
-The advertised pairing `host` is the Mac's **LAN IPv4**, resolved at runtime —
-phones cannot resolve the Mac's hostname on the LAN. Because that address is a
+The advertised pairing `host` is the collector machine's **LAN IPv4**, resolved at
+runtime — phones cannot resolve the machine's hostname on the LAN. Because that address is a
 DHCP lease, it can change, and when it does the certificate SAN no longer covers
 it.
 
@@ -55,7 +55,7 @@ it.
 
 - If the address is correct but the device still cannot reach it, the network is
   likely isolating clients (Wi-Fi *client/AP isolation*, a guest network, or the
-  Mac and device on different subnets/VLANs). Put both on the same,
+  collector machine and device on different subnets/VLANs). Put both on the same,
   non-isolated LAN.
 
 ## Simulator, emulator, or Linux on the same machine
@@ -85,7 +85,7 @@ curl -s -H "Authorization: Bearer $(cat "$HOME/Library/Application Support/Termi
 `host` overrides the advertised host for that response only; a host the certificate
 SAN does not cover is refused with `400`.
 
-**Android emulator.** Forward the capture ports from the emulator to the Mac with
+**Android emulator.** Forward the capture ports from the emulator to the host with
 `adb reverse`, then pair with the same `?host=127.0.0.1` blob:
 
 ```bash

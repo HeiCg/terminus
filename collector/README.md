@@ -1,7 +1,7 @@
 # Terminus (collector)
 
-The Terminus collector is a local Mac server that captures HTTP and WebSocket
-traffic from your devices on the LAN, shows it live in a web UI, and exports it as
+The Terminus collector is a local server for macOS and Linux that captures HTTP and
+WebSocket traffic from your devices on the LAN, shows it live in a web UI, and exports it as
 HAR 1.2. Device capture runs over **TLS with device-token auth** on the LAN, while
 the UI stays loopback-only. This README covers running and operating the collector;
 for the project overview see the [repository README](../README.md), for the
@@ -90,7 +90,7 @@ directory, and the ingest/proxy tuning knobs are read at process start.
 | `TERMINUS_INGEST_PORT` | `8788` | collector | WSS device-capture ingest port (`/ingest`, TLS on the LAN). Bare `INGEST_PORT` accepted as legacy. | `NETCAPTURE_INGEST_PORT` |
 | `TERMINUS_ATLANTIS_PORT` | `10909` | collector | Atlantis TLS capture ingest port. Bare `ATLANTIS_PORT` accepted as legacy. | `NETCAPTURE_ATLANTIS_PORT` |
 | `TERMINUS_CERT_PORT` | `8789` | collector | Public cert endpoint port (`GET /api/cert`, plain HTTP on the LAN) for QR pairing. | `NETCAPTURE_CERT_PORT` |
-| `TERMINUS_STATE_DIR` | `~/Library/Application Support/Terminus` (macOS) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
+| `TERMINUS_STATE_DIR` | macOS `~/Library/Application Support/Terminus`; Linux `$XDG_STATE_HOME/terminus` (fallback `~/.local/state/terminus`) | collector + cli | Identity/state directory: certificate, private key, device token, and the `admin-token` and `reader-token` files. The CLI reads the `admin-token` file from here to authenticate on the same machine. | `NETCAPTURE_STATE_DIR` |
 | `TERMINUS_PAIRING_HOST` | first current LAN IPv4 in the certificate SAN | collector | Host advertised in the pairing blob, QR, `terminus pair`, and the cert-endpoint log. Must be an IP (or resolvable name) the certificate SAN already covers; an invalid value is ignored with a one-time warning. | `NETCAPTURE_PAIRING_HOST` |
 | `TERMINUS_SAN_INTERFACES` | unset (classifier picks) | collector | Comma-separated interface names (e.g. `eth0` or `en0,en7`) whose addresses go into the certificate SAN of a **new or rotated** identity, the proxy exclusion list and the pairing-host candidates, used exclusively and in the listed order. IPv6 link-local is still skipped and the loopback anchors are always kept. Unset, virtual and tunnel interfaces are skipped (see [the advertised pairing host](#the-advertised-pairing-host-is-the-machines-lan-ip)). | `NETCAPTURE_SAN_INTERFACES` |
 | `TERMINUS_OPENSSL` | unset | collector | Path to an OpenSSL 3 binary, tried when `openssl` on `PATH` is missing or not version 3 (before the built-in Homebrew locations). | `NETCAPTURE_OPENSSL` |
@@ -596,7 +596,7 @@ HAR (no `_terminus`) lands on a `har:<basename>` device with `source: xhr`.
 
 `POST /api/replay` (and `terminus replay <device>/<id>`) reconstructs a stored
 request, applies any overrides (`method`, `url`, `headers`, `body`), strips
-hop-by-hop and `host`/`content-length` headers, and re-sends it from the Mac with a
+hop-by-hop and `host`/`content-length` headers, and re-sends it from the collector machine with a
 30 s timeout and no redirect following. The response is stored as a **new** entry
 with `source: replay`, a fresh id, and a `replayOf: { id, credentials, stripped }`
 back-reference — the original is never modified. A request whose body was omitted at

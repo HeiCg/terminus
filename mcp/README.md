@@ -46,6 +46,8 @@ claude mcp add terminus -e TERMINUS_TOKEN="$(cat "$HOME/Library/Application Supp
   -- node /abs/path/to/proxy_2/mcp/dist/main.js --port 8787
 ```
 
+On Linux the file is `${XDG_STATE_HOME:-$HOME/.local/state}/terminus/reader-token`.
+
 A token passed this way stops working when the collector restarts (tokens rotate
 on every start). Leaving it out and letting the server read the token file avoids
 that.
