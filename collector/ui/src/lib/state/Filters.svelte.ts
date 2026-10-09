@@ -3,7 +3,7 @@ import type { Store } from './Store.svelte.js';
 import type { EntrySummary } from '../protocol.js';
 import { entityKey } from '../protocol.js';
 import { splitUrl, statusBucket } from '../format.js';
-import { parseQuery, matchQuery, isEmptyQuery, type ParsedQuery } from '../query.js';
+import { buildFilter, UI_FILTER_CAPS, type FilterError, type FilterPredicate, type MatchEnv } from '../filterLang.js';
 import { updateHashParams } from '../hash.js';
 
 // The type-chip filter (top row of the filter bar). `errors` is a synthetic
@@ -24,9 +24,9 @@ export type Row = EntrySummary & {
   size: number | null;
 };
 
-// The slice of BodyCache the `body:` mini-query term needs: a NON-touching
-// lowercased peek by hash. Optional at construction — unit tests stand Filters up
-// without a cache, and then a `body:` term simply matches nothing.
+// The slice of BodyCache the `body` filter field (and the 0.2 `body:` term)
+// needs: a NON-touching lowercased peek by hash. Optional at construction — unit
+// tests stand Filters up without a cache, and then a body term matches nothing.
 type BodyPeek = { peekLower(hash: string): string | undefined };
 
 // `errors` covers client/server failures and transport errors — the buckets a
@@ -58,9 +58,30 @@ export class Filters {
     this.#syncHash();
   }
 
+  // The raw search text (what the box shows and the hash keeps) and the filter
+  // it compiles to. An expression that does not parse or compile sets
+  // `queryError` and KEEPS the last valid predicate, so a half-typed expression
+  // never flashes the whole table back in. Compiled once per keystroke here, in
+  // the setter, rather than in a derived (it needs the previous value).
   #search = $state('');
   get search(): string { return this.#search; }
-  set search(v: string) { this.#search = v; this.#syncHash(); }
+  set search(v: string) { this.#search = v; this.#compile(v); this.#syncHash(); }
+
+  #query = $state.raw<FilterPredicate | null>(null);
+  #queryError = $state.raw<FilterError | null>(null);
+  // The current parse/compile error of `search` (message + character offset), or
+  // null when the text is a valid filter (or empty).
+  get queryError(): FilterError | null { return this.#queryError; }
+
+  #compile(v: string): void {
+    const r = buildFilter(v, UI_FILTER_CAPS);
+    if (r.ok) {
+      this.#query = r.match;
+      this.#queryError = null;
+    } else {
+      this.#queryError = r.error;
+    }
+  }
 
   #type = $state<TypeFilter>('all');
   get type(): TypeFilter { return this.#type; }
@@ -197,15 +218,10 @@ export class Filters {
   // chips and its own column sort; `allRows` applies neither.)
   allRows = $derived.by((): Row[] => [...this.#deviceRows].sort((a, b) => b.startedAt - a.startedAt));
 
-  // The search box's parsed mini-query (`method:` / `status:` / `host:` / `path:` /
-  // `source:` / `device:` / `body:` typed terms + a free substring), recomputed
-  // once per keystroke, not once per row.
-  #parsed = $derived.by((): ParsedQuery => parseQuery(this.#search));
-
-  // Lowercased body text for a `body:` term: the resident request or response
+  // Lowercased body text for the `body` field: the resident request or response
   // body, whichever is cached. NON-touching (peekLower never reorders the LRU),
   // so a $derived read of `rows` is side-effect free. Null when nothing resident.
-  #bodyText = (r: Row): string | null => {
+  #bodyText = (r: EntrySummary): string | null => {
     const cache = this.#cache;
     if (!cache) return null;
     const rsp = r.responseBody.sha256 ? cache.peekLower(r.responseBody.sha256) : undefined;
@@ -214,9 +230,21 @@ export class Filters {
     return req ?? null;
   };
 
+  // What the filter predicate may consult beyond the row: resident bodies and
+  // the identity strings the UI knows per device (externalId, bundleId). The
+  // clock is read once per recompute for relative times (`time > -5m`).
+  #matchEnv(): MatchEnv {
+    const names = new Map<string, string[]>();
+    for (const d of this.#store.devices) {
+      const extra = [d.externalId, d.bundleId].filter((x): x is string => !!x);
+      if (extra.length) names.set(d.deviceId, extra);
+    }
+    return { now: Date.now(), bodyText: this.#bodyText, deviceNames: (id) => names.get(id) ?? [] };
+  }
+
   rows = $derived.by((): Row[] => {
-    const parsed = this.#parsed;
-    const hasQuery = !isEmptyQuery(parsed);
+    const query = this.#query;
+    const env = query ? this.#matchEnv() : undefined;
     const out = this.#deviceRows.filter((r) => {
       if (this.type === 'xhr' || this.type === 'ws' || this.type === 'sse') {
         if (r.kind !== this.type) return false;
@@ -227,7 +255,7 @@ export class Filters {
       if (this.sources.size > 0 && !this.sources.has(r.source)) return false;
       if (this.host !== null && r.host !== this.host) return false;
       if (this.hasBody && r.requestBody.state !== 'captured' && r.responseBody.state !== 'captured') return false;
-      if (hasQuery && !matchQuery(parsed, r, this.#bodyText)) return false;
+      if (query && !query(r, env)) return false;
       return true;
     });
     return this.#sorted(out);
@@ -281,6 +309,8 @@ export class Filters {
   // not the filter bar, so "Clear filters" leaves it alone).
   clear(): void {
     this.#search = '';
+    this.#query = null;
+    this.#queryError = null;
     this.#type = 'all';
     this.statuses.clear();
     this.sources.clear();
@@ -343,7 +373,11 @@ export class Filters {
       const host = p.get('host');
       this.#host = host ? host : null;
 
+      // A restored expression replaces the filter outright: an invalid one leaves
+      // no predicate (and shows its error) rather than the previous view's.
       this.#search = p.get('q') ?? '';
+      this.#query = null;
+      this.#compile(this.#search);
       this.#hasBody = p.get('hasBody') === '1';
       this.#sort = this.#parseSort(p.get('sort'));
 

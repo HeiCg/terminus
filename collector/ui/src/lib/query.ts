@@ -1,3 +1,8 @@
+// FROZEN 0.2 REFERENCE. The Capture search box now speaks the filter language
+// (filterLang.ts, U2), which reads every 0.2 query the same way. This module is
+// no longer used by the app: it stays, unchanged, as the oracle the backward-
+// compatibility table (__tests__/filterLang.compat.test.ts) compares against.
+//
 // The Capture search box speaks a small `key:value` mini-query on top of a free
 // substring. This module is the PURE parser + matcher: it knows nothing about
 // Svelte, the Store, or the body cache — `Filters` composes it with the chip

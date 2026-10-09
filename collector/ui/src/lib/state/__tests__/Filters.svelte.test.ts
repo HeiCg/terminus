@@ -403,3 +403,93 @@ describe('Filters — URL hash (T6.3)', () => {
     expect(new URLSearchParams(location.hash.slice(1)).get('q')).toBeNull();
   });
 });
+
+describe('Filters — filter language (U2)', () => {
+  const ids = (filters: Filters) => filters.rows.map((r) => r.id).sort();
+
+  it('accepts expressions with comparisons, boolean operators and sets', () => {
+    const { filters } = seeded();
+    filters.search = 'status >= 400 && host ~ a.test';
+    expect(ids(filters)).toEqual(['e4']);
+    filters.search = 'method in {POST, DELETE} or (error)';
+    expect(ids(filters)).toEqual(['e10', 'e2', 'e4', 'e8']);
+    filters.search = 'not source == atlantis and status == 2xx';
+    expect(ids(filters)).toEqual(['e2', 'e6', 'e9']);
+    expect(filters.queryError).toBeNull();
+  });
+
+  it('an invalid expression shows its error and keeps the last valid filter', () => {
+    const { filters } = seeded();
+    filters.search = 'status >= 500';
+    expect(ids(filters)).toEqual(['e5']);
+    filters.search = 'status >= 500 and (host ~ a';
+    expect(filters.queryError).toEqual({ message: "missing ')' for the '(' at offset 18", offset: 27 });
+    expect(ids(filters)).toEqual(['e5']);
+    // The raw text still round-trips through the hash, invalid or not.
+    expect(new URLSearchParams(location.hash.slice(1)).get('q')).toBe('status >= 500 and (host ~ a');
+    filters.search = 'status >= 500 and (host ~ a.test)';
+    expect(filters.queryError).toBeNull();
+    expect(ids(filters)).toEqual([]);
+  });
+
+  it('header fields are refused in the UI with a note pointing at the read API', () => {
+    const { filters } = seeded();
+    filters.search = 'method == GET';
+    const before = ids(filters);
+    filters.search = 'method == GET and header.authorization';
+    expect(filters.queryError?.offset).toBe(18);
+    expect(filters.queryError?.message).toContain('read API');
+    expect(ids(filters)).toEqual(before);
+  });
+
+  it('clear() drops both the filter and the error', () => {
+    const { filters } = seeded();
+    filters.search = 'status >= 500';
+    filters.search = 'status >=';
+    expect(filters.queryError).not.toBeNull();
+    filters.clear();
+    expect(filters.queryError).toBeNull();
+    expect(filters.rows).toHaveLength(12);
+  });
+
+  it('an invalid expression restored from the hash filters nothing and reports its error', () => {
+    const { filters } = seeded();
+    filters.search = 'status >= 500';
+    filters.applyHash(new URLSearchParams('q=status%20%3D%3D'));
+    expect(filters.search).toBe('status ==');
+    expect(filters.queryError?.offset).toBe(9);
+    expect(filters.rows).toHaveLength(12);
+  });
+
+  it('a 0.2 query restored from the hash keeps its meaning', () => {
+    const { store, filters } = seeded();
+    filters.applyHash(new URLSearchParams('q=method%3Aget%20host%3Aa.test%20users'));
+    expect(filters.queryError).toBeNull();
+    expect(ids(filters)).toEqual(['e1', 'e7']);
+    const again = new Filters(store);
+    again.applyHash(new URLSearchParams(filters.toHash()));
+    expect(ids(again)).toEqual(['e1', 'e7']);
+  });
+
+  it('device also matches the externalId/bundleId the UI knows', () => {
+    const store = new Store();
+    const snap = fixture();
+    snap.devices = [{ deviceId: 'd2', platform: 'ios', appVersion: '1', buildProfile: 'dev', dropped: 0, lastSeen: 0, externalId: 'emu-2', bundleId: 'com.acme' }];
+    store.apply([snap]);
+    const filters = new Filters(store);
+    filters.search = 'device == emu-2 and status == 2xx';
+    expect(ids(filters)).toEqual(['e10', 'e12', 'e7', 'e9']);
+    filters.search = 'device:emu';
+    expect(filters.rows).toHaveLength(0);
+  });
+
+  it('body contains reads resident bodies', () => {
+    const store = new Store();
+    store.apply([fixture()]);
+    const cache = new BodyCache();
+    cache.putRaw('h', 'the-secret-token');
+    const filters = new Filters(store, cache);
+    filters.search = 'body contains SECRET and method == GET';
+    expect(ids(filters)).toEqual(['e1', 'e5', 'e9']);
+  });
+});

@@ -112,10 +112,24 @@
     class="search"
     type="search"
     data-testid="search"
-    placeholder="Search, or method:GET status:5xx host:api…  ⌘K"
+    placeholder="Search, or status >= 400 && host ~ api…  ⌘K"
     aria-label="Search"
+    aria-invalid={filters.queryError ? 'true' : undefined}
+    aria-describedby={filters.queryError ? 'search-error' : undefined}
     bind:value={filters.search}
   />
+  <!-- A filter that does not parse keeps the last valid one applied; the error
+       (with its character offset) shows here until the text is fixed. -->
+  {#if filters.queryError}
+    <span
+      id="search-error"
+      class="err qerr"
+      style="--tint: var(--status-5xx)"
+      role="status"
+      data-testid="search-error"
+      title="{filters.queryError.message} (at offset {filters.queryError.offset}). The last valid filter is still applied; press ? for the syntax."
+    >{filters.queryError.message} · at {filters.queryError.offset}</span>
+  {/if}
 
   <div class="spacer"></div>
 
@@ -198,6 +212,14 @@
   }
   .search::placeholder {
     color: var(--fg-muted);
+  }
+  .search[aria-invalid='true'] {
+    border-color: var(--status-5xx);
+  }
+  .qerr {
+    max-width: 28vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .spacer {
     flex: 1 1 auto;

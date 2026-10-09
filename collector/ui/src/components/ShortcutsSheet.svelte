@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Attachment } from 'svelte/attachments';
-  import { SHORTCUT_GROUPS } from '../lib/shortcuts.js';
+  import { SHORTCUT_GROUPS, FILTER_EXAMPLES } from '../lib/shortcuts.js';
 
   // A modal dialog listing the app's keyboard shortcuts, generated from the single
   // keymap table in `lib/shortcuts.ts`. Same a11y contract as CommandPalette:
@@ -68,6 +68,17 @@
           </dl>
         </section>
       {/each}
+      <section class="grp" data-testid="filter-syntax">
+        <h3>Search filters</h3>
+        <dl>
+          {#each FILTER_EXAMPLES as ex (ex.example)}
+            <div class="row filter">
+              <dt><code>{ex.example}</code></dt>
+              <dd>{ex.label}</dd>
+            </div>
+          {/each}
+        </dl>
+      </section>
     </div>
   </div>
 </div>
@@ -155,6 +166,19 @@
     margin: 0;
     font-size: 12px;
     color: var(--fg-secondary);
+  }
+  .row.filter {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  .row.filter dt {
+    flex: none;
+  }
+  code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--fg-primary);
   }
   kbd {
     display: inline-block;

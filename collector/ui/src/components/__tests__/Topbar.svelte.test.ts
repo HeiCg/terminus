@@ -30,6 +30,21 @@ beforeEach(() => {
 });
 
 describe('Topbar', () => {
+  it('shows a filter parse error inline, with its offset, and clears it once fixed', async () => {
+    const { store, session, clock, filters } = harness();
+    render(Topbar, { props: { filters, session, store, clock } });
+    const box = screen.getByTestId('search');
+    await fireEvent.input(box, { target: { value: 'status >=' } });
+    const err = await screen.findByTestId('search-error');
+    expect(err).toHaveTextContent("expected a value after '>=', found end of input · at 9");
+    expect(box).toHaveAttribute('aria-invalid', 'true');
+    expect(box).toHaveAttribute('aria-describedby', 'search-error');
+    await fireEvent.input(box, { target: { value: 'status >= 500' } });
+    await tick();
+    expect(screen.queryByTestId('search-error')).toBeNull();
+    expect(box).not.toHaveAttribute('aria-invalid');
+  });
+
   it('pauses via the api on click', async () => {
     const { store, session, clock, filters } = harness();
     render(Topbar, { props: { filters, session, store, clock } });
