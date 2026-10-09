@@ -48,10 +48,10 @@ function throughProxy(proxyPort: number, targetPort: number, targetPath: string)
 // A raw absolute-URI WebSocket upgrade through the proxy (the ws:// proxy form).
 // Resolves with the response status line, or 'CLOSED' when the proxy refuses the
 // upgrade by closing the connection with no response.
-function wsUpgradeThroughProxy(proxyPort: number, targetPort: number): Promise<string> {
+function wsUpgradeThroughProxy(proxyPort: number, targetPort: number, targetPath = '/'): Promise<string> {
   return new Promise((resolve) => {
     const s = net.connect(proxyPort, '127.0.0.1', () => {
-      s.write(`GET http://127.0.0.1:${targetPort}/ HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+      s.write(`GET http://127.0.0.1:${targetPort}${targetPath} HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     });
     let buf = '';
     const done = (v: string) => { resolve(v); s.destroy(); };
@@ -213,6 +213,22 @@ describe('proxy source — access boundary', () => {
       });
       await waitFor(() => upstreamConns === 1);
       expect(upstreamConns).toBe(1);
+    } finally { up.close(); }
+  }, 30_000);
+
+  it('stores the WebSocket session URL redacted (a token in the query never reaches /api/ws)', async () => {
+    const up = new WebSocketServer({ port: 0 });
+    await new Promise<void>((r) => up.on('listening', () => r()));
+    const upPort = (up.address() as import('node:net').AddressInfo).port;
+    try {
+      await withProxy({ allow: ['127.0.0.1'] }, async (proxy, store) => {
+        const line = await wsUpgradeThroughProxy(proxy.port, upPort, '/cable?access_token=SECRET123&room=7');
+        expect(line).toContain('101');
+        await waitFor(() => store.wsSessions().length === 1);
+        const url = store.wsSessions()[0].url;
+        expect(url).not.toContain('SECRET123');
+        expect(url).toContain('room=7');
+      });
     } finally { up.close(); }
   }, 30_000);
 });

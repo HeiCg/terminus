@@ -82,6 +82,9 @@ All notable changes to this project are documented here. The format is based on
 - `identity:rotate --ip ...` no longer drops `127.0.0.1` and `::1` from the
   certificate SAN; the loopback anchors are always kept, like `localhost`, so
   simulator and emulator pairing on loopback keeps working after a rotation.
+- WebSocket sessions captured by the proxy stored their URL unredacted (a token in
+  the query was served by `/api/ws` and exports); the URL now goes through the
+  same redaction as HTTP entries.
 
 ## 0.1.1 — 2026-09-14
 

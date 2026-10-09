@@ -171,7 +171,7 @@ A field that no channel has supplied is absent, not `null`.
 | `deviceName` | string | Atlantis `device.name` or `hello.deviceName`. |
 | `model` | string | Atlantis `device.model` or `hello.model`. |
 | `externalId` | string | Atlantis `device.externalId` or `hello.externalId`: an id the automation side knows the device by (simulator UDID, adb serial such as `emulator-5554`, device UDID). |
-| `ambiguous` | `true` | Two Atlantis TLS connections open at the same time announced this device's envelope id, so its traffic may mix two apps or devices. Set until `/api/clear` covers the device. |
+| `ambiguous` | `true` | Two Atlantis TLS connections open at the same time announced this device's envelope id, so its traffic may mix two apps or devices. Set until `/api/clear` covers the device while no overlap is live (a clear during a live overlap keeps it). A phone that reconnects before its old socket is noticed dead (network switch, app back from background) overlaps briefly and is also flagged. |
 | `startEvents` | `true` | This device has sent a request-start event (an Atlantis request-start packet or a WSS `request`), so `firstSeq` marks the start of its exchanges. Never lowered. See [When an entry reaches the collector](#when-an-entry-reaches-the-collector). |
 
 Identity strings are trimmed; a value that is blank, not a string, or longer than

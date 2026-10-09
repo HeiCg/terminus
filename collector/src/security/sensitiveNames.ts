@@ -53,10 +53,15 @@ export function redactionConfigFromEnv(): { extra: string[]; allow: string[] } {
   return { extra: parseNameList(env('REDACT_EXTRA')), allow: parseNameList(env('REDACT_ALLOW')) };
 }
 
+// Names longer than this are judged on their first NAME_MAX characters: the
+// camelCase split below is quadratic on a long capital run, and every header,
+// query and body key goes through it at ingest (a 1 MiB key froze the loop).
+const NAME_MAX = 256;
+
 // Split a name into lowercase words on separators, camelCase (`nextPageToken`,
 // `APIKey`) and letter/digit boundaries (`otp2` -> otp, 2).
 export function nameWords(name: string): string[] {
-  return name
+  return name.slice(0, NAME_MAX)
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/([0-9])([A-Za-z])/g, '$1 $2')

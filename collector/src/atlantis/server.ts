@@ -18,9 +18,14 @@ const platformOf = (model?: string): 'android' | 'ios' => (model && model.includ
 
 // Live authenticated connections per announced envelope id (P2). Two at once
 // under one id means two apps/devices share it: the device is marked `ambiguous`.
-// A reconnect after the old socket closed never overlaps, so it does not mark.
+// A reconnect after the old socket closed does not overlap, so it does not mark;
+// a reconnect that opens before the dead socket is noticed does (see read-api.md).
 export function createEnvelopeRegistry(store: Store) {
   const live = new Map<string, Set<string>>();
+  store.setAmbiguityProbe((deviceId) => {
+    for (const [envelopeId, set] of live) if (set.size > 1 && store.resolveDeviceKey(envelopeId) === deviceId) return true;
+    return false;
+  });
   return {
     open(envelopeId: string, connId: string): void {
       let set = live.get(envelopeId);

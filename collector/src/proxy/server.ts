@@ -7,6 +7,7 @@ import type { Store } from '../store.js';
 import type { BodyStore } from '../bodyStore.js';
 import { buildEntryInput, normalizeWsFrame, epochOf, type ProxyIds } from './normalize.js';
 import { log } from '../log.js';
+import { redactUrl } from '../redactor.js';
 
 // A collector-internal endpoint the proxy must NOT inspect: its TLS is tunnelled
 // raw (so the device keeps seeing the collector's own pinned certificate, never a
@@ -187,7 +188,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(req.remoteIpAddress) };
       wsIds.set(req.id, ids);
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
-      store.addWsSession({ wsId: ids.id, deviceId: ids.deviceId, source: 'proxy', url: req.url, openedAt: epochOf(req.timingEvents), generation, via: 'open' });
+      store.addWsSession({ wsId: ids.id, deviceId: ids.deviceId, source: 'proxy', url: redactUrl(req.url), openedAt: epochOf(req.timingEvents), generation, via: 'open' });
     });
 
     const onMessage = (msg: WebSocketMessage): void => {

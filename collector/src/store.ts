@@ -479,6 +479,11 @@ export class Store extends EventEmitter {
   // Resolve a device key through the alias map (identity, when unaliased).
   resolveDeviceKey(deviceId: string): string { return this.aliases.get(deviceId) ?? deviceId; }
 
+  // Set by the Atlantis server: whether a (canonical) device has overlapping live
+  // connections right now. Consulted by clear() before lowering `ambiguous`.
+  private ambiguityProbe: ((deviceId: string) => boolean) | null = null;
+  setAmbiguityProbe(probe: ((deviceId: string) => boolean) | null): void { this.ambiguityProbe = probe; }
+
   // Record an alias `aliasKey -> primaryId` so Atlantis traffic arriving under
   // `aliasKey` is attributed to `primaryId` (the app's ingest deviceId). In memory
   // only. Conflict: if `aliasKey` is already a primary device that has captured
@@ -565,8 +570,10 @@ export class Store extends EventEmitter {
         // The P2 identity fields are optional and device-supplied: an invalid one
         // is dropped here (touchDevice re-validates), the hello itself still applies.
         const identity: DeviceIdentity = { bundleId: identityField(m.bundleId), deviceName: identityField(m.deviceName), model: identityField(m.model), externalId: identityField(m.externalId) };
-        this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts, ...identity }, 'ingest');
+        // Alias first: touchDevice emits `device`, and a wait scoped to the Atlantis
+        // key re-resolves on that event, so the alias must already be in place.
         if (m.atlantisDeviceKey) this.recordAlias(m.atlantisDeviceKey, m.deviceId);
+        this.touchDevice({ deviceId: m.deviceId, platform: m.platform, appVersion: m.appVersion, buildProfile: m.buildProfile, dropped: m.dropped, lastSeen: m.ts, ...identity }, 'ingest');
         return;
       }
       case 'request': {
@@ -968,6 +975,8 @@ export class Store extends EventEmitter {
   bodyStats() { return this.bodies.stats(); }
 
   clear(deviceId?: string): void {
+    // An alias key holds no entries of its own: clear the device it points to.
+    if (deviceId) deviceId = this.resolveDeviceKey(deviceId);
     if (deviceId) {
       const removedEntries: EntryKey[] = [];
       for (const k of this.entryDevice.get(deviceId) ?? []) { this.dropEntryKey(k, removedEntries); }
@@ -1000,8 +1009,11 @@ export class Store extends EventEmitter {
     this.emit('clear', deviceId ?? null);
     // `ambiguous` holds until a clear (P2): lower it on the cleared device(s),
     // after the clear delta so the UI applies the device update on top of it.
-    for (const d of deviceId ? [this.devs.get(this.resolveDeviceKey(deviceId))] : [...this.devs.values()]) {
+    // A device whose overlap is still live (two connections on one envelope id
+    // right now) keeps the flag: the next connection would not raise it again.
+    for (const d of deviceId ? [this.devs.get(deviceId)] : [...this.devs.values()]) {
       if (!d?.ambiguous) continue;
+      if (this.ambiguityProbe?.(d.deviceId)) continue;
       const { ambiguous: _a, ...rest } = d;
       this.putDevice(rest);
     }
