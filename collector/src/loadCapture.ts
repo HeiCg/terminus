@@ -128,7 +128,7 @@ function importedRuleFields(http: HttpExt | undefined): Pick<Entry, 'rules' | 'm
   const str = (v: unknown, max: number): v is string => typeof v === 'string' && v.length <= max;
   const rules = Array.isArray(http.rules)
     ? http.rules.filter((r) => r && str(r.id, 64) && str(r.name, 120) && ['block', 'mock', 'rewrite', 'delay'].includes(r.action) && (r.phase === 'request' || r.phase === 'response'))
-      .slice(0, 200).map((r) => ({ id: r.id, name: r.name, action: r.action, phase: r.phase }))
+      .slice(0, 200).map((r) => ({ id: r.id, name: r.name, action: r.action, phase: r.phase, ...(str(r.note, 200) ? { note: r.note } : {}) }))
     : [];
   return {
     ...(rules.length ? { rules } : {}),

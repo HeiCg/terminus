@@ -7,9 +7,9 @@ import { Writable } from 'node:stream';
 import { generateCACertificate } from 'mockttp';
 import { Store } from '../src/store.js';
 import { createProxySource, type ProxySource, type CollectorEndpoint } from '../src/proxy/server.js';
-import { createRuleRunner } from '../src/proxy/rules.js';
+import { createRuleRunner, replaceText, RULE_REPLACE_OUTPUT_EXTRA } from '../src/proxy/rules.js';
 import { RulesStore } from '../src/rulesStore.js';
-import { validateRulesBody, type Rule } from '../src/ruleModel.js';
+import { validateRulesBody, RULE_BODY_MAX, RULE_REPLACE_WITH_MAX, type Rule } from '../src/ruleModel.js';
 import { writeHar } from '../src/har.js';
 import { loadCaptureDoc } from '../src/loadCapture.js';
 import type { Entry } from '../src/types.js';
@@ -345,6 +345,41 @@ describe('delay', () => {
     expect(sleep).toHaveBeenCalledWith(30_000);
     expect(runner.take('q1')?.applied.map((a) => a.action)).toEqual(['delay', 'delay', 'mock']);
     expect(runner.take('q1')).toBeUndefined(); // taken once
+  });
+});
+
+// 0.3.0 review: a short `find` times a long `with` must not multiply a body.
+describe('replace output cap', () => {
+  it('stops replacing at max(input, 1 MiB) + 1 MiB and leaves the rest unchanged', () => {
+    const w = 'x'.repeat(RULE_REPLACE_WITH_MAX);
+    const r = replaceText(Buffer.from('a'.repeat(100)), [{ find: 'a', with: w }])!;
+    const cap = RULE_BODY_MAX + RULE_REPLACE_OUTPUT_EXTRA;
+    const fit = Math.floor((cap - 100) / (w.length - 1));
+    expect(r.capped).toBe(true);
+    expect(r.body.length).toBe(100 + fit * (w.length - 1));
+    expect(r.body.length).toBeLessThanOrEqual(cap);
+    expect(r.body.subarray(r.body.length - (100 - fit)).toString()).toBe('a'.repeat(100 - fit));
+    // Under the cap nothing changes: every occurrence is replaced.
+    expect(replaceText(Buffer.from('a-b-a'), [{ find: 'a', with: 'xyz' }, { find: '-', with: '' }])).toEqual({ body: Buffer.from('xyzbxyz'), capped: false });
+    // A shrinking replacement is never capped.
+    expect(replaceText(Buffer.from('a'.repeat(5000)), [{ find: 'aa', with: 'b' }])!.capped).toBe(false);
+  });
+
+  it('notes the capped rule on the entry', async () => {
+    const runner = createRuleRunner({
+      rules: () => rules([{ phase: 'request', action: { type: 'rewrite', replace: [{ find: 'a', with: 'x'.repeat(RULE_REPLACE_WITH_MAX) }] } }]),
+      refuseDestination: () => false,
+    });
+    const req = { id: 'q1', method: 'POST', url: 'http://a.test/x', headers: {}, body: { getDecodedBuffer: async () => Buffer.from('a'.repeat(100)) } } as unknown as CompletedRequest;
+    const out = await runner.beforeRequest(req);
+    expect((out?.body as Buffer).length).toBeLessThanOrEqual(RULE_BODY_MAX + RULE_REPLACE_OUTPUT_EXTRA);
+    const [applied] = runner.take('q1')!.applied;
+    expect(applied.note).toMatch(/growth cap/);
+  });
+
+  it('a with text over 64 KiB is refused by validation', () => {
+    const r = validateRulesBody({ rules: [{ id: 'r', name: 'r', phase: 'request', action: { type: 'rewrite', replace: [{ find: 'a', with: 'x'.repeat(RULE_REPLACE_WITH_MAX + 1) }] } }] });
+    expect(r).toMatchObject({ ok: false, path: 'rules[0].action.replace[0].with' });
   });
 });
 

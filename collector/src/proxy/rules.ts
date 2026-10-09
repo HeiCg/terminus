@@ -16,7 +16,7 @@
 // accumulated delay is capped at RULE_DELAY_MAX_MS per phase.
 import { STATUS_CODES } from 'node:http';
 import type { CompletedRequest, requestSteps } from 'mockttp';
-import { ruleMatches, RULE_DELAY_MAX_MS, type AppliedRule, type Rule, type RuleRequest, type RewriteAction } from '../ruleModel.js';
+import { ruleMatches, RULE_BODY_MAX, RULE_DELAY_MAX_MS, type AppliedRule, type Rule, type RuleRequest, type RewriteAction } from '../ruleModel.js';
 import { redactUrl, type RedactMark } from '../redactor.js';
 import type { Entry } from '../types.js';
 import { log } from '../log.js';
@@ -71,13 +71,38 @@ const withoutPseudo = (h: Headers): Headers => Object.fromEntries(Object.entries
 const ruleBody = (a: { body?: string; bodyBase64?: string }): Buffer | undefined =>
   a.body !== undefined ? Buffer.from(a.body, 'utf8') : a.bodyBase64 !== undefined ? Buffer.from(a.bodyBase64, 'base64') : undefined;
 
-// Literal find/replace over a UTF-8 body; a binary (non-UTF-8) body is left alone.
-function replaceText(buf: Buffer, items: RewriteAction['replace']): Buffer | null {
+// The replaced body may grow by at most this much past max(input, 1 MiB): a short
+// `find` repeated through a body times a long `with` would otherwise multiply it.
+export const RULE_REPLACE_OUTPUT_EXTRA = 1024 * 1024;
+
+// Literal find/replace over a UTF-8 body (left to right, non-overlapping, item by
+// item); a binary (non-UTF-8) body is left alone (null). The output is capped at
+// max(input, RULE_BODY_MAX) + RULE_REPLACE_OUTPUT_EXTRA bytes: the replacement
+// that would cross it, and every later one, is not made (the rest of the body is
+// left unchanged) and `capped` is set.
+export function replaceText(buf: Buffer, items: RewriteAction['replace']): { body: Buffer; capped: boolean } | null {
   let text: string;
   try { text = strictUtf8.decode(buf); } catch { return null; }
-  for (const it of items ?? []) text = text.split(it.find).join(it.with);
-  return Buffer.from(text, 'utf8');
+  const cap = Math.max(buf.length, RULE_BODY_MAX) + RULE_REPLACE_OUTPUT_EXTRA;
+  let size = buf.length;
+  let capped = false;
+  for (const it of items ?? []) {
+    if (capped) break;
+    const delta = Buffer.byteLength(it.with, 'utf8') - Buffer.byteLength(it.find, 'utf8');
+    const parts: string[] = [];
+    let i = 0;
+    for (let j = text.indexOf(it.find); j >= 0; j = text.indexOf(it.find, i)) {
+      if (delta > 0 && size + delta > cap) { capped = true; break; }
+      parts.push(text.slice(i, j), it.with);
+      size += delta;
+      i = j + it.find.length;
+    }
+    if (parts.length) { parts.push(text.slice(i)); text = parts.join(''); }
+  }
+  return { body: Buffer.from(text, 'utf8'), capped };
 }
+
+const CAPPED_NOTE = `replace stopped at the ${RULE_REPLACE_OUTPUT_EXTRA}-byte growth cap; the rest of the body was left unchanged`;
 
 function applyHeaderOps(headers: Headers, a: RewriteAction): boolean {
   let changed = false;
@@ -139,7 +164,7 @@ export function createRuleRunner(opts: RuleRunnerOptions): RuleRunner {
         if (a.replace?.length) {
           const cur = await currentBody();
           const next = cur ? replaceText(cur, a.replace) : null;
-          if (next) body = next;
+          if (next) { body = next.body; if (next.capped) x.applied[x.applied.length - 1].note = CAPPED_NOTE; }
         }
         continue;
       }
@@ -200,7 +225,7 @@ export function createRuleRunner(opts: RuleRunnerOptions): RuleRunner {
       if (a.replace?.length) {
         const cur = body ?? (await res.body.getDecodedBuffer().catch(() => undefined)) ?? undefined;
         const next = cur ? replaceText(cur, a.replace) : null;
-        if (next) body = next;
+        if (next) { body = next.body; if (next.capped) x.applied[x.applied.length - 1].note = CAPPED_NOTE; }
       }
     }
     if (delay > 0) await sleep(Math.min(RULE_DELAY_MAX_MS, delay));

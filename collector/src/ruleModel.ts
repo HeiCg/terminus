@@ -57,12 +57,17 @@ export type Rule = {
   match: RuleMatch; phase: RulePhase; action: RuleAction;
 };
 
-// What an entry records about a rule that ran on it.
-export type AppliedRule = { id: string; name: string; action: RuleActionType; phase: RulePhase };
+// What an entry records about a rule that ran on it. `note` explains a partial
+// application (a `replace` stopped at its output cap).
+export type AppliedRule = { id: string; name: string; action: RuleActionType; phase: RulePhase; note?: string };
 
 export const RULES_MAX = 200;
 export const RULE_BODY_MAX = 1024 * 1024;
 export const RULE_REPLACE_MAX = 50;
+// One `replace` item's `with` text, in UTF-8 bytes (`find` may be up to
+// RULE_BODY_MAX). Small, because every occurrence of `find` repeats it; the
+// proxy also caps the replaced body (proxy/rules.ts, RULE_REPLACE_OUTPUT_EXTRA).
+export const RULE_REPLACE_WITH_MAX = 64 * 1024;
 export const RULE_DELAY_MAX_MS = 30_000;
 export const RULE_NAME_MAX = 120;
 export const RULE_MAP_MAX = 50; // query/headers matchers, set/remove header lists
@@ -315,7 +320,9 @@ function validateAction(v: unknown, phase: RulePhase, path: string): RuleAction 
           onlyKeys(it, ['find', 'with'], p);
           const find = bodyText(it.find, `${p}.find`);
           if (find === '') bad(`${p}.find`, 'must not be empty');
-          return { find, with: bodyText(it.with ?? '', `${p}.with`) };
+          const w = bodyText(it.with ?? '', `${p}.with`);
+          if (utf8Length(w) > RULE_REPLACE_WITH_MAX) bad(`${p}.with`, `is larger than ${RULE_REPLACE_WITH_MAX} bytes`);
+          return { find, with: w };
         });
       }
       const changes = ['url', 'method', 'status', 'setHeaders', 'removeHeaders', 'body', 'bodyBase64', 'replace'].filter((k) => (out as Record<string, unknown>)[k] !== undefined);
