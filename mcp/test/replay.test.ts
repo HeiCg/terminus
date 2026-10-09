@@ -12,14 +12,15 @@ import { tempStateDir, settingsFor, connect, call, text, toolNames, makeEntry } 
 
 let target: http.Server;
 let targetUrl = '';
-const seen: { method: string; url: string; body: string; headers: http.IncomingHttpHeaders }[] = [];
+const seen: { method: string; url: string; body: string; raw: Buffer; headers: http.IncomingHttpHeaders }[] = [];
 
 beforeAll(async () => {
   target = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on('data', (d) => chunks.push(d));
     req.on('end', () => {
-      seen.push({ method: req.method ?? '', url: req.url ?? '', body: Buffer.concat(chunks).toString('utf8'), headers: req.headers });
+      const raw = Buffer.concat(chunks);
+      seen.push({ method: req.method ?? '', url: req.url ?? '', body: raw.toString('utf8'), raw, headers: req.headers });
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"ok":true}');
     });
@@ -93,6 +94,30 @@ describe('terminus_replay', () => {
       expect(seen[before]).toMatchObject({ method: 'PUT', url: '/other', body: 'HELLO' });
       expect(seen[before].headers.authorization).toBe('Bearer secret');
       expect(text(r)).not.toContain('stripped');
+    } finally { await c.close(); }
+  });
+
+  it('overrides.bodyBase64 sends raw bytes (U4)', async () => {
+    h.store.addEntry(makeEntry({ id: 'a3', url: `${targetUrl}/v1/bin` }));
+    const c = await connect(settingsFor(h, { token: h.adminToken, env: OPT_IN, stateDir: dir }));
+    try {
+      const bytes = Buffer.from([0x00, 0xff, 0x10, 0x80]);
+      const before = seen.length;
+      const r = await call(c, 'terminus_replay', { deviceId: 'd1', id: 'a3', overrides: { bodyBase64: bytes.toString('base64') } });
+      expect(r.isError).toBeFalsy();
+      expect(Buffer.compare(seen[before].raw, bytes)).toBe(0);
+    } finally { await c.close(); }
+  });
+
+  it('body and bodyBase64 together are refused before anything is sent', async () => {
+    h.store.addEntry(makeEntry({ id: 'a4', url: `${targetUrl}/v1/items` }));
+    const c = await connect(settingsFor(h, { token: h.adminToken, env: OPT_IN, stateDir: dir }));
+    try {
+      const before = seen.length;
+      const r = await call(c, 'terminus_replay', { deviceId: 'd1', id: 'a4', overrides: { body: 'x', bodyBase64: 'eA==' } });
+      expect(r.isError).toBe(true);
+      expect(text(r)).toContain('only one of overrides.body and overrides.bodyBase64');
+      expect(seen.length).toBe(before);
     } finally { await c.close(); }
   });
 

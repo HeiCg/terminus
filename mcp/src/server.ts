@@ -51,6 +51,15 @@ const filterShape = {
   completed: z.boolean().optional().describe('true: has a status or an error; false: still in flight.'),
 };
 
+// The filter language (read-api.md "Filter language"), sent as q= only to a
+// collector that advertises `query`; an older one would ignore it and return an
+// unfiltered page the model would take as filtered, so it is a tool error there.
+const qShape = z.string().min(1).max(2048).optional().describe(
+  'Filter expression in the Terminus filter language, ANDed with the other filters, e.g. '
+  + '"status >= 500 or (error)", "method == POST and host ~ api", "not path ~ /health". Needs a collector with the "query" capability.',
+);
+const needsQuery = (a: Record<string, unknown>): string[] => (a.q !== undefined ? ['query'] : []);
+
 const hasFilters = (a: Record<string, unknown>): boolean =>
   ['method', 'urlContains', 'status', 'source', 'completed'].some((k) => a[k] !== undefined);
 const hasIdentityScope = (a: Record<string, unknown>): boolean => a.externalId !== undefined || a.bundleId !== undefined;
@@ -159,14 +168,15 @@ export function createTerminusServer(settings: Settings, opts: ServerOptions = {
       newOnly: z.boolean().optional().describe('With afterSeq: keep only exchanges first seen after the cursor.'),
       ...scopeShape,
       ...filterShape,
+      q: qShape,
       limit: z.number().int().min(1).max(200).optional().describe('Page size cap with afterSeq (1-200).'),
     },
     annotations: READ_ONLY,
-  }, run((a) => ['seq', ...(hasFilters(a) ? ['filters'] : []), ...(hasIdentityScope(a) ? ['device-identity'] : [])], async (a, signal) => {
+  }, run((a) => ['seq', ...(hasFilters(a) ? ['filters'] : []), ...(hasIdentityScope(a) ? ['device-identity'] : []), ...needsQuery(a)], async (a, signal) => {
     if (a.afterSeq !== undefined && a.last !== undefined) throw new ToolError('pass either afterSeq or last, not both');
     const params: Record<string, string | number | boolean | undefined> = {
       epoch: a.epoch, newOnly: a.newOnly, device: a.device, externalId: a.externalId, bundleId: a.bundleId,
-      method: a.method, urlContains: a.urlContains, status: a.status, source: a.source, completed: a.completed,
+      method: a.method, urlContains: a.urlContains, status: a.status, source: a.source, completed: a.completed, q: a.q,
     };
     if (a.afterSeq !== undefined) { params.afterSeq = a.afterSeq; params.limit = a.limit; }
     else params.last = a.last ?? a.limit ?? 20;
@@ -226,15 +236,16 @@ export function createTerminusServer(settings: Settings, opts: ServerOptions = {
       urlContains: filterShape.urlContains,
       status: filterShape.status,
       source: filterShape.source,
+      q: qShape,
       limit: z.number().int().min(1).max(50).optional().describe('Matches to return (1-50, collector default 1).'),
     },
     annotations: READ_ONLY,
-  }, run(() => ['seq', 'wait', 'filters'], async (a, signal) => {
+  }, run((a) => ['seq', 'wait', 'filters', ...needsQuery(a)], async (a, signal) => {
     const p = await api.getJson<{ matched: boolean; items: EntrySummary[]; nearMisses?: EntrySummary[]; nextSeq: number; lastSeq: number; epoch: string; gap: boolean; devices?: string[] }>(
       `/api/entries/wait${query({
         afterSeq: a.afterSeq, epoch: a.epoch, timeoutMs: a.timeoutMs, newOnly: a.newOnly, completed: a.completed,
         device: a.device, externalId: a.externalId, bundleId: a.bundleId,
-        method: a.method, urlContains: a.urlContains, status: a.status, source: a.source, limit: a.limit,
+        method: a.method, urlContains: a.urlContains, status: a.status, source: a.source, q: a.q, limit: a.limit,
       })}`, signal);
     let text: string;
     if (p.matched) {
@@ -326,12 +337,17 @@ export function createTerminusServer(settings: Settings, opts: ServerOptions = {
           method: z.string().min(1).optional(),
           url: z.string().min(1).optional(),
           headers: z.record(z.string(), z.string()).optional(),
-          body: z.string().optional(),
-        }).optional().describe('Replace the method, the URL, the whole header map (it replaces the captured headers) or the body.'),
+          body: z.string().optional().describe('Request body as UTF-8 text.'),
+          bodyBase64: z.string().optional().describe('Request body as base64 of raw bytes (binary-safe). Not together with body.'),
+        }).optional().describe('Replace the method, the URL, the whole header map (it replaces the captured headers) or the body '
+          + '(body or bodyBase64, max 1 MiB). Without a body override a captured body, text or binary, is re-sent as is.'),
         withCredentials: z.boolean().default(false).describe('Re-send captured credentials verbatim (default false: stripped).'),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-    }, run(() => [], async (a, signal) => {
+    }, run((a) => (a.overrides?.bodyBase64 !== undefined ? ['replay-bytes'] : []), async (a, signal) => {
+      if (a.overrides?.body !== undefined && a.overrides?.bodyBase64 !== undefined) {
+        throw new ToolError('pass only one of overrides.body and overrides.bodyBase64');
+      }
       const overrides = a.overrides && Object.values(a.overrides).some((v) => v !== undefined) ? a.overrides : undefined;
       // The same payload the CLI's `terminus replay` sends.
       const payload = { deviceId: a.deviceId, id: a.id, credentials: a.withCredentials ? 'keep' : 'strip', ...(overrides ? { overrides } : {}) };
