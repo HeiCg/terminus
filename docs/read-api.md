@@ -10,6 +10,10 @@ For the trust model behind the tokens and redaction, see [security.md](security.
 for how capture flows through the collector, see [architecture.md](architecture.md);
 for the device-side wire protocols, see [ingest-protocol.md](ingest-protocol.md).
 
+**MCP.** To give Claude Code or Claude Desktop access to this API without writing a
+client, use `terminus-mcp`, an MCP server built on these routes with the reader
+token: see [mcp/README.md](../mcp/README.md).
+
 ## Overview
 
 The API is JSON over HTTP on the collector's loopback listener,

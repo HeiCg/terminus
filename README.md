@@ -10,11 +10,11 @@ without routing traffic through a third-party service.
 
 ## Quick start
 
-Terminus is an npm-workspaces monorepo (`collector/` + `cli/`). Install and run it
+Terminus is an npm-workspaces monorepo (`collector/`, `cli/` and `mcp/`). Install and run it
 from the repository root:
 
 ```bash
-npm ci                          # installs both workspaces from the root lockfile
+npm ci                          # installs every workspace from the root lockfile
 npm start                       # builds, then serves the UI on http://127.0.0.1:8787
 npm run build -w @terminus/cli  # optional: build the terminus CLI
 ```
@@ -65,11 +65,37 @@ terminus pair --qr                # scannable QR (contains the device token)
 
 See the [cli/README.md](cli/README.md) for every command, filter, and exit code.
 
+## MCP server (Claude Code, Claude Desktop)
+
+`terminus-mcp` lets Claude Code or Claude Desktop read the captured traffic: status,
+devices, entries, one entry with headers and bodies, a wait for the next matching
+request, and WebSocket sessions and frames. It runs over stdio and uses the
+collector's [read API](docs/read-api.md) with the read-only reader token, which it
+finds in the collector's state directory on its own.
+
+```bash
+npm run build -w @terminus/mcp    # emits mcp/dist/main.js
+claude mcp add terminus -- node /abs/path/to/proxy_2/mcp/dist/main.js
+```
+
+For Claude Desktop, add it to `claude_desktop_config.json`:
+
+```json
+{ "mcpServers": { "terminus": { "command": "node", "args": ["/abs/path/to/proxy_2/mcp/dist/main.js"], "env": {} } } }
+```
+
+Captured content is untrusted input that an app or server controls; the server
+marks it as data, not instructions, and caps body sizes. Replaying requests is off
+unless you run it with the admin token and `TERMINUS_MCP_ALLOW_REPLAY=1`. See
+[mcp/README.md](mcp/README.md) for the tools, configuration, and security notes.
+
 ## Documentation
 
 - [collector/README.md](collector/README.md) — running the collector, capture
   protocols, pairing, and exports
 - [cli/README.md](cli/README.md) — the command-line client
+- [mcp/README.md](mcp/README.md): the MCP server for Claude Code and Claude
+  Desktop
 - [docs/architecture.md](docs/architecture.md) — listeners, capture flow, pairing,
   state, and the optional proxy
 - [docs/security.md](docs/security.md) — trust model, authentication, redaction,
