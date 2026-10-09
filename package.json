@@ -15,5 +15,9 @@
     "check:ui": "npm run check:ui -w collector",
     "lint:ui": "npm run lint:ui -w collector",
     "test:browser": "npm run test:browser -w collector"
+  },
+  "overrides": {
+    "proxy-addr": "^2.0.8",
+    "ip-address": "^10.7.3"
   }
 }
