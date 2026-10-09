@@ -11,6 +11,8 @@
   import EmptyState from '../../components/EmptyState.svelte';
   import JsonView from '../../components/JsonView.svelte';
   import OmittedCard from '../../components/OmittedCard.svelte';
+  import HexView from '../../components/HexView.svelte';
+  import { base64ToBytes } from '../../lib/bytes.js';
 
   type Props = { sockets: Sockets };
   let { sockets }: Props = $props();
@@ -61,6 +63,13 @@
     const reason = s.closeReason?.trim() ? s.closeReason : 'no close reason';
     return `${opened} · closed ${fmtTime(s.closedAt)} · ${reason}`;
   });
+
+  // U4: a binary frame's bytes for the hex viewer. The cache holds binary
+  // payloads as base64; a non-touching peek so rendering never reorders the LRU.
+  function frameBytes(hash: string): Uint8Array | null {
+    const raw = cache.peek(hash);
+    return raw == null ? null : base64ToBytes(raw);
+  }
 
   // Re-run the frame load for the current selection (the error-state retry).
   function retry(): void {
@@ -206,7 +215,14 @@
 
     {#if sockets.expanded.has(fr.sequence)}
       <div class="body">
-        {#if body?.kind === 'ok'}
+        {#if body?.kind === 'ok' && body.encoding === 'binary'}
+          {@const bytes = frameBytes(body.hash)}
+          {#if bytes}
+            <HexView {bytes} label={`frame #${fr.sequence}`} testid="frame-body-hex" />
+          {:else}
+            <p class="hint">This frame's payload could not be decoded.</p>
+          {/if}
+        {:else if body?.kind === 'ok'}
           <div class="body-text" data-testid="frame-body-text">
             <JsonView hash={body.hash} mode="raw" {cache} />
           </div>

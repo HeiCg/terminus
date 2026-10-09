@@ -233,3 +233,42 @@ describe('BodyPane binary bodies', () => {
     expect(screen.queryByText(/Binary/)).toBeNull();
   });
 });
+
+describe('BodyPane hex viewer (U4)', () => {
+  it('a binary body keeps its card metadata and shows the bytes as a hex dump', () => {
+    const cache = new BodyCache();
+    cache.putRaw('bin-hex', 'AAECAwQF'); // 00 01 02 03 04 05
+    const sel = makeSelection(cache);
+    sel.current = row();
+    sel.detail = detailWith('application/octet-stream');
+    sel.bodies = {
+      request: { kind: 'absent' } as BodyState,
+      response: { kind: 'ok', hash: 'bin-hex', size: 6, encoding: 'binary' } as BodyState,
+    };
+    renderPane(sel, cache);
+    expect(screen.getByText(/Binary · application\/octet-stream/)).toBeInTheDocument();
+    const rows = screen.getAllByTestId('hex-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('00000000 00 01 02 03 04 05');
+  });
+
+  it('a text body toggles between the text view and its UTF-8 bytes in hex', async () => {
+    const cache = new BodyCache();
+    cache.putRaw('txt', '{"a":1}');
+    const sel = makeSelection(cache);
+    sel.current = row();
+    sel.detail = detailWith('application/json');
+    sel.bodies = {
+      request: { kind: 'absent' } as BodyState,
+      response: { kind: 'ok', hash: 'txt', size: 7, encoding: 'utf8' } as BodyState,
+    };
+    renderPane(sel, cache);
+    expect(screen.queryByTestId('hex-view')).toBeNull();
+    const toggle = screen.getByRole('button', { name: 'Hex' });
+    await fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('hex-row')).toHaveTextContent('7b 22 61 22 3a 31 7d');
+    await fireEvent.click(toggle);
+    expect(screen.queryByTestId('hex-view')).toBeNull();
+  });
+});

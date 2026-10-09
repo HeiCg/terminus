@@ -1,4 +1,5 @@
 import type { EntryDetail, FrameSummary, Page } from './protocol.js';
+import { bytesToBase64 } from './bytes.js';
 
 // All collector calls ride the session cookie same-origin — the admin token is
 // traded for a cookie once (Session.boot) and never travels a request again, and
@@ -9,7 +10,17 @@ import type { EntryDetail, FrameSummary, Page } from './protocol.js';
 const enc = encodeURIComponent;
 const SAME_ORIGIN: RequestInit = { credentials: 'same-origin' };
 
-// One HTTP exchange body loaded on demand: the bytes (utf8 text), an omission
+// A 200 body as the BodyCache holds it: text as-is, a binary body (served as
+// application/octet-stream) as base64 of its exact bytes. Reading binary with
+// `text()` would replace every invalid UTF-8 byte with U+FFFD.
+async function bodyText(r: Response): Promise<string> {
+  const ct = r.headers.get('content-type') ?? '';
+  if (ct.toLowerCase().startsWith('application/octet-stream')) return bytesToBase64(new Uint8Array(await r.arrayBuffer()));
+  return r.text();
+}
+
+// One HTTP exchange body loaded on demand: the bytes (utf8 text, or base64 for a
+// binary body), an omission
 // reason (410, the reason from x-body-omitted), gone (404, the record was cleared
 // out from under the selection), or error (a transport failure or 5xx — a
 // RECOVERABLE fault the UI offers to retry, never conflated with a 404).
@@ -64,7 +75,7 @@ export async function fetchBody(dev: string, id: string, side: 'request' | 'resp
     if (r.status === 410) return { kind: 'omitted', reason: r.headers.get('x-body-omitted') ?? 'omitted' };
     if (r.status === 404) return { kind: 'gone' };
     if (!r.ok) return { kind: 'error' }; // 5xx and other faults are recoverable, not gone
-    return { kind: 'ok', text: await r.text() };
+    return { kind: 'ok', text: await bodyText(r) };
   } catch { return { kind: 'error' }; } // transport failure: offer a retry, never gone
 }
 
@@ -85,7 +96,7 @@ export async function fetchFrameBody(dev: string, wsId: string, seq: number): Pr
     if (r.status === 410) return { kind: 'omitted', reason: r.headers.get('x-body-omitted') ?? 'omitted' };
     if (r.status === 404) return { kind: 'gone' };
     if (!r.ok) return { kind: 'error' }; // 5xx and other faults are recoverable, not gone
-    return { kind: 'ok', text: await r.text() };
+    return { kind: 'ok', text: await bodyText(r) };
   } catch { return { kind: 'error' }; } // transport failure: offer a retry, never gone
 }
 

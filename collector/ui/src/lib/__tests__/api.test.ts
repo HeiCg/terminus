@@ -3,12 +3,15 @@ import { fetchBody, fetchFrameBody, clear } from '../api.js';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-function res(init: { status: number; text?: string; omitted?: string }): Response {
+function res(init: { status: number; text?: string; omitted?: string; bytes?: Uint8Array }): Response {
   return {
     status: init.status,
     ok: init.status >= 200 && init.status < 300,
-    headers: { get: (k: string) => (k === 'x-body-omitted' ? init.omitted ?? null : null) },
+    headers: {
+      get: (k: string) => (k === 'x-body-omitted' ? init.omitted ?? null : k === 'content-type' && init.bytes ? 'application/octet-stream' : null),
+    },
     text: async () => init.text ?? '',
+    arrayBuffer: async () => init.bytes!.buffer,
   } as unknown as Response;
 }
 
@@ -36,6 +39,14 @@ describe('fetchBody transport vs gone', () => {
   it('returns ok text on 200', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => res({ status: 200, text: 'hello' })));
     expect(await fetchBody('d', 'r', 'response')).toEqual({ kind: 'ok', text: 'hello' });
+  });
+});
+
+describe('binary bodies (U4)', () => {
+  it('an octet-stream body becomes base64 of its exact bytes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => res({ status: 200, bytes: new Uint8Array([0, 0xff, 0xfe, 0x41]) })));
+    expect(await fetchBody('d', 'r', 'response')).toEqual({ kind: 'ok', text: 'AP/+QQ==' });
+    expect(await fetchFrameBody('d', 'w', 1)).toEqual({ kind: 'ok', text: 'AP/+QQ==' });
   });
 });
 
