@@ -156,20 +156,31 @@ like the admin token.
 
 ## OpenSSL missing at startup
 
-**Symptom.** The collector refuses to start with *"OpenSSL 3 not found on PATH.
-Install OpenSSL 3 and put it on PATH …"* or *"OpenSSL 3 required, found: …"*.
+**Symptom.** The collector refuses to start with *"OpenSSL 3 not found. Tried:
+openssl on PATH (LibreSSL 3.3.6); /opt/homebrew/opt/openssl@3/bin/openssl (not
+found); …"*.
 
-OpenSSL 3+ is required once, to generate the collector's identity certificate; the
-check runs **before** any listener opens. Stock macOS ships LibreSSL as
-`/usr/bin/openssl`, which fails the version check.
+OpenSSL 3+ is required to generate the collector's identity certificate; the check
+runs **before** any listener opens. Stock macOS ships LibreSSL as `/usr/bin/openssl`,
+which fails the version check. The collector looks in this order and uses the first
+OpenSSL 3 it finds:
 
-**Fix.** Install OpenSSL 3 and make it available on `PATH`.
+1. `openssl` on `PATH`;
+2. `TERMINUS_OPENSSL` (an explicit path to the binary);
+3. Homebrew's keg-only `openssl@3`: `/opt/homebrew/opt/openssl@3/bin/openssl`
+   (Apple silicon), then `/usr/local/opt/openssl@3/bin/openssl` (Intel);
+4. `/opt/homebrew/bin/openssl`, then `/usr/local/bin/openssl`.
 
-macOS (Homebrew's `openssl@3` is keg-only, so add it to `PATH` yourself):
+The error lists each candidate and what it was (not found, or the version found).
+
+**Fix.** Install OpenSSL 3.
+
+macOS: `brew install openssl@3` is enough; the keg-only install is found without
+changing `PATH`. For a non-Homebrew build, point `TERMINUS_OPENSSL` at it:
 
 ```bash
 brew install openssl@3
-export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+# or: export TERMINUS_OPENSSL=/path/to/openssl
 ```
 
 Linux (most current distributions already ship OpenSSL 3):
@@ -179,7 +190,8 @@ sudo apt install openssl     # Debian, Ubuntu
 sudo dnf install openssl     # Fedora, RHEL
 ```
 
-Check with `openssl version`, then restart the collector.
+Check with `openssl version` (or `$TERMINUS_OPENSSL version`), then restart the
+collector.
 
 ## QR pairing fails on a hardened QA build (paste works)
 
