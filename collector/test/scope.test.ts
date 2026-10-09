@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Store } from '../src/store.js';
-import { parseHostPattern, parsePatternList, patternMatches, CaptureScope, validateScopeBody, scopeFromEnv, loadScopeFile, saveScopeFile } from '../src/scope.js';
+import { parseHostPattern, parsePatternList, patternMatches, scopePath, decodePathSafe, CaptureScope, validateScopeBody, scopeFromEnv, loadScopeFile, saveScopeFile } from '../src/scope.js';
 import { performReplay } from '../src/replay.js';
 import { loadCaptureFile } from '../src/loadCapture.js';
 import { apply, completedInner, startInner } from './fixtures/atlantisWire.js';
@@ -176,3 +176,29 @@ describe('capture scope in the store', () => {
     expect(store.scopeStatus().dropped).toEqual({ excluded: 0, notIncluded: 0 });
   });
 });
+
+// 0.3.0 review: scope path patterns compared the raw percent-encoded pathname.
+describe('scope path normalisation', () => {
+  it('decodes percent-encoding safely and resolves dot segments', () => {
+    expect(scopePath('/%61dmin/x')).toBe('/admin/x');
+    expect(scopePath('/v1%2F..%2Fadmin')).toBe('/admin');
+    expect(scopePath('/a/./b/../c/')).toBe('/a/c/');
+    expect(scopePath('/a/..')).toBe('/');
+    expect(scopePath('/caf%C3%A9')).toBe('/café');
+    // Invalid sequences are left as they are; a stream URL's empty path stays empty.
+    expect(decodePathSafe('/%ZZ/%E0%A4%41/100%')).toBe('/%ZZ/%E0%A4A/100%');
+    expect(scopePath('')).toBe('');
+  });
+
+  it('an encoded path cannot slip past an exclude, and matching stays case-sensitive', () => {
+    const scope = new CaptureScope({ include: [], exclude: ['api.example.com/admin*'] });
+    expect(scope.verdict('https://api.example.com/%61dmin/users')).toBe('excluded');
+    expect(scope.verdict('https://api.example.com/v1%2F..%2Fadmin')).toBe('excluded');
+    expect(scope.verdict('https://api.example.com/%2561dmin')).toBeNull(); // decoded once: "/%61dmin"
+    expect(scope.verdict('https://api.example.com/Admin')).toBeNull();
+    const inc = new CaptureScope({ include: ['api.example.com/v1/*'], exclude: [] });
+    expect(inc.verdict('https://api.example.com/v1/%69tems')).toBeNull();
+    expect(inc.verdict('https://api.example.com/v1%2F..%2Fv2/items')).toBe('notIncluded');
+  });
+});
+

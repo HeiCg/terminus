@@ -69,6 +69,44 @@ export function hostMatches(p: HostPattern, hostname: string): boolean {
   return p.wildcard ? h.endsWith('.' + p.host) : h === p.host;
 }
 
+// Percent-decoding that never throws: each run of %XX escapes is decoded as UTF-8;
+// a run that is not valid UTF-8 keeps its bytes >= 0x80 escaped (only the ASCII
+// ones are decoded), and a `%` not followed by two hex digits stays as it is.
+export function decodePathSafe(p: string): string {
+  return p.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+    try { return decodeURIComponent(run); } catch {
+      return run.replace(/%([0-7][0-9a-fA-F])/g, (_m, h: string) => String.fromCharCode(parseInt(h, 16)));
+    }
+  });
+}
+
+// RFC 3986 remove_dot_segments over an absolute path.
+function removeDotSegments(p: string): string {
+  const out: string[] = [];
+  const segs = p.split('/');
+  for (let i = 1; i < segs.length; i++) {
+    const s = segs[i];
+    const last = i === segs.length - 1;
+    if (s === '.' || s === '..') {
+      if (s === '..' && out.length) out.pop();
+      if (last) out.push('');
+      continue;
+    }
+    out.push(s);
+  }
+  return '/' + out.join('/');
+}
+
+// The path a scope pattern is matched against: percent-decoded (once, safely),
+// then with `.`/`..` segments resolved, so `/%61dmin`, `/v1%2F..%2Fadmin` and
+// `/admin` are the same path. Matching stays case-sensitive (`/Admin` is not
+// `/admin`), as paths are on most servers.
+export function scopePath(pathname: string): string {
+  // A stream URL (`tcp://host:port`) has no path: keep it empty.
+  if (!pathname.startsWith('/')) return pathname;
+  return removeDotSegments(decodePathSafe(pathname));
+}
+
 export function patternMatches(p: HostPattern, hostname: string, pathname: string): boolean {
   if (!hostMatches(p, hostname)) return false;
   if (p.path == null) return true;
@@ -110,7 +148,7 @@ export class CaptureScope {
     let u: URL;
     try { u = new URL(url); } catch { return null; }
     const host = u.hostname;
-    const p = u.pathname;
+    const p = scopePath(u.pathname);
     if (this.exclude.some((x) => patternMatches(x, host, p))) return 'excluded';
     if (this.include.length > 0 && !this.include.some((x) => patternMatches(x, host, p))) return 'notIncluded';
     return null;
