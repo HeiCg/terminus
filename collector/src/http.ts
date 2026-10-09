@@ -13,7 +13,7 @@ import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 import { performReplay } from './replay.js';
 import { sanCoversHost } from './security/identity.js';
-import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters } from './entryFilters.js';
+import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters, storeMatchEnv } from './entryFilters.js';
 import { createEntryWaits } from './entryWait.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
@@ -96,9 +96,10 @@ function forbiddenScope(res: http.ServerResponse): void {
 // `scope` is the resolved device set (null: unscoped). When the caller named
 // `externalId` or `bundleId` the response echoes it as `devices` (P2), so a client
 // can see which devices its filter selected, an empty list included. The P4
-// filters (method, urlContains, status, source, completed) AND with all of it.
+// filters (method, urlContains, status, source, completed) and the U2 `q`
+// expression AND with all of it.
 function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): { status: number; body: unknown } {
-  const bad = (message: string) => ({ status: 400, body: { error: 'bad_request', message } });
+  const bad = (message: string, offset?: number) => ({ status: 400, body: offset === undefined ? { error: 'bad_request', message } : { error: 'bad_request', message, offset } });
   const isLast = q.has('last');
   if (q.has('cursor')) return bad('afterSeq/last cannot be combined with cursor');
   if (isLast && q.has('afterSeq')) return bad('last cannot be combined with afterSeq');
@@ -120,8 +121,8 @@ function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): {
   const n = nonNegIntParam(q, isLast ? 'last' : 'afterSeq');
   if (n === null) return bad(`${isLast ? 'last' : 'afterSeq'} must be a non-negative integer`);
   if (isLast && (n < 1 || n > 200)) return bad('last must be between 1 and 200');
-  const filters = parseEntryFilters(q);
-  if (!filters.ok) return bad(filters.message);
+  const filters = parseEntryFilters(q, storeMatchEnv(store));
+  if (!filters.ok) return bad(filters.message, filters.offset);
   const match = filters.value;
 
   const { epoch, lastSeq } = store.seqState();
