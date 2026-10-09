@@ -21,8 +21,9 @@ import type { EntrySummary } from './uiProtocol.js';
 // since no 0.2 user typed those as text. A lone undotted field (`error`) stays a
 // text search there; `(error)` or any operator switches to the expression reading.
 // Free text that contains expression syntax (a bracket, `!`, `~`, `<`, `>`, `==`,
-// `&&`, `||` outside quotes) or a bare keyword (and/or/not/in/contains/matches)
-// is read as an expression, so such a 0.2 search must now be quoted.
+// `&&`, `||` outside quotes), a bare keyword (and/or/not/in/contains/matches) or
+// a lone `=`, `&`, `|` is read as an expression, so such a 0.2 search must now be
+// quoted. A `=`, `&` or `|` inside a word (`next=/home&x=1`) stays text.
 //
 // Cost: compile is linear in the input; a predicate walks the AST once per entry
 // (at most FILTER_MAX_NODES nodes), each node linear in the field it reads, glob
@@ -507,6 +508,8 @@ function legacyShape(tokens: LegacyToken[]): boolean {
     if (LEGACY_KEY.test(t.text)) continue;
     if (t.syntax) return false;
     if (!t.quoted && /^(and|or|not|contains|matches|in)$/i.test(t.text)) return false;
+    // A free-standing `=`, `&` or `|` is a mistyped operator, not a search.
+    if (!t.quoted && /^[=&|]$/.test(t.text)) return false;
   }
   return true;
 }

@@ -600,9 +600,10 @@ consequences:
 - A lone undotted field name in such a query is a text search (`error` finds URLs
   containing "error"). Write `(error)` or combine it with an operator to test the
   field. A lone dotted name (`redacted.request`, `http.response`) is a field test.
-- Free text that contains a bracket, `!`, `~`, `<`, `>`, `==`, `&&` or `||`, or a
-  word `and`, `or`, `not`, `in`, `contains`, `matches`, makes the query an
-  expression. Quote such text to search for it: `"sign in"`, `"(beta)"`.
+- Free text that contains a bracket, `!`, `~`, `<`, `>`, `==`, `&&` or `||`, a
+  word `and`, `or`, `not`, `in`, `contains`, `matches`, or a lone `=`, `&` or `|`,
+  makes the query an expression. A `=`, `&` or `|` inside a word does not
+  (`next=/home&x=1` is still a text search). Quote such text to search for it: `"sign in"`, `"(beta)"`.
 
 ### Examples
 
