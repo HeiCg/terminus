@@ -2,7 +2,7 @@
   import type { Sockets, FrameDirection } from '../../lib/state/Sockets.svelte.js';
   import type { FrameSummary } from '../../lib/protocol.js';
   import { useCache } from '../../lib/context.js';
-  import { fmtBytes, fmtTime } from '../../lib/format.js';
+  import { fmtBytes, fmtTime, sessionBadge } from '../../lib/format.js';
   import KindBadge from '../../components/KindBadge.svelte';
   import StatePill from '../../components/StatePill.svelte';
   import Segmented from '../../components/Segmented.svelte';
@@ -12,7 +12,8 @@
   import JsonView from '../../components/JsonView.svelte';
   import OmittedCard from '../../components/OmittedCard.svelte';
   import HexView from '../../components/HexView.svelte';
-  import { base64ToBytes } from '../../lib/bytes.js';
+  import { base64ToBytes, utf8Encode } from '../../lib/bytes.js';
+  import StreamReplayButton from './StreamReplayButton.svelte';
 
   type Props = { sockets: Sockets };
   let { sockets }: Props = $props();
@@ -71,6 +72,27 @@
     return raw == null ? null : base64ToBytes(raw);
   }
 
+  // U7: a raw TCP/TLS stream's frames are bytes whatever their content, so every
+  // frame (text ones too: their cached UTF-8 text re-encoded) renders in the hex
+  // viewer.
+  const isStream = $derived(sockets.selected?.kind === 'tcp' || sockets.selected?.kind === 'tls');
+  function textBytes(hash: string): Uint8Array | null {
+    const raw = cache.peek(hash);
+    return raw == null ? null : utf8Encode(raw);
+  }
+
+  // The stream's endpoint metadata line: SNI, whether only metadata was recorded
+  // (a TLS pass-through tunnel) and the session a replay re-sent.
+  const streamMeta = $derived.by((): string => {
+    const st = sockets.selected?.stream;
+    if (!st) return '';
+    const parts: string[] = [`${st.host}:${st.port}`];
+    if (st.sni) parts.push(`SNI ${st.sni}`);
+    parts.push(st.plaintext ? (sockets.selected?.kind === 'tls' ? 'TLS terminated by the collector (plaintext)' : 'plain TCP') : 'TLS pass-through: ciphertext not captured, metadata only');
+    if (st.replayOf) parts.push(`replay of ${st.replayOf.wsId}`);
+    return parts.join(' · ');
+  });
+
   // Re-run the frame load for the current selection (the error-state retry).
   function retry(): void {
     const id = sockets.selectedId;
@@ -99,7 +121,7 @@
   <div class="frametimeline">
     <header class="head">
       <div class="summary">
-        <KindBadge kind={s.kind === 'sse' ? 'sse' : 'ws'} />
+        <KindBadge kind={sessionBadge(s.kind)} />
         {#if s.url == null}
           <span class="url unknown">URL unknown (opened before the collector started)</span>
         {:else}
@@ -109,8 +131,12 @@
           <span class="resumed" title="resumed: this socket was open before the collector started">resumed</span>
         {/if}
         <StatePill closedAt={s.closedAt} closeCode={s.closeCode} />
+        {#if isStream}
+          <StreamReplayButton session={s} onsent={(key) => void sockets.select(key.wsId)} />
+        {/if}
       </div>
       <p class="meta">{meta}</p>
+      {#if streamMeta}<p class="meta" data-testid="stream-meta">{streamMeta}</p>{/if}
     </header>
 
     <div class="toolbar">
@@ -215,8 +241,8 @@
 
     {#if sockets.expanded.has(fr.sequence)}
       <div class="body">
-        {#if body?.kind === 'ok' && body.encoding === 'binary'}
-          {@const bytes = frameBytes(body.hash)}
+        {#if body?.kind === 'ok' && (body.encoding === 'binary' || isStream)}
+          {@const bytes = body.encoding === 'binary' ? frameBytes(body.hash) : textBytes(body.hash)}
           {#if bytes}
             <HexView {bytes} label={`frame #${fr.sequence}`} testid="frame-body-hex" />
           {:else}
