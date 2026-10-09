@@ -67,7 +67,7 @@ the collector writes to `reader-token` in the same state dir. With it, `status`,
 `ls`, `show` and `devices` work (`status` then reports from `GET /api/status` only,
 since the live `/ui` socket is admin-only, and `--json` carries `snapshot: null`).
 Commands that need admin (`tail`, `clear`, `pause`, `resume`, `pair`, `replay`,
-`export`) exit `2` with `this command needs the admin token (reader token given)`,
+`replay-stream`, `export`) exit `2` with `this command needs the admin token (reader token given)`,
 and their file fallback reads `admin-token` only. See
 [docs/read-api.md](../docs/read-api.md#authentication).
 
@@ -80,6 +80,7 @@ and their file fallback reads `admin-token` only. See
 | `terminus ls [filters]` | `GET /api/entries` (paged). `--limit N`, `--all`. Same columns as `tail`. With filters, `--limit N` pages through the store to gather up to N matches (not just the first page). |
 | `terminus show <deviceId>/<entryKey>` | One entry: request/response headers, timing, and bodies (pretty JSON when JSON, text when textual, `<binary N bytes>` otherwise). `--body request\|response\|none`, `--curl` prints a reproduction curl. |
 | `terminus replay <deviceId>/<entryKey>` | `POST /api/replay`: re-send a captured request from the collector's machine and store the result as a new `replay` entry. Overrides: `--method`, `--url`, `--header K:V` (repeatable), `--body <string>` (UTF-8 text), `--body-file <path>` (the file's exact bytes, binary-safe; needs a collector advertising `replay-bytes`). Credentials are **stripped by default** (auth headers/cookies and token query params); `--with-credentials` re-sends them. Prints the outcome status, duration, the new entry key, and any `stripped:` names; `--json` emits the endpoint response. **The request leaves your machine** — see the security note. |
+| `terminus replay-stream <deviceId> <wsId>` | `POST /api/replay/stream`: re-send a captured raw TCP/TLS stream's client-to-server frames on a fresh connection from the collector's machine and store what the server sends back as a new `replay` stream session. `--tls` / `--no-tls` (default: as captured), `--sni <host>` (default: the captured SNI), `--frames 1,3,4` (client frame sequences, in that order; default every client frame), `--timeout <ms>` (how long to read, default 10000, max 30000). Upstream TLS is verified. Prints how the connection ended (server close, timeout, read cap or error), bytes sent/received and the new session key; `--json` emits the endpoint response. Needs a collector advertising `raw-streams`. **The bytes leave your machine.** |
 | `terminus export [--har\|--json] [-o file]` | Download the capture as HAR (default) or JSON; stdout unless `-o`. |
 | `terminus pause` / `terminus resume` | Toggle the live stream (`POST /api/pause` with `{paused}`). |
 | `terminus clear [--device <id>]` | Drop captured data, optionally for one device. |

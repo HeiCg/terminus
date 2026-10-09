@@ -13,6 +13,7 @@ import { runClear } from './commands/clear.js';
 import { runDevices } from './commands/devices.js';
 import { runPair } from './commands/pair.js';
 import { runReplay } from './commands/replay.js';
+import { runReplayStream } from './commands/replayStream.js';
 import { runCompletion } from './commands/completion.js';
 import { VERSION } from './version.js';
 import { type CommandSpec, type FlagSpec, GLOBAL_FLAGS, valueFlagNames, validateFlags, commandHelp } from './flagspec.js';
@@ -108,6 +109,20 @@ const COMMANDS: Record<string, Command> = {
       },
     },
   },
+  'replay-stream': {
+    run: runReplayStream,
+    spec: {
+      summary: 're-send a captured raw TCP/TLS stream from this machine',
+      usage: '<dev> <wsId>',
+      flags: {
+        tls: { type: 'boolean', help: 'connect with TLS (default: as captured)' },
+        'no-tls': { type: 'boolean', help: 'connect in clear TCP (default: as captured)' },
+        sni: { type: 'string', arg: '<host>', help: 'TLS server name (default: the captured SNI)' },
+        frames: { type: 'string', arg: '<list>', help: 'comma-list of client frame sequences to send (default: every client frame)' },
+        timeout: { type: 'number', arg: '<ms>', help: 'stop reading after this many ms (default 10000, max 30000)' },
+      },
+    },
+  },
   export: {
     run: runExport,
     spec: {
@@ -151,6 +166,9 @@ Commands:
   show <dev>/<key>       one entry: headers, timing, bodies; --body req|res|none, --curl
   replay <dev>/<key>     re-send a captured request (credentials stripped by
                          default); --method/--url/--header/--body/--with-credentials
+  replay-stream <dev> <wsId>
+                         re-send a raw TCP/TLS stream's client frames;
+                         --tls|--no-tls, --sni <host>, --frames 1,3,4, --timeout <ms>
   export [--har|--json]  download capture; -o <file> (default stdout)
   pause | resume         toggle the live stream
   clear [--device <id>]  drop captured data

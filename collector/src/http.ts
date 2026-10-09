@@ -12,6 +12,8 @@ import { VERSION, API_VERSION, CAPABILITIES } from './version.js';
 import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 import { performReplay } from './replay.js';
+import { performStreamReplay } from './streamReplay.js';
+import { WS_KINDS, type WsKind } from './types.js';
 import { sanCoversHost } from './security/identity.js';
 import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters, storeMatchEnv } from './entryFilters.js';
 import { createEntryWaits } from './entryWait.js';
@@ -355,7 +357,15 @@ export function createHttpServer(
         if (seg[1] === 'ws') {
           if (method !== 'GET') { res.writeHead(405); return res.end(); }
           // /api/ws — paged session summaries (frame array replaced by counts).
-          if (seg.length === 2) return json(store.wsSummaryPage(cursor, device, parseLimit()));
+          // `kind=` (U7) keeps one session kind; an unknown kind is a 400.
+          if (seg.length === 2) {
+            const kind = u.searchParams.get('kind');
+            if (kind !== null && !WS_KINDS.includes(kind as WsKind)) {
+              res.writeHead(400, { 'content-type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'bad_request', message: `kind must be one of ${WS_KINDS.join(', ')}` }));
+            }
+            return json(store.wsSummaryPage(cursor, device, parseLimit(), (kind as WsKind | null) ?? undefined));
+          }
           // /api/ws/:device/:wsId/frames?after&limit — paged frame summaries.
           if (seg.length === 5 && seg[4] === 'frames') {
             const afterRaw = u.searchParams.get('after');
@@ -457,6 +467,45 @@ export function createHttpServer(
             }).catch((e) => {
               log.warn('replay', String(e));
               if (!res.headersSent) { res.writeHead(500); res.end('replay failed'); }
+            });
+          });
+          return;
+        }
+        // Stream replay (U7): re-send a raw TCP/TLS stream's client frames on a fresh
+        // connection and store what comes back as a NEW `replay` stream session (see
+        // streamReplay.ts). Admin-only (not in the reader allowlist); a cookie-driven
+        // call needs an exact Origin like every mutation. Codes: 201 (key of the new
+        // session), 400 (malformed body), 404 (unknown session), 413 (an override
+        // frame over the per-frame cap), 422 (pass-through tunnel, STARTTLS, frames
+        // not retained, metadata-range destination).
+        if (u.pathname === '/api/replay/stream') {
+          if (method !== 'POST') { res.writeHead(405); return res.end(); }
+          if (!requireMutation(res, origin, auth)) return;
+          const chunks: Buffer[] = [];
+          let size = 0;
+          let aborted = false;
+          req.on('data', (d: Buffer) => {
+            if (aborted) return;
+            size += d.length;
+            if (size > 16 * 1024 * 1024) { aborted = true; res.writeHead(413); res.end('payload too large'); req.destroy(); }
+            else chunks.push(d);
+          });
+          req.on('end', () => {
+            if (aborted) return;
+            let parsed: unknown;
+            try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null'); }
+            catch { res.writeHead(400); return res.end('bad json'); }
+            performStreamReplay(store, parsed).then((result) => {
+              if (!result.ok) {
+                res.writeHead(result.code, { 'content-type': 'application/json' });
+                return res.end(JSON.stringify({ error: result.message }));
+              }
+              const { ok: _ok, ...body } = result;
+              res.writeHead(201, { 'content-type': 'application/json' });
+              res.end(JSON.stringify(body));
+            }).catch((e) => {
+              log.warn('replay/stream', String(e));
+              if (!res.headersSent) { res.writeHead(500); res.end('stream replay failed'); }
             });
           });
           return;

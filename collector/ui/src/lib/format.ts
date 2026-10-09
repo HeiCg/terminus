@@ -106,3 +106,8 @@ export const durationBucket = (ms: number | null): DurationBucket => {
   if (ms < 1000) return 'mid';
   return 'slow';
 };
+
+// The KindBadge a session shows: `websocket` → WS, and the U7 raw stream kinds as is.
+export function sessionBadge(kind: 'websocket' | 'sse' | 'tcp' | 'tls'): 'ws' | 'sse' | 'tcp' | 'tls' {
+  return kind === 'websocket' ? 'ws' : kind;
+}

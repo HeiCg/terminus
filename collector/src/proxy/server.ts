@@ -10,6 +10,7 @@ import { buildEntryInput, normalizeWsFrame, epochOf, type ProxyIds } from './nor
 import { log } from '../log.js';
 import { redactUrl } from '../redactor.js';
 import type { EntryInput, TunnelInfo } from '../types.js';
+import { createRawStreamCapture, type RawVerdict } from './rawStreams.js';
 
 // A collector-internal endpoint the proxy must NOT inspect: its TLS is tunnelled
 // raw (so the device keeps seeing the collector's own pinned certificate, never a
@@ -43,6 +44,11 @@ export type ProxySourceOptions = {
   // listed). Mutually exclusive: setting both throws.
   tlsPassthrough?: string[];
   tlsInterceptOnly?: string[];
+  // U7 (see rawStreams.ts): relay and record non-HTTP TCP/TLS streams inside a
+  // CONNECT/SOCKS tunnel (default on), and accept SOCKS v4/v5 on the same port
+  // (default off; TERMINUS_PROXY_SOCKS=1).
+  rawStreams?: boolean;
+  socks?: boolean;
 };
 
 // The cloud metadata service address. A proxy that forwarded to it would let a
@@ -163,6 +169,18 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     if (isExcludedDest(dest)) return false; // collector-internal: tunnel, don't reject
     return !isAllowedClient(req.remoteIpAddress);
   };
+
+  // U7: the raw stream capture shares the same access decision. A raw relay to a
+  // collector-internal endpoint, or a TLS tunnel to a collector host (the U5 rule),
+  // is relayed but never recorded; otherwise the metadata destination and a client
+  // outside the allowlist are refused.
+  const rawStreams = createRawStreamCapture({
+    store, generation, deviceIdOf, newRecordId, normalizeIp,
+    classify(ip, host, p, type): RawVerdict {
+      if (type === 'tls' ? collectorHosts.has(host) : isExcludedDest({ hostname: host, port: p })) return 'skip';
+      return shouldReject({ remoteIpAddress: ip, destination: { hostname: host, port: p } }) ? 'refuse' : 'record';
+    },
+  });
 
   // Connection gate applied by the HTTP passthrough rule BEFORE upstream is
   // contacted. Rejecting here (`response: 'close'`) means a disallowed client or a
@@ -293,6 +311,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
       if (store.addEntryInput(tunnelEntry(ids, url, info))) tunnels.set(e.id, { ids, url, info, sock });
     });
+    await rawStreams.attach(s);
     await s.on('tls-passthrough-closed', (e: TlsPassthroughEvent) => {
       const t = tunnels.get(e.id);
       if (!t) return;
@@ -324,7 +343,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     sessionId,
     async start() {
       if (server) return;
-      server = getLocal({
+      const build = (raw: boolean): Mockttp => getLocal({
         https: {
           key: ca.key, cert: ca.cert,
           // Collector-internal hosts are tunnelled raw: no MITM, so the device keeps
@@ -338,7 +357,15 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
         // The proxy must never rewrite CORS on captured traffic.
         cors: false,
         recordTraffic: false,
+        ...(raw ? { passthrough: ['unknown-protocol' as const] } : {}),
+        ...(options.socks ? { socks: true } : {}),
       });
+      // Raw passthrough only with its access gate in place (fail closed).
+      server = build(options.rawStreams !== false);
+      if (options.rawStreams !== false && !rawStreams.install(server)) {
+        log.warn('proxy: cannot gate raw streams in this mockttp version; non-HTTP traffic will not be relayed');
+        server = build(false);
+      }
       await server.start(port);
       actualPort = server.port;
       // Observe the client TCP sockets (first sighting wins: mockttp re-emits
@@ -364,10 +391,11 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       log.info(`proxy source listening on ${options.host ?? '0.0.0.0'}:${server.port} (session ${sessionId}); allowlist ${[...allow].join(',') || '(empty)'}`);
       if (userPassthrough.length) log.info(`proxy: TLS pass-through (not intercepted): ${userPassthrough.join(', ')}`);
       if (interceptOnly.length) log.info(`proxy: TLS intercept-only (every other host is tunnelled): ${interceptOnly.join(', ')}`);
+      if (options.socks) log.info('proxy: SOCKS v4/v5 accepted on the same port');
     },
     async stop() {
       const s = server; server = null;
-      httpIds.clear(); wsIds.clear(); tunnels.clear(); clientSockets.clear();
+      httpIds.clear(); wsIds.clear(); tunnels.clear(); clientSockets.clear(); rawStreams.clear();
       store.closeWsGeneration(generation);
       if (s) await s.stop();
     },

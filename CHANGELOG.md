@@ -8,6 +8,26 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- Raw TCP/TLS stream capture on the proxy (capability `raw-streams`). Non-HTTP
+  traffic inside a `CONNECT` tunnel (and, with the new `TERMINUS_PROXY_SOCKS=1`,
+  SOCKS v4/v5 on the proxy port) is relayed and recorded as a stream session on
+  the WebSocket session/frame model: `kind` `tcp` or `tls`, a `stream` field
+  (`host`, `port`, `sni`, `plaintext`, `replayOf`), chunks as `out`/`in` frames with
+  the WebSocket frame caps and retention (binary chunks kept verbatim, not
+  redacted). TLS the proxy terminates is captured as plaintext; a TLS pass-through
+  tunnel gets a metadata-only session. The allowlist and the metadata-IP block close
+  a refused stream before anything is dialled; the capture scope applies.
+  `GET /api/ws` takes `kind=`. The HAR export leaves stream sessions out.
+- `POST /api/replay/stream` (admin only): re-send a captured stream's client frames
+  (all, or a selection, with optional base64 overrides) on a fresh TCP or verified
+  TLS connection, record the server's answer until close, timeout (at most 30 s) or
+  read cap as a new `replay` stream session. Refuses pass-through tunnels,
+  STARTTLS-like captures and destinations in the link-local/metadata range (`422`).
+  CLI: `terminus replay-stream <deviceId> <wsId> [--tls|--no-tls] [--sni host]
+  [--frames 1,3,4] [--timeout ms]`. UI: TCP/TLS badges and filters in the Sockets
+  view, every stream frame in the hex viewer, and a "Replay stream" editor with
+  frame selection and hex overrides. MCP: `terminus_ws_sessions` shows stream
+  kinds and metadata and takes `kind`; `terminus_replay` stays HTTP-only.
 - `terminus-mcp` (new workspace `mcp/`, package `@terminus/mcp`): an MCP server on
   stdio for Claude Code and Claude Desktop over the read API. Tools:
   `terminus_status`, `terminus_devices`, `terminus_entries`, `terminus_entry`

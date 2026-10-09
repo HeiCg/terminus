@@ -73,6 +73,8 @@ export type WsSummary = {
   droppedFrames: number;
   partial?: boolean;
   resumed?: boolean;
+  // U7: present on a raw `tcp`/`tls` stream session.
+  stream?: { host: string; port: number; sni: string | null; plaintext: boolean; replayOf?: { wsId: string } };
 };
 
 export type FrameSummary = { sequence: number; ts: number; direction: 'in' | 'out'; binary: boolean; body: BodyRef };
@@ -208,6 +210,13 @@ export function wsLine(w: WsSummary): string {
   if (w.droppedFrames) parts.push(`dropped=${w.droppedFrames}`);
   if (w.partial) parts.push('[partial]');
   if (w.resumed) parts.push('[resumed]');
+  // A raw stream: its TLS server name, whether only metadata was recorded (a TLS
+  // pass-through tunnel: ciphertext, no frames) and, on a replay, its original.
+  if (w.stream) {
+    if (w.stream.sni) parts.push(`sni=${oneLine(w.stream.sni, 120)}`);
+    if (!w.stream.plaintext) parts.push('[metadata-only]');
+    if (w.stream.replayOf) parts.push(`replayOf=${oneLine(w.stream.replayOf.wsId, 120)}`);
+  }
   return parts.join(' ');
 }
 

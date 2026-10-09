@@ -239,6 +239,20 @@ for the QA device that trusts its CA. Turning it on means:
   allowlist, or to `169.254.169.254`, as soon as it is reported, before the
   upstream can answer. The two lists are host-only and the collector's own hosts are
   never intercepted in either mode.
+- **Non-HTTP streams are captured too, in plaintext where the proxy can read
+  them.** A TCP connection inside a `CONNECT` (or, with `TERMINUS_PROXY_SOCKS=1`,
+  SOCKS) tunnel that is not HTTP is relayed and recorded as a `tcp`/`tls` stream
+  session: its bytes are stored like WebSocket frames. For plain TCP that is the
+  protocol's cleartext (a database or cache protocol, SMTP, a custom game or IoT
+  protocol), and for TLS the proxy terminated it is the decrypted plaintext, so
+  passwords and tokens such protocols carry are in the store. Text chunks go through
+  the redactor, which only knows HTTP-style names and patterns; binary chunks (a
+  NUL byte or invalid UTF-8) are stored verbatim and never redacted. Narrow what is
+  recorded with the capture scope. A pass-through TLS tunnel records only metadata.
+  Stream capture applies the same gate before the proxy dials anything: a client
+  outside the allowlist, or a stream to `169.254.169.254`, is closed first. SOCKS
+  is off by default; when on, it is gated by the same allowlist (SOCKS
+  authentication is not used).
 - **Coverage is partial.** A client may ignore the proxy, pin its own certificate,
   use its own trust store, or use QUIC. The proxy never disables the app-side
   capture, and a refused proxy CA is recorded as a `tls_error` entry rather than
@@ -316,6 +330,33 @@ distinct from passive capture:
   override body or header is sent as given and stored masked. Binary content (a
   binary `Content-Type`, a NUL byte, or invalid UTF-8) is stored verbatim and is
   not scanned, like any other binary body.
+
+### Stream replay
+
+`POST /api/replay/stream` (and `terminus replay-stream`, and the Sockets view's
+"Replay stream") re-sends the client-to-server bytes of a captured raw TCP/TLS
+stream on a NEW connection from the collector's machine:
+
+- **Admin only, same mutation gate.** Not in the reader allowlist (`403
+  forbidden_scope`); a cookie-driven call needs an exact loopback Origin.
+- **There is no credential strip.** A raw stream has no header names to strip: the
+  stored bytes are re-sent as they are (a text chunk the redactor masked at
+  capture is re-sent masked), so whatever authentication the protocol carried in
+  its frames is re-sent too. Choose the frames you send.
+- **SSRF guard.** The destination (captured or overridden) is resolved first and
+  refused (`422`) when any address is in the link-local range `169.254.0.0/16`
+  (the cloud metadata service) or is `fd00:ec2::254`; the connection then goes to
+  the resolved address, so the name cannot be re-resolved elsewhere in between.
+  Other private addresses are allowed: replaying to LAN hosts is the point.
+- **Upstream TLS is verified**, like the HTTP replay; there is no insecure mode.
+- **Bounded.** At most 30 s (`timeoutMs`) and a read cap (`readBytes`, default
+  1 MiB, at most 16 MiB); each override frame is capped at 1 MiB.
+- **Refused when it cannot be faithful.** A TLS pass-through tunnel has no
+  plaintext to send, and a STARTTLS-like stream switched to TLS mid-stream, so its
+  later frames are ciphertext tied to the original connection's keys; both answer
+  `422`.
+- **The result is a new record**, a stream session with `source: replay` and
+  `stream.replayOf`; text chunks are redacted on storage like captured ones.
 
 ## Residual risks
 

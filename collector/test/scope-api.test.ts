@@ -25,7 +25,7 @@ describe('/api/status scope and /api/scope', () => {
       h.store.addEntry(entry('c', 'https://tracker.example/p'));
       const st = await (await fetch(h.url + '/api/status', { headers: { authorization: `Bearer ${h.readerToken}` } })).json();
       expect(st.scope).toEqual({ include: ['*.app.test'], exclude: ['cdn.app.test'], dropped: { excluded: 1, notIncluded: 1 } });
-      expect(st.capabilities).toEqual(expect.arrayContaining(['scope', 'tls-passthrough']));
+      expect(st.capabilities).toEqual(expect.arrayContaining(['scope', 'tls-passthrough', 'raw-streams']));
     } finally { await h.close(); }
   });
 

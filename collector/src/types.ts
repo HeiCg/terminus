@@ -127,16 +127,37 @@ export type StoredEntry = Omit<Entry, 'requestBody' | 'responseBody' |
   requestBody: BodyRef; responseBody: BodyRef;
 };
 
+// U7: the metadata of a raw TCP/TLS stream session (`kind` 'tcp' | 'tls'): the
+// destination the client asked the proxy for, the SNI of its TLS hello (null on a
+// plain TCP stream or when the client sent none), and whether its PLAINTEXT was
+// captured. `plaintext` is true for a plain TCP stream and for a TLS stream the
+// collector terminated (MITM); false for a TLS pass-through tunnel, whose bytes
+// are ciphertext and are never recorded (the session then has no frames).
+// `replayOf` is set only on a stream replay (source 'replay'): the wsId of the
+// session it re-sent, on the same device.
+export type StreamInfo = {
+  host: string; port: number; sni: string | null; plaintext: boolean;
+  replayOf?: { wsId: string };
+};
+
+// The session kinds. `websocket`/`sse` are the HTTP-borne sockets; `tcp`/`tls`
+// (U7) are raw streams the proxy relayed without HTTP framing.
+export type WsKind = 'websocket' | 'sse' | 'tcp' | 'tls';
+export const WS_KINDS: readonly WsKind[] = ['websocket', 'sse', 'tcp', 'tls'];
+
 // A captured WebSocket session. `kind` separates a real socket from an SSE stream
-// tunnelled over the same machinery; `httpEntryKey` links an SSE stream back to
-// the HTTP exchange that carries it (null for a plain socket).
+// tunnelled over the same machinery (and, U7, from a raw TCP/TLS stream, whose
+// chunks are its frames: `out` client→server, `in` server→client); `httpEntryKey`
+// links an SSE stream back to the HTTP exchange that carries it (null for a plain
+// socket). `stream` is present only on a `tcp`/`tls` session.
 export type WsSession = {
   wsId: string; deviceId: string; source: Source;
   // `null` when the session was SYNTHESIZED from a frame whose `ws_open` predates
   // this collector (a socket held open across a restart): the handshake url is
   // unknown until a later `ws_open` back-fills it.
   url: string | null; openedAt: number;
-  kind: 'websocket' | 'sse'; httpEntryKey: EntryKey | null;
+  kind: WsKind; httpEntryKey: EntryKey | null;
+  stream?: StreamInfo;
   // `partial` marks a session the admission authority opened from an orphan frame
   // or reopened after a gap (a removal), so the UI can flag the missing prefix.
   partial?: boolean;

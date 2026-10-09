@@ -26,7 +26,7 @@ type Api = Pick<typeof import('../api.js'), 'fetchFrames' | 'fetchFrameBody'>;
 // Just the device scope Sockets needs from Filters (the Topbar device switcher
 // scopes the Sockets list too). Optional so unit tests can stand Sockets up alone.
 type DeviceScope = { device: string | 'all' };
-export type SessionFilter = 'all' | 'ws' | 'sse' | 'open' | 'closed';
+export type SessionFilter = 'all' | 'ws' | 'sse' | 'tcp' | 'tls' | 'open' | 'closed';
 export type FrameDirection = 'all' | 'in' | 'out';
 
 // Sockets is the WS/SSE inspector's imperative state machine, the frame-list twin
@@ -143,6 +143,8 @@ export class Sockets {
       switch (f) {
         case 'ws': return s.kind === 'websocket';
         case 'sse': return s.kind === 'sse';
+        case 'tcp': return s.kind === 'tcp';
+        case 'tls': return s.kind === 'tls';
         case 'open': return s.closedAt == null;
         case 'closed': return s.closedAt != null;
         default: return true;

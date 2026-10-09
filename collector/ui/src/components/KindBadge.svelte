@@ -1,8 +1,9 @@
 <script lang="ts">
-  type Props = { kind: 'ws' | 'sse' | 'xhr' };
+  // U7: `tcp`/`tls` badge raw stream sessions in the Sockets view.
+  type Props = { kind: 'ws' | 'sse' | 'xhr' | 'tcp' | 'tls' };
   let { kind }: Props = $props();
 
-  const tintVar = $derived(kind === 'ws' ? 'kind-ws' : kind === 'sse' ? 'kind-sse' : 'source-xhr');
+  const tintVar = $derived(kind === 'xhr' ? 'source-xhr' : `kind-${kind}`);
 </script>
 
 <span class="kind" style={`--tint: var(--${tintVar})`}>{kind.toUpperCase()}</span>

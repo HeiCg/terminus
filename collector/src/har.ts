@@ -129,7 +129,7 @@ function requestPostData(ref: BodyRef, headers: Record<string, string>, snap: Ex
 
 function wsExt(ss: ExportSession, extra?: { synthetic?: true; statusUnknown?: true }): TerminusWsExt {
   return {
-    kind: ss.kind, source: ss.source, wsId: ss.wsId, deviceId: ss.deviceId, openedAt: ss.openedAt,
+    kind: ss.kind === 'sse' ? 'sse' : 'websocket', source: ss.source, wsId: ss.wsId, deviceId: ss.deviceId, openedAt: ss.openedAt,
     ...(ss.partial ? { partial: true as const } : {}), ...extra,
     retainedFrames: ss.retainedFrames, totalFrames: ss.totalFrames, droppedFrames: ss.droppedFrames,
     close: ss.closedAt != null ? { at: ss.closedAt, code: ss.closeCode, reason: ss.closeReason } : null,
@@ -259,7 +259,10 @@ function splitSessions(entries: StoredEntry[], sessions: ExportSession[]): { lin
 // sockets attached), then synthetic entries for unlinked sockets.
 export async function writeHar(snap: ExportSnapshot, out: Writable): Promise<void> {
   try {
-    const { linked, unlinked } = splitSessions(snap.entries, snap.sessions);
+    // U7: a raw TCP/TLS stream session has no HTTP shape HAR can carry, so the HAR
+    // export leaves it out (the JSON export keeps it).
+    const sockets = snap.sessions.filter((s) => s.kind === 'websocket' || s.kind === 'sse');
+    const { linked, unlinked } = splitSessions(snap.entries, sockets);
     await writeChunk(out, `{"log":{"version":"1.2","creator":${JSON.stringify(CREATOR)},"entries":[`);
     let first = true;
     const emit = async (har: HarEntry): Promise<void> => {

@@ -210,6 +210,25 @@ describe('WebSocket tools', () => {
     const paged = text(await call(c, 'terminus_ws_frames', { deviceId: 'd1', wsId: 'w1', limit: 1 }));
     expect(paged).toContain('more frames: call again with after=0');
   });
+
+  it('shows the kind of raw TCP/TLS stream sessions and filters on it (U7)', async () => {
+    const opened = 1_700_000_000_000;
+    h.store.addWsSession({ wsId: 'ws1', deviceId: 'd1', source: 'proxy', url: 'wss://rt.x.com/live', openedAt: opened, kind: 'websocket', httpEntryKey: null });
+    h.store.addWsSession({ wsId: 't1', deviceId: 'd1', source: 'proxy', url: 'tcp://10.0.0.5:6379', openedAt: opened + 1, kind: 'tcp', httpEntryKey: null,
+      stream: { host: '10.0.0.5', port: 6379, sni: null, plaintext: true } });
+    h.store.addWsSession({ wsId: 'p1', deviceId: 'd1', source: 'proxy', url: 'tls://pinned.x.com:443', openedAt: opened + 2, kind: 'tls', httpEntryKey: null,
+      stream: { host: 'pinned.x.com', port: 443, sni: 'pinned.x.com', plaintext: false } });
+    h.store.addWsSession({ wsId: 'r1', deviceId: 'd1', source: 'replay', url: 'tcp://10.0.0.5:6379', openedAt: opened + 3, kind: 'tcp', httpEntryKey: null,
+      stream: { host: '10.0.0.5', port: 6379, sni: null, plaintext: true, replayOf: { wsId: 't1' } } });
+    const all = text(await call(c, 'terminus_ws_sessions'));
+    expect(all).toContain('ws=ws1 [device=d1] websocket rt.x.com/live');
+    expect(all).toContain('ws=t1 [device=d1] tcp 10.0.0.5:6379');
+    expect(all).toMatch(/ws=p1 \[device=d1\] tls pinned\.x\.com:443 .* sni=pinned\.x\.com \[metadata-only\]/);
+    expect(all).toMatch(/ws=r1 .* replayOf=t1/);
+    const tcp = text(await call(c, 'terminus_ws_sessions', { kind: 'tcp' }));
+    expect(tcp).toContain('2 session(s)');
+    expect(tcp).not.toContain('ws=ws1');
+  });
 });
 
 describe('prompt-injection hygiene', () => {

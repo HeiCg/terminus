@@ -256,12 +256,14 @@ async function boot() {
         port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow,
         ...(tlsMode.mode === 'passthrough' ? { tlsPassthrough: tlsMode.hosts } : {}),
         ...(tlsMode.mode === 'intercept-only' ? { tlsInterceptOnly: tlsMode.hosts } : {}),
+        // U7: SOCKS v4/v5 on the proxy port, opt-in (raw stream capture is always on).
+        socks: env('PROXY_SOCKS') === '1',
       });
       await proxy.start();
       log.info(`proxy CA (copy to QA device, trust as user CA): ${ca.certPath}`);
       if (allow.length === 0) log.warn('proxy: TERMINUS_PROXY_ALLOW is empty; every client will be rejected. Set it to the QA device IP(s).');
     } else {
-      for (const name of ['PROXY_PASSTHROUGH', 'PROXY_INTERCEPT_ONLY']) {
+      for (const name of ['PROXY_PASSTHROUGH', 'PROXY_INTERCEPT_ONLY', 'PROXY_SOCKS']) {
         if (env(name) != null) log.warn(`${envName(name)} is set but the proxy is off (${envName('PROXY')} is not 1); ignoring it`);
       }
     }

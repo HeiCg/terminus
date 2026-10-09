@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Sockets, SessionFilter } from '../../lib/state/Sockets.svelte.js';
   import type { WsSummary } from '../../lib/protocol.js';
-  import { fmtTime } from '../../lib/format.js';
+  import { fmtTime, sessionBadge } from '../../lib/format.js';
   import Chip from '../../components/Chip.svelte';
   import KindBadge from '../../components/KindBadge.svelte';
   import StatePill from '../../components/StatePill.svelte';
@@ -14,6 +14,8 @@
     { id: 'all', label: 'All' },
     { id: 'ws', label: 'WS' },
     { id: 'sse', label: 'SSE' },
+    { id: 'tcp', label: 'TCP' },
+    { id: 'tls', label: 'TLS' },
     { id: 'open', label: 'Open' },
     { id: 'closed', label: 'Closed' },
   ];
@@ -28,7 +30,7 @@
 
   <div class="rows">
     {#if sockets.sessions.length === 0}
-      <EmptyState title="No sessions" hint="WebSocket and SSE sessions appear here as the device opens connections." />
+      <EmptyState title="No sessions" hint="WebSocket, SSE and raw TCP/TLS stream sessions appear here as the device opens connections." />
     {:else}
       {#each sockets.sessions as s (s.wsId)}
         {@render row(s)}
@@ -46,11 +48,17 @@
     onclick={() => sockets.select(s.wsId)}
   >
     <div class="line1">
-      <KindBadge kind={s.kind === 'sse' ? 'sse' : 'ws'} />
+      <KindBadge kind={sessionBadge(s.kind)} />
       {#if s.url == null}
         <span class="url unknown" title="opened before the collector started">URL unknown (opened before the collector started)</span>
       {:else}
         <span class="url">{s.url}</span>
+      {/if}
+      {#if s.stream && !s.stream.plaintext}
+        <span class="resumed" title="TLS pass-through tunnel: ciphertext, only metadata recorded">metadata only</span>
+      {/if}
+      {#if s.source === 'replay'}
+        <span class="resumed replayed" title="a stream replay">replay</span>
       {/if}
       {#if s.resumed}
         <span class="resumed" title="resumed: this socket was open before the collector started">resumed</span>
@@ -160,6 +168,9 @@
     color: var(--status-4xx);
     background: var(--tint-surface);
     border-radius: 999px;
+  }
+  .replayed {
+    color: var(--source-replay);
   }
   .line2 {
     display: flex;
