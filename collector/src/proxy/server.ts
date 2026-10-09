@@ -13,6 +13,8 @@ import type { EntryInput, TunnelInfo } from '../types.js';
 import { createRawStreamCapture, type RawVerdict } from './rawStreams.js';
 import type { RulesStore } from '../rulesStore.js';
 import { createRuleRunner, ruleEntryFields, type RuleEffects } from './rules.js';
+import { isMetadataHost } from '../netAddr.js';
+import { createMetadataResolver, type Lookup } from './destGuard.js';
 
 // A collector-internal endpoint the proxy must NOT inspect: its TLS is tunnelled
 // raw (so the device keeps seeing the collector's own pinned certificate, never a
@@ -55,6 +57,8 @@ export type ProxySourceOptions = {
   // apply only to intercepted HTTP from an allowed client, never to a
   // collector-internal endpoint or a raw TLS tunnel (see ./rules.ts).
   rules?: Pick<RulesStore, 'list'>;
+  // DNS resolution for the destination checks (all addresses). Tests inject it.
+  lookup?: Lookup;
 };
 
 // The cloud metadata service address. A proxy that forwarded to it would let a
@@ -159,21 +163,44 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
   };
   const isAllowedClient = (ip: string | undefined): boolean => allow.has(normalizeIp(ip));
 
+  // The hosts a request names: mockttp's parsed destination and the URL's own
+  // host. Both are checked because mockttp mis-parses a bracketed IPv6 literal in
+  // `destination` (`[fd00:ec2::254]` arrives as hostname `[fd00:ec2:` port 254)
+  // while still dialling the URL's host.
+  type ReqLike = { remoteIpAddress?: string; destination?: { hostname: string; port: number }; url?: string };
+  const hostsOf = (req: ReqLike): string[] => {
+    const out: string[] = [];
+    if (req.destination?.hostname) out.push(req.destination.hostname);
+    try { if (req.url) out.push(new URL(req.url).hostname); } catch { /* unparsable: destination only */ }
+    return out;
+  };
+  // The cloud metadata service in any spelling (netAddr.ts): an IPv4 numeric form,
+  // IPv4-mapped / NAT64 IPv6, fd00:ec2::254, or a metadata name.
+  const isMetadataDest = (req: ReqLike): boolean => hostsOf(req).some(isMetadataHost);
+
   // A request we should turn into evidence: from an allowed client, not to a
   // collector-internal endpoint, and not to the cloud metadata service.
-  const shouldRecord = (req: { remoteIpAddress?: string; destination?: { hostname: string; port: number } }): boolean =>
-    isAllowedClient(req.remoteIpAddress) && !isExcludedDest(req.destination) && req.destination?.hostname !== CLOUD_METADATA_IP;
+  const shouldRecord = (req: ReqLike): boolean =>
+    isAllowedClient(req.remoteIpAddress) && !isExcludedDest(req.destination) && !isMetadataDest(req);
 
   // The single access decision, shared by the HTTP gate and the WebSocket guard
   // rule so both channels reject identically: refuse a cloud-metadata fetch and any
   // client outside the allowlist, but let a collector-internal endpoint through
   // (its TLS is tunnelled raw via tlsPassthrough, and it is dropped from recording
   // in the event handlers). Returns true when the connection must be refused.
-  const shouldReject = (req: { remoteIpAddress?: string; destination?: { hostname: string; port: number } }): boolean => {
-    const dest = req.destination;
-    if (dest?.hostname === CLOUD_METADATA_IP) return true;
-    if (isExcludedDest(dest)) return false; // collector-internal: tunnel, don't reject
+  const shouldReject = (req: ReqLike): boolean => {
+    if (isMetadataDest(req)) return true;
+    if (isExcludedDest(req.destination)) return false; // collector-internal: tunnel, don't reject
     return !isAllowedClient(req.remoteIpAddress);
+  };
+  // The HTTP/WebSocket form: also refuses a NAME that resolves into the metadata
+  // range (best effort, see createMetadataResolver: mockttp dials HTTP itself).
+  const resolvesToMetadata = createMetadataResolver(options.lookup);
+  const shouldRejectHttp = async (req: ReqLike): Promise<boolean> => {
+    if (shouldReject(req)) return true;
+    if (isExcludedDest(req.destination)) return false;
+    for (const h of new Set(hostsOf(req))) if (await resolvesToMetadata(h)) return true;
+    return false;
   };
 
   // U7: the raw stream capture shares the same access decision. A raw relay to a
@@ -196,10 +223,10 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
   // that is not collector-internal (`shouldRecord`).
   const ruleRunner = createRuleRunner({
     rules: () => options.rules?.list() ?? [],
-    refuseDestination: (hostname, p) => hostname === CLOUD_METADATA_IP || isExcludedDest({ hostname, port: p }),
+    refuseDestination: (hostname, p) => isMetadataHost(hostname) || isExcludedDest({ hostname, port: p }),
   });
   const gate = async (req: CompletedRequest) => {
-    if (shouldReject(req)) {
+    if (await shouldRejectHttp(req)) {
       log.warn('proxy: refused HTTP connection', req.destination?.hostname, normalizeIp(req.remoteIpAddress));
       return { response: 'close' as const };
     }
@@ -227,6 +254,8 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       if (!store.admitScope(req.url)) return;
       const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(req.remoteIpAddress) };
       httpIds.set(req.id, { ids, req });
+      // A name the gate refuses after resolving it (metadata range) is never recorded.
+      if (await shouldRejectHttp(req)) { httpIds.delete(req.id); return; }
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
       const requestBuf = await req.body.getDecodedBuffer().catch(() => req.body.buffer);
       store.addEntryInput(buildEntryInput({
@@ -262,8 +291,9 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     });
 
     // ---- WebSocket -------------------------------------------------------
-    await s.on('websocket-request', (req: CompletedRequest) => {
+    await s.on('websocket-request', async (req: CompletedRequest) => {
       if (!shouldRecord(req)) return;
+      if (await shouldRejectHttp(req)) return;
       if (!store.admitScope(req.url)) return;
       const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(req.remoteIpAddress) };
       wsIds.set(req.id, ids);
@@ -319,7 +349,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       const dest = e.destination;
       if (collectorHosts.has(dest.hostname)) return;
       const sock = clientSockets.get(sockKey(e.remoteIpAddress, e.remotePort)) ?? null;
-      if (dest.hostname === CLOUD_METADATA_IP || !isAllowedClient(e.remoteIpAddress)) {
+      if (isMetadataHost(dest.hostname) || !isAllowedClient(e.remoteIpAddress)) {
         log.warn('proxy: refused TLS tunnel', dest.hostname, normalizeIp(e.remoteIpAddress));
         sock?.destroy();
         return;
@@ -357,7 +387,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     // only ever sees allowed upgrades.
     // `.always()`: without it mockttp completes the rule after its first match and
     // the passthrough below takes every later refused upgrade.
-    await s.forAnyWebSocket().matching((req) => shouldReject(req)).always().thenCloseConnection();
+    await s.forAnyWebSocket().matching((req) => shouldRejectHttp(req)).always().thenCloseConnection();
     await s.forAnyWebSocket().thenPassThrough({ ignoreHostHttpsErrors: true });
     // U6: a request a response-phase rule matches takes the passthrough with
     // `beforeResponse` (mockttp buffers those responses); everything else keeps the

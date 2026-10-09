@@ -7,6 +7,7 @@ import type { StreamInfo } from './types.js';
 import type { FrameSummary } from './uiProtocol.js';
 import { PER_BODY_MAX } from './atlantis/decode.js';
 import { normalizeStreamChunk, streamUrl } from './proxy/rawStreams.js';
+import { isMetadataAddress, isMetadataName, parseIpLiteral } from './netAddr.js';
 
 // U7 stream replay (POST /api/replay/stream). The collector opens a FRESH TCP
 // connection (or TLS, with SNI) from the operator's Mac to the captured stream's
@@ -21,11 +22,13 @@ import { normalizeStreamChunk, streamUrl } from './proxy/rawStreams.js';
 //   - STARTTLS is out of scope. A captured stream that switched to TLS mid-stream
 //     (a client frame is a TLS handshake record) carries ciphertext from that point
 //     on, which cannot be re-sent on a new connection with new keys: 422.
-//   - SSRF guard: the destination is resolved first and refused when any address
-//     is in the IPv4 link-local range 169.254.0.0/16 (the cloud metadata service
-//     lives there; the proxy refuses that address too) or is the IPv6 metadata
-//     address fd00:ec2::254. The connection then goes to the resolved address, so
-//     a second resolution cannot swap it.
+//   - SSRF guard: the destination is resolved first and refused when it is a
+//     metadata name (metadata.google.internal) or any address is in the IPv4
+//     link-local range 169.254.0.0/16 (the cloud metadata service lives there;
+//     the proxy refuses it too) or is the IPv6 metadata address fd00:ec2::254, in
+//     any spelling (numeric IPv4 forms, IPv4-mapped, NAT64; see netAddr.ts).
+//     The connection then goes to the resolved address, so a second resolution
+//     cannot swap it.
 //   - What is stored goes through the same frame normalizer as the capture (text
 //     redacted, binary verbatim, the per-message cap). What is SENT is the stored
 //     bytes of the original frames (already redacted at capture) or the overrides.
@@ -111,16 +114,10 @@ export function looksLikeTlsHandshake(b: Uint8Array): boolean {
   return b.length >= 3 && b[0] === 0x16 && b[1] === 0x03 && b[2] <= 0x04;
 }
 
-// The SSRF guard's range: IPv4 link-local 169.254.0.0/16 (also IPv4-mapped) and
-// the IPv6 metadata address.
-const METADATA_RANGE = new net.BlockList();
-METADATA_RANGE.addSubnet('169.254.0.0', 16, 'ipv4');
-METADATA_RANGE.addAddress('fd00:ec2::254', 'ipv6');
-export function isMetadataRange(address: string): boolean {
-  const a = address.toLowerCase().startsWith('::ffff:') && net.isIPv4(address.slice(7)) ? address.slice(7) : address;
-  const family = net.isIPv4(a) ? 'ipv4' : net.isIPv6(a) ? 'ipv6' : null;
-  return family != null && METADATA_RANGE.check(a, family);
-}
+// The SSRF guard's range: the cloud metadata range of netAddr.ts (IPv4 link-local
+// 169.254.0.0/16 and fd00:ec2::254, in any spelling: IPv4-mapped, NAT64, numeric
+// IPv4 forms), shared with the proxy's destination guard.
+export const isMetadataRange = isMetadataAddress;
 
 async function defaultLookup(host: string): Promise<{ address: string; family: number }[]> {
   return dns.lookup(host, { all: true, verbatim: true });
@@ -208,7 +205,7 @@ export async function performStreamReplay(store: Store, requestBody: unknown, de
   const host = req.host ?? stream.host;
   const port = req.port ?? stream.port;
   const useTls = req.tls ?? session.kind === 'tls';
-  const sni = req.sni ?? stream.sni ?? (net.isIP(host) ? undefined : host);
+  const sni = req.sni ?? stream.sni ?? (parseIpLiteral(host) ? undefined : host);
   const timeoutMs = req.timeoutMs ?? STREAM_REPLAY_TIMEOUT_DEFAULT;
   const readCap = req.readBytes ?? STREAM_REPLAY_READ_DEFAULT;
 
@@ -216,7 +213,10 @@ export async function performStreamReplay(store: Store, requestBody: unknown, de
   // resolved address is checked; they are then dialled in order.
   let addresses: string[] = [];
   let dnsError: string | null = null;
-  if (net.isIP(host)) addresses = [host];
+  const literal = parseIpLiteral(host);
+  const refused = bad(422, `destination ${host} is in (or resolves to) the link-local / cloud metadata range; refused`);
+  if (isMetadataName(host)) return refused;
+  if (literal) addresses = [literal.address];
   else {
     try {
       addresses = (await (deps.lookup ?? defaultLookup)(host)).map((a) => a.address);
@@ -225,7 +225,7 @@ export async function performStreamReplay(store: Store, requestBody: unknown, de
       dnsError = (e as NodeJS.ErrnoException).code ?? 'ENOTFOUND';
     }
   }
-  if (addresses.some(isMetadataRange)) return bad(422, `destination ${host} is in (or resolves to) the link-local / cloud metadata range; refused`);
+  if (addresses.some(isMetadataRange)) return refused;
 
   // The new session: same device, a fresh id, `replayOf` → the original.
   const kind = useTls ? 'tls' : 'tcp';

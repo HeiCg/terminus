@@ -165,6 +165,11 @@ describe('resolveProxyTls (env parsing)', () => {
       .toEqual({ mode: 'passthrough', hosts: ['pinned.bank.example', '*.apple.com'] });
   });
 
+  it('never tunnels the metadata service, whatever the spelling or name', () => {
+    expect(resolveProxyTls({ passthrough: 'metadata.google.internal, metadata, 2852039166, *.google.internal, ok.test' }, own))
+      .toEqual({ mode: 'passthrough', hosts: ['ok.test'] });
+  });
+
   it('refuses both set, naming the variables', () => {
     expect(() => resolveProxyTls({ passthrough: 'a.test', interceptOnly: 'b.test' }, own)).toThrow(/TERMINUS_PROXY_PASSTHROUGH and TERMINUS_PROXY_INTERCEPT_ONLY cannot both be set/);
   });

@@ -9,6 +9,8 @@
 // order: per phase, the first matching enabled `block`/`mock` short-circuits (the
 // request never reaches upstream), while `rewrite` and `delay` accumulate in order.
 
+import { isMetadataHost } from './netAddr.js';
+
 export type RulePhase = 'request' | 'response';
 export type RuleActionType = 'block' | 'mock' | 'rewrite' | 'delay';
 
@@ -73,8 +75,6 @@ const LABEL = /^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$/;
 // Framing and connection headers the proxy computes itself: a rule may neither set
 // nor remove them (a wrong content-length would corrupt the exchange).
 export const RULE_RESERVED_HEADERS: readonly string[] = ['content-length', 'transfer-encoding', 'connection', 'keep-alive', 'upgrade', 'te', 'trailer', 'proxy-connection'];
-// Never a rewrite target: the cloud metadata service (the proxy refuses it too).
-const METADATA_HOST = '169.254.169.254';
 
 export type RuleValidation<T> = { ok: true; value: T } | { ok: false; path: string; message: string };
 
@@ -244,7 +244,9 @@ function validateRewriteUrl(v: unknown, path: string): string {
   try { u = new URL(s); } catch { return bad(path, 'must be an absolute http(s) URL or a path starting with "/"'); }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') bad(path, 'must be an http or https URL');
   if (u.username || u.password) bad(path, 'must not carry credentials');
-  if (u.hostname === METADATA_HOST) bad(path, 'the cloud metadata address is never a rewrite target');
+  // Never a rewrite target: the cloud metadata service in any spelling (the proxy
+  // refuses it too).
+  if (isMetadataHost(u.hostname)) bad(path, 'the cloud metadata address is never a rewrite target');
   return s;
 }
 

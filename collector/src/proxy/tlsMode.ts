@@ -1,5 +1,6 @@
 import { parsePatternList, hostMatches, type HostPattern } from '../scope.js';
 import { log } from '../log.js';
+import { isMetadataHost } from '../netAddr.js';
 
 // User-configurable TLS interception for the proxy (U5). Two mutually exclusive
 // modes on top of the default "MITM everything except the collector's own hosts":
@@ -17,10 +18,6 @@ export type ProxyTlsConfig =
   | { mode: 'default' }
   | { mode: 'passthrough'; hosts: string[] }
   | { mode: 'intercept-only'; hosts: string[] };
-
-// The address a passthrough pattern must never name: a raw tunnel there would hand
-// a device the cloud metadata service (see CLOUD_METADATA_IP in server.ts).
-const METADATA_HOST = '169.254.169.254';
 
 // The mockttp hostname string for a parsed pattern (URLPattern syntax: a leading
 // `*.` label is its wildcard too), normalized to lower case.
@@ -45,7 +42,9 @@ export function resolveProxyTls(
     const r = parsePatternList(value, { allowPath: false });
     for (const i of r.invalid) log.warn(`${name}: ignoring invalid pattern "${i.raw}": ${i.message}`);
     return r.patterns.filter((p) => {
-      if (hostMatches(p, METADATA_HOST)) { log.warn(`${name}: ignoring "${p.raw}": the cloud metadata address is never tunnelled`); return false; }
+      // Never tunnel the cloud metadata service (any spelling of its address, or
+      // its names): a raw tunnel there would hand a device instance credentials.
+      if (isMetadataHost(p.host) || hostMatches(p, 'metadata.google.internal')) { log.warn(`${name}: ignoring "${p.raw}": the cloud metadata address is never tunnelled`); return false; }
       return true;
     });
   };

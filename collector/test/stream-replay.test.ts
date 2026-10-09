@@ -193,6 +193,15 @@ describe('stream replay: refusals', () => {
     const r = await performStreamReplay(store, { deviceId: D, wsId: 'plain', host: 'evil.test' }, { lookup: async () => [{ address: '169.254.169.254', family: 4 }] });
     expect(r).toMatchObject({ ok: false, code: 422 });
   });
+  it('422 for every spelling of the metadata service (name, NAT64, mapped, numeric)', async () => {
+    const lookup = async () => { throw new Error('must not resolve'); };
+    for (const host of ['metadata.google.internal', '64:ff9b::a9fe:a9fe', '[::ffff:a9fe:a9fe]', '0xa9fea9fe']) {
+      const r = await performStreamReplay(store, { deviceId: D, wsId: 'plain', host, port: 80 }, { lookup });
+      expect(r, host).toMatchObject({ ok: false, code: 422 });
+    }
+    const viaDns = await performStreamReplay(store, { deviceId: D, wsId: 'plain', host: 'evil.test' }, { lookup: async () => [{ address: '64:ff9b::a9fe:a9fe', family: 6 }] });
+    expect(viaDns).toMatchObject({ ok: false, code: 422 });
+  });
   it('422 when a selected frame payload was not retained', async () => {
     const s = new Store({ limits: { perWsMessageBytes: 4 } });
     seedStream(s, 'big', 'tcp', tcpStream(echo.port), [{ dir: 'out', bytes: Buffer.from('0123456789') }]);
@@ -212,6 +221,8 @@ describe('stream replay helpers', () => {
     expect(isMetadataRange('fd00:ec2:0::254')).toBe(true);
     expect(isMetadataRange('10.0.0.1')).toBe(false);
     expect(isMetadataRange('::1')).toBe(false);
+    expect(isMetadataRange('::ffff:a9fe:a9fe')).toBe(true);
+    expect(isMetadataRange('64:ff9b::a9fe:a9fe')).toBe(true);
   });
 });
 

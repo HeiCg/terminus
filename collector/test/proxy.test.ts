@@ -70,9 +70,9 @@ async function waitFor(pred: () => boolean, ms = 4000): Promise<void> {
   }
 }
 
-async function withProxy<T>(opts: { allow?: string[]; excluded?: { host: string; port: number }[] }, fn: (p: ProxySource, store: Store) => Promise<T>): Promise<T> {
+async function withProxy<T>(opts: { allow?: string[]; excluded?: { host: string; port: number }[]; lookup?: (h: string) => Promise<{ address: string; family: number }[]> }, fn: (p: ProxySource, store: Store) => Promise<T>): Promise<T> {
   const store = new Store();
-  const proxy = createProxySource({ port: 0, ca: CA, store, deviceAllowlist: opts.allow ?? ['127.0.0.1'], excludedCollectorEndpoints: opts.excluded ?? [] });
+  const proxy = createProxySource({ port: 0, ca: CA, store, deviceAllowlist: opts.allow ?? ['127.0.0.1'], excludedCollectorEndpoints: opts.excluded ?? [], lookup: opts.lookup });
   await proxy.start();
   try { return await fn(proxy, store); } finally { await proxy.stop(); }
 }
@@ -190,6 +190,40 @@ describe('proxy source — access boundary', () => {
       expect(store.entries()).toHaveLength(0);
     });
   }, 20_000);
+
+  it('refuses the metadata service by name and in IPv4-mapped / NAT64 / numeric spellings', async () => {
+    await withProxy({ allow: ['127.0.0.1'] }, async (proxy, store) => {
+      for (const host of ['metadata.google.internal', '[::ffff:a9fe:a9fe]', '[64:ff9b::a9fe:a9fe]', '[fd00:ec2::254]', '2852039166']) {
+        const res = await new Promise<number>((resolve) => {
+          const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://${host}/latest/meta-data/`, headers: { host } },
+            (r) => { r.resume(); resolve(r.statusCode ?? 0); });
+          req.on('error', () => resolve(0));
+          req.setTimeout(3000, () => { req.destroy(); resolve(-1); });
+          req.end();
+        });
+        // Closed by the gate (or a 400 for a host the parser refuses): never a
+        // 502 from a dial attempt, a timeout, or an answer.
+        expect([0, 400], host).toContain(res);
+      }
+      await new Promise((r) => setTimeout(r, 150));
+      expect(store.entries()).toHaveLength(0);
+    });
+  }, 30_000);
+
+  it('refuses an HTTP request whose host NAME resolves into the metadata range (checked before forwarding)', async () => {
+    const lookup = async (h: string) => (h === 'evil.test' ? [{ address: '169.254.169.254', family: 4 }] : [{ address: '127.0.0.1', family: 4 }]);
+    await withProxy({ allow: ['127.0.0.1'], lookup }, async (proxy, store) => {
+      const res = await new Promise<number>((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: 'http://evil.test/latest/meta-data/', headers: { host: 'evil.test' } },
+          (r) => { r.resume(); resolve(r.statusCode ?? 0); });
+        req.on('error', () => resolve(0));
+        req.end();
+      });
+      expect(res).toBe(0);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(store.entries()).toHaveLength(0);
+    });
+  }, 30_000);
 
   it('refuses a non-allowlisted WebSocket upgrade at the rule (not relayed)', async () => {
     const up = new WebSocketServer({ port: 0 });
