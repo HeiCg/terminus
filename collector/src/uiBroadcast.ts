@@ -219,7 +219,8 @@ export function createUiBroadcast(store: Store, opts: UiBroadcastOptions = {}) {
           startedAt: mnum(e.startedAt), method: '', url: '',
           status: e.status === null ? null : mnum(e.status),
           durationMs: e.durationMs === null ? null : mnum(e.durationMs), error: null,
-          requestBody: EMPTY_REF, responseBody: EMPTY_REF, identityClipped: true } };
+          requestBody: EMPTY_REF, responseBody: EMPTY_REF,
+          redacted: { request: e.redacted?.request === true, response: e.redacted?.response === true }, identityClipped: true } };
       }
       case 'ws': {
         const s = m.session;

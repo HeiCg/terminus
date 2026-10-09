@@ -57,12 +57,13 @@ produced it:
    absent, decoding each body exactly once.
 
 3. **Redaction.** During normalization, `src/redactor.ts` masks sensitive
-   material **before** any bytes are stored or hashed. It redacts auth-bearing
-   request/response headers (`authorization`, `cookie`, `set-cookie`,
-   `access-token`, `client`, `uid`), sensitive URL query parameters
-   (`access_token`, `client_id`, `uid`), and matching keys embedded in text/JSON
-   bodies (for example an ActionCable subscribe frame). Binary bodies are not
-   treated as text. Redaction is never undone.
+   material **before** any bytes are stored or hashed, for every source (and for
+   the stored result of a replay). Which header, query and body-key names count as
+   credentials is decided by one word-based matcher,
+   `src/security/sensitiveNames.ts`, shared with the replay credential strip; JSON
+   and form bodies are walked by key. Binary bodies are not treated as text.
+   Redaction is never undone, and each entry records per side whether something
+   was masked. See [security.md](security.md#auth-material-is-redacted-before-storage).
 
 4. **Store.** `src/store.ts` is an in-memory store with bounded retention on
    every axis: at most 5000 HTTP entries per device, a 64 MiB body budget with a
@@ -70,6 +71,16 @@ produced it:
    budget. Bodies live in a content-addressed `BodyStore` keyed by the SHA-256 of
    their already-redacted bytes, so identical payloads are stored once. Nothing
    is persisted; all capture data is lost on restart.
+
+   Every write of an HTTP entry (creation, response patch, upsert) also takes the
+   next value of a per-store **server sequence**. The entry keeps `firstSeq` and
+   `receivedAt` from its first write and `seq` from its latest, beside the record.
+   A separate seq-ordered index, global and per device, answers "entries with
+   `seq` above n" with a binary search plus a walk; the insertion-ordered maps stay
+   reserved for eviction. The store also remembers the highest `seq` it evicted or
+   cleared (for the readers' `gap` flag) and names itself with a random `epoch`, so
+   a cursor from a previous boot is recognised as stale. WebSocket sessions and
+   frames are outside the sequence.
 
 5. **Broadcast to the dashboard.** `src/uiBroadcast.ts` owns the `/ui`
    WebSocket. On connect it sends an initial `snapshot`, then fans out
@@ -85,6 +96,21 @@ are fetched lazily per record. Exports (`/export.har`, `/export.json`) stream
 from an immutable, point-in-time snapshot that holds the bodies it will emit
 under a lease (≤ 30 s), so a concurrent clear or capture cannot corrupt an
 in-flight download and the export never bypasses the body budget.
+
+Local automation reads the same store through the read API
+([read-api.md](read-api.md)): `GET /api/entries?afterSeq=` and `?last=` walk the
+seq index, and `GET /api/entries/wait` long-polls for the next matching entry.
+`src/entryWait.ts` serves every pending wait from one dispatcher: while any wait is
+pending it holds a single listener per store event (`entry`, `device`, `clear`),
+re-tests the waits on each write, and detaches when the last wait ends, with at
+most 16 waits collector-wide. Pause stops only the `/ui` broadcast, so reads and
+waits are unaffected.
+
+Every authenticated request resolves to a **role** in `src/security/uiAuth.ts`: a
+session cookie or the admin bearer is `admin`, the reader bearer (written to
+`reader-token` in the state directory) is `reader`. `src/http.ts` checks a reader
+against an explicit allowlist of `GET` read routes; anything not listed, including
+a route added later, is admin-only.
 
 ## Pairing
 

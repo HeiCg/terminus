@@ -8,10 +8,13 @@ import type { UiAuth } from './security/uiAuth.js';
 import type { PairingImport } from './security/types.js';
 import { writeHar, writeJson } from './har.js';
 import { createUiBroadcast } from './uiBroadcast.js';
-import { VERSION } from './version.js';
+import { VERSION, API_VERSION, CAPABILITIES } from './version.js';
 import type { IngestShared } from './deviceServer.js';
 import { log } from './log.js';
 import { performReplay } from './replay.js';
+import { sanCoversHost } from './security/identity.js';
+import { deviceScopeFilter, hasEntryFilters, nonNegIntParam, parseEntryFilters } from './entryFilters.js';
+import { createEntryWaits } from './entryWait.js';
 const MIME: Record<string, string> = {
   '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
   '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml',
@@ -68,6 +71,74 @@ function requireMutation(res: http.ServerResponse, origin: OriginState, auth: { 
   return true;
 }
 
+// P3: the reader token's whole scope, GET only. This is an ALLOWLIST on purpose:
+// a route added later is admin-only until it is listed here. `/api/entries/` and
+// `/api/ws/` cover every sub-route (detail, body, frames, a future `wait`).
+const READER_EXACT = new Set(['/health', '/api/status', '/api/devices', '/api/entries', '/api/ws']);
+const READER_PREFIXES = ['/api/entries/', '/api/ws/'];
+export function readerAllowed(method: string, pathname: string): boolean {
+  if (method !== 'GET') return false;
+  return READER_EXACT.has(pathname) || READER_PREFIXES.some((p) => pathname.startsWith(p));
+}
+
+// The 403 a reader gets outside its scope (HTTP routes and the /ui upgrade alike).
+const FORBIDDEN_SCOPE = JSON.stringify({ error: 'forbidden_scope', required: 'admin' });
+function forbiddenScope(res: http.ServerResponse): void {
+  res.writeHead(403, { 'content-type': 'application/json' });
+  res.end(FORBIDDEN_SCOPE);
+}
+
+// GET /api/entries?afterSeq=<n> | ?last=<n> (P1): the server-sequence read.
+// Malformed values and mixing it with the opaque `cursor` (or `last` with
+// `afterSeq`) are 400; an `epoch` other than this Store's, or an `afterSeq` past
+// `lastSeq` (a cursor from another boot), is 409 `stale_cursor` so the client
+// re-baselines. Unlike the lenient legacy `limit`, every value here is strict.
+// `scope` is the resolved device set (null: unscoped). When the caller named
+// `externalId` or `bundleId` the response echoes it as `devices` (P2), so a client
+// can see which devices its filter selected, an empty list included. The P4
+// filters (method, urlContains, status, source, completed) AND with all of it.
+function seqEntries(store: Store, q: URLSearchParams, scope: string[] | null): { status: number; body: unknown } {
+  const bad = (message: string) => ({ status: 400, body: { error: 'bad_request', message } });
+  const isLast = q.has('last');
+  if (q.has('cursor')) return bad('afterSeq/last cannot be combined with cursor');
+  if (isLast && q.has('afterSeq')) return bad('last cannot be combined with afterSeq');
+
+  let newOnly = false;
+  if (q.has('newOnly')) {
+    const raw = q.get('newOnly');
+    if (raw !== 'true' && raw !== 'false') return bad('newOnly must be true or false');
+    if (isLast) return bad('newOnly requires afterSeq');
+    newOnly = raw === 'true';
+  }
+  let limit: number | undefined;
+  if (q.has('limit')) {
+    if (isLast) return bad('limit cannot be combined with last');
+    const n = nonNegIntParam(q, 'limit');
+    if (n === null || n < 1) return bad('limit must be a positive integer');
+    limit = n;
+  }
+  const n = nonNegIntParam(q, isLast ? 'last' : 'afterSeq');
+  if (n === null) return bad(`${isLast ? 'last' : 'afterSeq'} must be a non-negative integer`);
+  if (isLast && (n < 1 || n > 200)) return bad('last must be between 1 and 200');
+  const filters = parseEntryFilters(q);
+  if (!filters.ok) return bad(filters.message);
+  const match = filters.value;
+
+  const { epoch, lastSeq } = store.seqState();
+  const stale = { status: 409, body: { error: 'stale_cursor', epoch, lastSeq } };
+  if (q.has('epoch') && q.get('epoch') !== epoch) return stale;
+  if (!isLast && n > lastSeq) return stale;
+  const deviceIds = scope ?? undefined;
+  const page = isLast ? store.lastEntries(n, { deviceIds, match }) : store.entriesAfterSeq(n, { deviceIds, limit, newOnly, match });
+  const echo = q.get('externalId') || q.get('bundleId');
+  return { status: 200, body: echo && scope ? { ...page, devices: scope } : page };
+}
+
+// The device-scope filters (P2) shared by /api/entries and /api/devices.
+function deviceScope(store: Store, q: URLSearchParams): string[] | null {
+  return store.resolveDeviceScope(deviceScopeFilter(q));
+}
+
 export function createHttpServer(
   store: Store,
   uiDir: string,
@@ -82,6 +153,11 @@ export function createHttpServer(
   // shared serialization and byte budget, and lets logout close a session's
   // sockets by id.
   const broadcast = createUiBroadcast(store);
+  // The long-poll `GET /api/entries/wait` (P4): one dispatcher for every pending
+  // wait, capped collector-wide. Node's server timeouts leave a 30 s hold alone:
+  // requestTimeout/headersTimeout bound only the receipt of the request,
+  // keepAliveTimeout only idle time between requests, and `timeout` is 0.
+  const waits = createEntryWaits(store);
 
   const server = http.createServer((req, res) => {
     try {
@@ -98,11 +174,15 @@ export function createHttpServer(
       // Anonymous: liveness only, never capture data.
       if (u.pathname === '/health') {
         if (method !== 'GET') { res.writeHead(405); return res.end(); }
-        return json({ status: 'ok', version: VERSION });
+        return json({ status: 'ok', version: VERSION, apiVersion: API_VERSION, capabilities: CAPABILITIES });
       }
 
       // Session lifecycle. Login trades an admin bearer for a cookie; logout revokes.
+      // A reader bearer gets the scope 403 for both (the route is not in its
+      // allowlist); every other caller keeps the original behaviour below.
       if (u.pathname === '/api/session') {
+        const auth = uiAuth.authorize(req);
+        if (auth.ok && auth.role === 'reader' && !readerAllowed(method, u.pathname)) return forbiddenScope(res);
         if (method === 'POST') return uiAuth.createSession(req, res);
         if (method === 'DELETE') {
           // Cookie mutation (session revoke is cookie-only): an exact Origin is
@@ -115,11 +195,14 @@ export function createHttpServer(
         res.writeHead(405); return res.end();
       }
 
-      // Everything touching capture data or exports requires a session or bearer.
+      // Everything touching capture data or exports requires a session or bearer;
+      // the role it resolves to (P3) is checked against the reader allowlist.
       const dataRoute = u.pathname.startsWith('/api/') || u.pathname === '/export.har' || u.pathname === '/export.json';
       if (dataRoute) {
         const auth = uiAuth.authorize(req);
         if (!auth.ok) { res.writeHead(auth.status); return res.end(); }
+        // P3: a reader passes only its allowlist; anything else, known or not, is 403.
+        if (auth.role === 'reader' && !readerAllowed(method, u.pathname)) return forbiddenScope(res);
 
         // Device pairing blob: certificate + deviceToken, copied by the authenticated
         // UI into the QA screen. Never cached; the terminal shows only the adminToken.
@@ -127,6 +210,14 @@ export function createHttpServer(
           if (method !== 'GET') { res.writeHead(405); return res.end(); }
           const pairing = getPairing?.() ?? null;
           if (!pairing) { res.writeHead(503); return res.end('pairing unavailable'); }
+          // `?host=` (P2) overrides the advertised host for this response only (a
+          // simulator/emulator dials 127.0.0.1), but only to a name or IP the
+          // certificate SAN covers: any other host would fail the device's TLS check.
+          const hostOverride = u.searchParams.get('host');
+          if (hostOverride !== null && !sanCoversHost(pairing.certificateDerBase64, hostOverride)) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'bad_request', message: 'host is not covered by the certificate SAN' }));
+          }
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
           // Additive fields; older clients ignore them. `certPort` lets the UI build
           // the QR's QrPairing (the app fetches the DER from the LAN cert listener's
@@ -135,6 +226,7 @@ export function createHttpServer(
           // it. `pairing.host` is already the advertised LAN IPv4 (resolved by the
           // caller's pairingHost), not the meta hostname.
           const body: Record<string, unknown> = { ...pairing };
+          if (hostOverride !== null) body.host = hostOverride;
           if (certPort != null) body.certPort = certPort;
           body.pairingHostWarning = getPairingWarning?.() ?? null;
           return res.end(JSON.stringify(body));
@@ -154,6 +246,8 @@ export function createHttpServer(
             retention: store.retentionCounters(),
             bodies: store.bodyStats(),
             ingest: ingest ? ingest.scheduler.stats() : null,
+            // P1: where the server sequence stands, on the collector clock.
+            ...store.seqState(), now: Date.now(), apiVersion: API_VERSION, capabilities: CAPABILITIES,
           });
         }
         // Parsed path segments for the parametric metadata/body routes below.
@@ -178,8 +272,28 @@ export function createHttpServer(
 
         if (seg[1] === 'entries') {
           if (method !== 'GET') { res.writeHead(405); return res.end(); }
-          // /api/entries — paged summaries (identity + BodyRefs, no bodies).
-          if (seg.length === 2) return json(store.entrySummaryPage(cursor, device, parseLimit()));
+          // /api/entries — paged summaries (identity + BodyRefs, no bodies). With
+          // `afterSeq` or `last` it is the server-sequence read instead (P1).
+          if (seg.length === 2) {
+            const scope = deviceScope(store, u.searchParams);
+            if (u.searchParams.has('afterSeq') || u.searchParams.has('last')) {
+              const r = seqEntries(store, u.searchParams, scope);
+              res.writeHead(r.status, { 'content-type': 'application/json' });
+              return res.end(JSON.stringify(r.body));
+            }
+            // The P4 filters exist only in the seq modes: refuse them here rather
+            // than return an unfiltered page the caller would take as filtered.
+            if (hasEntryFilters(u.searchParams)) {
+              res.writeHead(400, { 'content-type': 'application/json' });
+              return res.end(JSON.stringify({ error: 'bad_request', message: 'filters require afterSeq or last' }));
+            }
+            // Cursor mode keeps its response shape: no `devices` echo.
+            return json(store.entrySummaryPage(cursor, scope ?? undefined, parseLimit()));
+          }
+          // /api/entries/wait — the long-poll (P4). Matched on the RAW path, so a
+          // device literally named `wait` keeps its /api/entries/wait/:id routes
+          // and an encoded `wai%74` is not taken for it.
+          if (u.pathname === '/api/entries/wait') return waits.handle(res, u.searchParams);
           // /api/entries/:device/:id — detail (headers + BodyRefs); …/body — bytes.
           if (seg.length === 4) {
             const detail = store.entryDetail(seg[2], seg[3]);
@@ -214,7 +328,10 @@ export function createHttpServer(
           res.writeHead(404); return res.end('not found');
         }
 
-        if (u.pathname === '/api/devices') { if (method !== 'GET') { res.writeHead(405); return res.end(); } return json(store.devicePage(cursor, parseLimit())); }
+        if (u.pathname === '/api/devices') {
+          if (method !== 'GET') { res.writeHead(405); return res.end(); }
+          return json(store.devicePage(cursor, parseLimit(), deviceScope(store, u.searchParams)));
+        }
         if (u.pathname === '/api/clear') {
           if (method !== 'POST') { res.writeHead(405); return res.end(); }
           if (!requireMutation(res, origin, auth)) return;
@@ -353,6 +470,13 @@ export function createHttpServer(
     if (originState(req.headers.origin, port) !== 'valid') return sock.destroy();
     const auth = uiAuth.authorize(req);
     if (!auth.ok) return sock.destroy();
+    // P3: the live socket is admin-only; a reader gets a real 403 (with the scope
+    // body) instead of a dropped socket, so a client can tell it apart from a bad token.
+    if (auth.role === 'reader' && !readerAllowed(req.method ?? 'GET', p)) {
+      sock.once('finish', () => sock.destroy());
+      sock.end(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(FORBIDDEN_SCOPE)}\r\nConnection: close\r\n\r\n${FORBIDDEN_SCOPE}`);
+      return;
+    }
     const sid: string | null = auth.kind === 'session' ? auth.sid : null;
 
     wss.handleUpgrade(req, sock, head, (ws) => {
@@ -374,7 +498,9 @@ export function createHttpServer(
   beat.unref?.();
   server.on('close', () => clearInterval(beat));
 
-  return { server, wss, close: () => { clearInterval(beat); broadcast.close(); wss.close(); server.close(); } };
+  // Pending waits are answered (timeout shape, `Connection: close`) before the
+  // server closes, so shutdown never hangs on a held long-poll.
+  return { server, wss, waits, close: () => { clearInterval(beat); waits.close(); broadcast.close(); wss.close(); server.close(); } };
 }
 
 function markAlive(ws: WebSocket): void {

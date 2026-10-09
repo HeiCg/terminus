@@ -22,6 +22,8 @@ export interface CollectorHarness {
   origin: string;
   store: Store;
   adminToken: string;
+  // P3: the read-only reader bearer this collector accepts.
+  readerToken: string;
   // Exchange the admin bearer for a session and return the `nc_session=…` cookie
   // string, ready to pass as a `cookie` header from Node tests.
   login(): Promise<string>;
@@ -30,6 +32,8 @@ export interface CollectorHarness {
   // Authenticated body fetch for one entry side; returns the decoded text (empty
   // string for an absent/empty body). Throws on a 404 (missing) or 410 (omitted).
   getEntryBody(key: { deviceId: string; id: string; side: 'request' | 'response' }): Promise<string>;
+  // P4: pending `GET /api/entries/wait` long-polls held by this server.
+  activeWaits(): number;
   close(): Promise<void>;
 }
 
@@ -37,12 +41,13 @@ export interface CollectorHarness {
 // is bound to 127.0.0.1 and torn down by close(); callers must await close() in a
 // finally/afterEach so no socket leaks between tests.
 export async function createCollectorHarness(
-  opts: { adminToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null } = {},
+  opts: { adminToken?: string; readerToken?: string; uiDir?: string; now?: () => number; certPort?: number; getPairing?: () => import('../../src/security/types.js').PairingImport | null; getPairingWarning?: () => string | null } = {},
 ): Promise<CollectorHarness> {
   const adminToken = opts.adminToken ?? randomBytes(32).toString('base64url');
+  const readerToken = opts.readerToken ?? randomBytes(32).toString('base64url');
   const uiDir = opts.uiDir ?? '/nonexistent-ui';
   const store = new Store();
-  const uiAuth = createUiAuth({ adminToken, now: opts.now });
+  const uiAuth = createUiAuth({ adminToken, readerToken, now: opts.now });
   const shared = createIngestShared();
   const handle = createHttpServer(store, uiDir, { uiAuth, getPairing: opts.getPairing, getPairingWarning: opts.getPairingWarning, certPort: opts.certPort, ingest: shared });
 
@@ -70,6 +75,7 @@ export async function createCollectorHarness(
     origin,
     store,
     adminToken,
+    readerToken,
     login,
     async snapshot() {
       const c = await auth();
@@ -87,6 +93,7 @@ export async function createCollectorHarness(
       if (r.status !== 200) throw new Error(`body ${deviceId}/${id}/${side} -> ${r.status}`);
       return r.text();
     },
+    activeWaits: () => handle.waits.size(),
     async close() {
       handle.close();
       await new Promise<void>((r) => handle.server.close(() => r()));

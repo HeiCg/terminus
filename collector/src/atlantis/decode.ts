@@ -1,7 +1,7 @@
 import { gunzipSync, gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import type { EntryInput, BodyOmitted } from '../types.js';
-import { redactHeaders, redactUrl, redactText } from '../redactor.js';
+import { redactHeaders, redactUrl, redactText, contentTypeOf, redactionMarker, type RedactMark } from '../redactor.js';
 const gunzipAsync = promisify(gunzip);
 const MAX_GUNZIP = 64 * 1024 * 1024;
 
@@ -25,9 +25,14 @@ type Traffic = { id: string; startAt: number; endAt?: number | null; packageType
 // carry their raw `bytes` (decoded once from `dataValue`, never discarded after
 // measuring). `size` is the real byte length.
 export type WsFrameDecoded = { id: string; createdAt: number; messageType: string; text: string | null; bytes: Uint8Array | null; size: number; binary: boolean };
+// `device`/`project` are the ConnectionPackage objects as sent (device-supplied
+// JSON, possibly absent or mistyped): consumers validate each field before use.
+// The Terminus forks add `device.externalId` (absent when not configured).
 export type AtlantisEvent =
-  | { kind: 'connection'; deviceKey: string; buildVersion: string | null; appVersion: string | null; passcode: string | null; device: { name: string; model: string }; project: { name: string; bundleIdentifier: string } }
-  | { kind: 'traffic'; deviceKey: string; isWebsocket: boolean; isSse: boolean; entry: EntryInput }
+  | { kind: 'connection'; deviceKey: string; buildVersion: string | null; appVersion: string | null; passcode: string | null; device: { name?: unknown; model?: unknown; externalId?: unknown } | undefined; project: { name?: unknown; bundleIdentifier?: unknown } | undefined }
+  // `isStart`: a request-START packet (fork `emitRequestStart`): an HTTP package
+  // with no response, no endAt and no error; its completion follows under the same id.
+  | { kind: 'traffic'; deviceKey: string; isWebsocket: boolean; isSse: boolean; isStart: boolean; entry: EntryInput }
   | { kind: 'ws'; deviceKey: string; trafficId: string; url: string; msg: WsFrameDecoded }
   // A control frame from the client (e.g. a `pong` replying to a server ping). The
   // type is not inspected: any control message decodes to this no-op event so it is
@@ -58,7 +63,8 @@ type DecodedBody = { bytes: Uint8Array | null; size: number; omitted: BodyOmitte
 // it is handed on to be hashed and stored. Oversize is rejected before any text
 // materialization; binary bytes are preserved (encoding marked via `omitted:
 // 'binary'` with bytes present); a fork's skip sentinel maps to `omitted: 'size'`.
-function decodeBody(s: string | null | undefined, maxBody: number): DecodedBody {
+// `contentType` picks the body pass (JSON/form/text); `mark` records a masking.
+function decodeBody(s: string | null | undefined, maxBody: number, contentType: string | null, mark: RedactMark): DecodedBody {
   if (s == null) return { bytes: null, size: 0, omitted: null }; // absent
   const buf = Buffer.from(s, 'base64');
   // Reject an oversized body before converting/materializing anything.
@@ -69,7 +75,7 @@ function decodeBody(s: string | null | undefined, maxBody: number): DecodedBody 
   let text: string | null = null;
   if (!buf.includes(0)) { try { text = strictUtf8.decode(buf); } catch { text = null; } }
   if (text == null) return { bytes: new Uint8Array(buf), size: buf.length, omitted: 'binary' };
-  const redacted = redactText(text) ?? text;
+  const redacted = redactText(text, contentType, mark) ?? text;
   const redBytes = Buffer.from(redacted, 'utf8');
   return { bytes: new Uint8Array(redBytes), size: redBytes.length, omitted: null };
 }
@@ -81,16 +87,20 @@ function contentType(h?: Kv[]): string {
 }
 
 function toEntryInput(t: Traffic, deviceKey: string, maxBody: number): EntryInput {
-  const req = decodeBody(t.request.body, maxBody);
-  const res = decodeBody(t.responseBodyData, maxBody);
+  // One sink per side feeds the entry's `redacted` marker (P5).
+  const reqMark: RedactMark = { hit: false }; const resMark: RedactMark = { hit: false };
+  const reqHeaders = headers(t.request.headers); const resHeaders = headers(t.response?.headers);
+  const req = decodeBody(t.request.body, maxBody, contentTypeOf(reqHeaders), reqMark);
+  const res = decodeBody(t.responseBodyData, maxBody, contentTypeOf(resHeaders), resMark);
   return {
     id: t.id, deviceId: deviceKey, source: 'atlantis', startedAt: Math.round(t.startAt * 1000),
-    method: t.request.method, url: redactUrl(t.request.url), requestHeaders: redactHeaders(headers(t.request.headers)),
+    method: t.request.method, url: redactUrl(t.request.url, reqMark), requestHeaders: redactHeaders(reqHeaders, reqMark),
     requestBytes: req.bytes, requestBodySize: req.size, requestBodyOmitted: req.omitted,
-    status: t.response?.statusCode ?? null, statusText: '', responseHeaders: redactHeaders(headers(t.response?.headers)),
+    status: t.response?.statusCode ?? null, statusText: '', responseHeaders: redactHeaders(resHeaders, resMark),
     responseBytes: res.bytes, responseBodySize: res.size, responseBodyOmitted: res.omitted,
     durationMs: t.endAt ? Math.round((t.endAt - t.startAt) * 1000) : null,
     error: t.error ? `${t.error.code} ${t.error.message}` : null,
+    ...redactionMarker(reqMark, resMark),
   };
 }
 
@@ -103,7 +113,9 @@ function parseEnvelope(raw: Buffer, limits: DecodeLimits): AtlantisEvent | null 
   if (contentBuf.length > limits.maxInnerJson) throw new Error(`atlantis inner content too large: ${contentBuf.length}`);
   const inner = JSON.parse(contentBuf.toString('utf8'));
   if (env.messageType === 'connection') return { kind: 'connection', deviceKey: env.id, buildVersion: env.buildVersion ?? null,
-    appVersion: inner.appVersion ?? null, passcode: typeof inner.passcode === 'string' ? inner.passcode : null, device: inner.device, project: inner.project };
+    appVersion: inner.appVersion ?? null, passcode: typeof inner.passcode === 'string' ? inner.passcode : null,
+    device: inner.device && typeof inner.device === 'object' ? inner.device : undefined,
+    project: inner.project && typeof inner.project === 'object' ? inner.project : undefined };
   if (env.messageType === 'websocket') {
     // inner is a full TrafficPackage snapshot carrying one websocketMessagePackage.
     const t = inner as Traffic;
@@ -135,7 +147,8 @@ function parseEnvelope(raw: Buffer, limits: DecodeLimits): AtlantisEvent | null 
   // SSE is detected by response Content-Type on an HTTP exchange, not by a
   // generic package name; it is tunnelled over the same session machinery.
   const isSse = !isWebsocket && contentType(t.response?.headers).startsWith('text/event-stream');
-  return { kind: 'traffic', deviceKey: env.id, isWebsocket, isSse, entry: toEntryInput(t, env.id, limits.maxBody) };
+  const isStart = !isWebsocket && t.response == null && t.endAt == null && t.error == null;
+  return { kind: 'traffic', deviceKey: env.id, isWebsocket, isSse, isStart, entry: toEntryInput(t, env.id, limits.maxBody) };
 }
 
 // Synchronous decode (legacy loopback + unit tests). Uses the historical 64 MiB

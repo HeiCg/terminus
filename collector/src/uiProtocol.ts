@@ -22,9 +22,28 @@ export type Page<T> = { items: T[]; nextCursor: string | null };
 export type EntrySummary = Pick<Entry, 'id' | 'deviceId' | 'source' | 'startedAt' |
   'method' | 'url' | 'status' | 'durationMs' | 'error'> & {
   requestBody: BodyRef; responseBody: BodyRef;
+  // Server sequence (P1): `seq` of the entry's latest write, `firstSeq` at its
+  // creation, `receivedAt` the collector clock (ms) at creation. `startedAt` stays
+  // the ORIGIN clock (the device's for Atlantis/XHR). Always set by the server;
+  // optional only so pre-0.2 fixtures still type-check.
+  seq?: number; firstSeq?: number; receivedAt?: number;
+  // P5: whether a value was masked at ingest on the request side (URL query,
+  // request headers/body) and on the response side (response headers/body).
+  // Always set by the server; optional only so pre-0.2 fixtures still type-check.
+  redacted?: { request: boolean; response: boolean };
   // Set by the fanout when a device-supplied identity string (id/url/…) exceeded
   // the message cap and was clipped; the record is otherwise intact.
   identityClipped?: true;
+};
+
+// `GET /api/entries?afterSeq=` / `?last=` (P1): entries in ascending `seq`.
+// `nextSeq` is the seq of the last item (the next `afterSeq`), `lastSeq` the
+// store's newest seq, `epoch` identifies this Store instance (a cursor from
+// another epoch is stale), `now` is the collector clock (same base as
+// `receivedAt`), `gap` says records after the cursor were evicted or cleared.
+export type SeqPage = {
+  items: EntrySummary[]; nextSeq: number; lastSeq: number; epoch: string;
+  now: number; gap: boolean; hasMore: boolean;
 };
 
 // The detail route adds the headers and statusText the summary omits, still

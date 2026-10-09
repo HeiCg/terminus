@@ -39,6 +39,14 @@ describe('sanArg classification (item 2)', () => {
     expect(s).not.toContain('DNS:10.0.0.5');
   });
 
+  it('always keeps the loopback anchors, even when --ip replaces the detected list', () => {
+    const s = sanArg('mac', ['192.168.1.10']);
+    expect(s).toContain('IP:127.0.0.1');
+    expect(s).toContain('IP:::1');
+    expect(s.match(/IP:127\.0\.0\.1/g)).toHaveLength(1);
+    expect(sanArg('mac', ['127.0.0.1']).match(/IP:127\.0\.0\.1/g)).toHaveLength(1);
+  });
+
   it('does not duplicate an IP host already present in ips', () => {
     const s = sanArg('10.0.0.5', ['10.0.0.5', '127.0.0.1']);
     expect(s.match(/IP:10\.0\.0\.5/g)).toHaveLength(1);

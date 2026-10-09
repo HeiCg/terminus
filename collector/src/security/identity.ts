@@ -83,19 +83,27 @@ export async function migrateLegacyStateDir(
 }
 
 // Fail before opening any listener if OpenSSL 3+ is unavailable; the message names
-// the fix rather than surfacing a raw ENOENT deep in cert generation.
+// the fix rather than surfacing a raw ENOENT deep in cert generation. The hint
+// covers both supported platforms (stock macOS ships LibreSSL, which fails the
+// version check; Homebrew's openssl@3 is keg-only, hence the PATH step).
+const OPENSSL_HINT = 'Install OpenSSL 3 and put it on PATH before starting the collector. '
+  + 'macOS: `brew install openssl@3`, then add `$(brew --prefix openssl@3)/bin` to PATH. '
+  + 'Linux: install your distribution\'s OpenSSL 3 package (e.g. `apt install openssl` or `dnf install openssl`).';
+
 export async function ensureOpenSSL(): Promise<void> {
   let out: string;
   try { out = (await exec('openssl', ['version'])).stdout; }
-  catch { throw new Error('OpenSSL 3 not found on PATH. Install it (e.g. `brew install openssl@3`) before starting the collector.'); }
+  catch { throw new Error(`OpenSSL 3 not found on PATH. ${OPENSSL_HINT}`); }
   const m = /OpenSSL\s+(\d+)\./.exec(out);
-  if (!m || Number(m[1]) < 3) throw new Error(`OpenSSL 3 required, found: ${out.trim()}`);
+  if (!m || Number(m[1]) < 3) throw new Error(`OpenSSL 3 required, found: ${out.trim()}. ${OPENSSL_HINT}`);
 }
 
 // LAN IPv4/IPv6 the cert should be valid for, plus the loopback anchors. Filtered
 // to the addresses the device is likely to dial.
+const LOOPBACK_IPS = ['127.0.0.1', '::1'];
+
 export function lanAddresses(): string[] {
-  const ips = new Set<string>(['127.0.0.1', '::1']);
+  const ips = new Set<string>(LOOPBACK_IPS);
   for (const list of Object.values(os.networkInterfaces())) {
     for (const nic of list ?? []) if (!nic.internal) ips.add(nic.address.replace(/%.*$/, ''));
   }
@@ -115,10 +123,14 @@ export function validateSanTargets(host: string, ips: string[]): void {
 // bogus `DNS:<ip>` entry no client verifies against). `localhost` is always a DNS
 // name; the caller's `ips` are already IPs. An IP host duplicated in `ips` is emitted
 // once. IPv6 loopback/link-local exclusion is unchanged — it is governed by what
-// `lanAddresses()` collects, not by this classifier.
+// `lanAddresses()` collects, not by this classifier. The loopback anchors
+// `127.0.0.1` and `::1` are always present, like `localhost`: an explicit
+// `--ip` list used to replace them, which broke simulator/emulator pairing on
+// loopback (`/api/pairing?host=127.0.0.1`, `adb reverse`).
 export function sanArg(host: string, ips: string[]): string {
   const names: string[] = [];
   const ipList: string[] = [...ips];
+  for (const lo of LOOPBACK_IPS) if (!ipList.includes(lo)) ipList.push(lo);
   if (isIp(host)) { if (!ipList.includes(host)) ipList.unshift(host); }
   else names.push(host);
   if (!names.includes('localhost')) names.push('localhost');
@@ -249,6 +261,18 @@ export function certSanIps(certPem: string): string[] {
     if (m) ips.push(m[1]);
   }
   return ips;
+}
+
+// Whether `host` is one of the certificate's SAN targets (GET /api/pairing?host=):
+// an IP must match an `IP Address` entry, a name a `DNS` entry (exact, ignoring
+// case; the collector never issues wildcards, and the subject CN is not consulted).
+// A value that is not a plain hostname/IP, or an unparsable certificate, is false.
+export function sanCoversHost(certDerBase64: string, host: string): boolean {
+  const ip = isIp(host);
+  if (!ip && !isHostname(host)) return false;
+  let cert: X509Certificate;
+  try { cert = new X509Certificate(Buffer.from(certDerBase64, 'base64')); } catch { return false; }
+  return ip ? cert.checkIP(host) !== undefined : cert.checkHost(host, { subject: 'never', wildcards: false }) !== undefined;
 }
 
 // LAN IPv4s a device could actually dial: drop loopback and every IPv6 form.

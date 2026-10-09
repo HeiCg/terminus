@@ -115,3 +115,68 @@ export class SortedKeyIndex {
 
   clear(): void { this.nodes = []; }
 }
+
+// An ordered index of composite store keys by server sequence (P1). A sequence
+// only ever grows, so insertion is a push; removal tombstones the slot (found by
+// binary search) and the arrays are compacted once tombstones outnumber live
+// slots, so both mutations are amortized O(log N) while "seq > n" is a binary
+// search plus a walk. Iterators are lazy: callers walk them synchronously and
+// must not mutate the index mid-walk.
+export class SeqIndex {
+  private seqs: number[] = [];
+  private keys: (string | null)[] = [];
+  private dead = 0;
+
+  // First slot whose seq is strictly greater than `seq`.
+  private upperBound(seq: number): number {
+    let lo = 0, hi = this.seqs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.seqs[mid] <= seq) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+
+  insert(seq: number, key: string): void {
+    const n = this.seqs.length;
+    if (n > 0 && seq <= this.seqs[n - 1]) throw new Error(`SeqIndex: seq ${seq} does not grow past ${this.seqs[n - 1]}`);
+    this.seqs.push(seq); this.keys.push(key);
+  }
+
+  remove(seq: number): void {
+    const pos = this.upperBound(seq) - 1;
+    if (pos < 0 || this.seqs[pos] !== seq || this.keys[pos] === null) return;
+    this.keys[pos] = null;
+    this.dead++;
+    if (this.dead > 64 && this.dead * 2 > this.seqs.length) this.compact();
+  }
+
+  private compact(): void {
+    const seqs: number[] = []; const keys: string[] = [];
+    for (let i = 0; i < this.seqs.length; i++) {
+      const k = this.keys[i];
+      if (k !== null) { seqs.push(this.seqs[i]); keys.push(k); }
+    }
+    this.seqs = seqs; this.keys = keys; this.dead = 0;
+  }
+
+  size(): number { return this.seqs.length - this.dead; }
+
+  // Live slots with seq strictly greater than `afterSeq`, ascending.
+  *after(afterSeq: number): Generator<{ seq: number; key: string }> {
+    for (let i = this.upperBound(afterSeq); i < this.seqs.length; i++) {
+      const key = this.keys[i];
+      if (key !== null) yield { seq: this.seqs[i], key };
+    }
+  }
+
+  // Live slots, newest (highest seq) first.
+  *descending(): Generator<{ seq: number; key: string }> {
+    for (let i = this.seqs.length - 1; i >= 0; i--) {
+      const key = this.keys[i];
+      if (key !== null) yield { seq: this.seqs[i], key };
+    }
+  }
+
+  clear(): void { this.seqs = []; this.keys = []; this.dead = 0; }
+}

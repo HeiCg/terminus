@@ -69,6 +69,39 @@ private key in the same directory. Because the token is regenerated every boot, 
 collector, so it authenticates nothing until overwritten by the next boot. The CLI
 uses it only as the last fallback, after `--token` and `TERMINUS_TOKEN`.
 
+### The reader token (for local automation)
+
+Beside the admin token the collector writes a second per-boot bearer, the **reader
+token**, to `reader-token` in the same state directory. It is generated, written
+(`0600`, atomic), rotated on restart and removed on shutdown exactly like the admin
+token; only its scope differs. It is the recommended credential for a local
+automation client (a test runner, a script, an agent) that only needs to read
+captured traffic, and the CLI accepts it in `TERMINUS_TOKEN` for `status` and `ls`.
+
+The HTTP gate resolves every credential to a role. The session cookie and the admin
+bearer are `admin`; the reader bearer is `reader`, which passes an explicit
+allowlist: `GET` on `/health`, `/api/status`, `/api/devices`, `/api/entries` and its
+sub-routes (detail, body, `wait`), and `/api/ws` and its sub-routes. Everything
+else, including any route added later until it is listed, answers
+`403 {"error":"forbidden_scope","required":"admin"}`. The full route contract is in
+[read-api.md](read-api.md#authentication).
+
+Threat model. A local process holding the reader token:
+
+- **can** read all captured traffic the collector still holds, including request
+  and response bodies and WebSocket frames, as stored: already redacted, but with
+  every application payload intact;
+- **cannot** obtain the device token or the pairing blob (`/api/pairing` is
+  admin-only), so it cannot pair a device or ingest traffic;
+- **cannot** change state: no clear, pause, replay, export download, or session;
+- **cannot** open the `/ui` live socket.
+
+Like the admin-token file, the reader-token file is readable only by the user that
+runs the collector, and that user can already read the admin token and the private
+key in the same directory. The reader token narrows what a well-behaved automation
+client can do by accident; it is not a boundary against a hostile process running
+as the same user.
+
 ## Devices authenticate with a pinned certificate and a device token
 
 Both LAN capture channels (`8788` WSS and `10909` Atlantis TLS) require **two**
@@ -118,14 +151,66 @@ timeouts to bound the blast radius of an unauthenticated listener.
 
 ## Auth material is redacted before storage
 
-Redaction runs during normalization, before any bytes are stored or hashed, and
-is never undone. It masks auth-bearing headers (`authorization`, `cookie`,
-`set-cookie`, `access-token`, `client`, `uid`), sensitive URL query parameters
-(`access_token`, `client_id`, `uid`), and matching keys inside text/JSON bodies.
-It applies to Atlantis and proxy traffic; the in-app WSS protocol is already
-redacted at the source. Redaction reduces, but does not eliminate, the sensitivity
-of a capture: application payloads are still recorded, so a capture or an export
-should be handled as potentially sensitive.
+Redaction runs at the collector during normalization, before any bytes are stored
+or hashed, and is never undone. It applies to every source: Atlantis, the in-app
+WSS ingest, the proxy, and the stored result of a replay. A masked value is
+replaced by `***`.
+
+**What is masked.** One matcher decides whether a name is a credential, for header
+names, URL query parameter names (case-insensitive) and body keys. It matches by
+**word**, not by substring: the name is split on camelCase, `_`, `-`, `.`, spaces
+and letter/digit boundaries, lowercased, and is sensitive when
+
+- a word (or its plural with one trailing `s`) is one of `password`, `passwd`,
+  `pwd`, `secret`, `token`, `apikey`, `auth`, `authorization`, `session`,
+  `sessionid`, `credential`, `credentials`, `otp`, `pin`, `cvv`, `cvc`,
+  `signature`, `sig`, `cookie`;
+- a word is a squashed form `apikey`, `accesstoken`, `sessionid`, `setcookie`;
+- two adjacent words are `api` + `key` or `card` + `number`;
+- or it is on the pre-0.2 lists, kept so nothing masked before stops being masked:
+  headers `access-token`, `client`, `uid`; query `access_token`, `client_id`, `uid`;
+  body keys ending in `access_token`, `access-token`, `accesstoken`, `client`,
+  `authorization`, `uid` or `password`.
+
+So `X-Session-Id`, `nextPageToken`, `api_key` and `cardNumber` are masked, while
+`shipping`, `discard` and `author` are not. Bodies are walked by structure: a JSON
+body (by `Content-Type`, or one that starts with `{` or `[`) has the value of every
+sensitive key masked at any depth, including inside arrays; a
+`application/x-www-form-urlencoded` body has every sensitive parameter masked; and
+every text body then gets a pattern pass for `key: "value"`, `"key":"value"` and
+`key='value'`, which also reaches JSON embedded in a JSON string. Text WebSocket
+frames get the same treatment (JSON is recognised by its leading `{` or `[`).
+
+**Tuning.** Two comma-separated environment variables, read at start and matched
+as whole names, case-insensitively:
+
+- `TERMINUS_REDACT_EXTRA` adds names to mask (for example a custom
+  `X-Tenant-Key` header your app uses as a credential).
+- `TERMINUS_REDACT_ALLOW` exempts names (for example `nextPageToken`, if you need
+  pagination tokens in clear). It wins over `TERMINUS_REDACT_EXTRA` and the built-in
+  rules, and it also exempts the name from the replay credential strip's shared
+  check.
+
+`authorization`, `cookie`, `set-cookie` and `proxy-authorization` can never be
+exempted.
+
+**The `redacted` marker.** Every entry carries `redacted: { request, response }`,
+set when a value on that side was actually masked (request: URL query, request
+headers and body; response: response headers and body). It is shown in the read
+API, the HAR export (`_terminus.redacted`) and the JSON export, so a reader can tell
+a masked capture from a clean one without searching for `***`. See
+[read-api.md](read-api.md#the-redacted-marker).
+
+### What redaction does not cover
+
+- **Binary bodies and binary WebSocket frames** are stored as captured; they are
+  never parsed as text.
+- **Unrecognised names pass.** A secret under a name none of the rules (or
+  `TERMINUS_REDACT_EXTRA`) match is stored in clear, and so is a secret that is not
+  the value of a named field at all (a token inside free text or a path segment).
+- **Application payloads are recorded.** Redaction reduces, but does not
+  eliminate, the sensitivity of a capture, so a capture or an export should be
+  handled as potentially sensitive.
 
 ## What the MITM proxy implies
 
@@ -163,11 +248,13 @@ distinct from passive capture:
   `authorization`, `cookie`, `proxy-authorization`, `x-api-key`, `x-auth-token`
   headers and any `x-*` header naming a token/secret/key/auth, plus the
   credential-bearing query params (`token`, `access_token`, `api_key`, `apikey`,
-  `key`, `auth`, `signature`, `sig`, and the same `x-*` pattern). The names removed
-  come back as `stripped`. Pass `credentials: 'keep'` (CLI `--with-credentials`, or
-  the UI's "Include captured credentials" toggle) to re-send them verbatim. Headers
-  the caller supplies explicitly via `overrides.headers` are never stripped — the
-  caller chose them.
+  `key`, `auth`, `signature`, `sig`, and the same `x-*` pattern), and every header or
+  query name the redaction matcher (below) flags. The names removed come back as
+  `stripped`. Pass `credentials: 'keep'` (CLI `--with-credentials`, or the UI's
+  "Include captured credentials" toggle) to re-send them as stored. Values that
+  redaction already masked at capture were stored as `***`, so `keep` re-sends
+  `***` for those. Headers the caller supplies explicitly via `overrides.headers`
+  are never stripped (the caller chose them).
 - **Hop-by-hop headers are always recomputed.** `host`/`content-length` and RFC 7230
   hop-by-hop headers are stripped and recomputed regardless of the `credentials`
   choice.
@@ -182,6 +269,11 @@ distinct from passive capture:
 - **The result is a new record.** The response is stored as a fresh entry with
   `source: replay` and a `replayOf: { id, credentials, stripped }` back-reference; the
   original is untouched.
+- **The stored result is redacted.** The replay entry goes through the same
+  redaction as captured traffic, on both sides (URL, headers, text bodies), and
+  carries the `redacted` marker. This applies only to what is stored: the request
+  that leaves the machine carries exactly what the `credentials` mode decided, so an
+  override body or header is sent as given and stored masked.
 
 ## Residual risks
 
@@ -190,8 +282,11 @@ distinct from passive capture:
 - Exports are plain files with real (redacted) traffic; protect them accordingly.
 - The device token does not rotate on restart; rotate the identity to revoke a
   leaked token or QR.
-- Redaction is keyword-based; a secret carried under an unrecognized field name is
-  not masked.
+- Redaction is name-based; a secret carried under an unrecognized field name, or in
+  a binary body or frame, is not masked (see
+  [What redaction does not cover](#what-redaction-does-not-cover)).
+- The reader-token file grants read access to all captured traffic; it is protected
+  only by file permissions, like the admin-token file.
 
 ## Reporting
 

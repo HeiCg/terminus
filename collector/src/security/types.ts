@@ -47,8 +47,11 @@ const HEX64 = /^[0-9a-f]{64}$/;
 // Pure string predicates with no Node dependency, so they live in this low-level
 // module rather than in identity.ts — that keeps types.ts importable from the UI and
 // avoids a types<->identity import cycle.
+// Length first, and labels as a flat `(\.label)*` sequence: the former
+// `([A-Za-z0-9-]{0,62}\.?)+` backtracked exponentially on a long non-matching
+// value (GET /api/pairing?host= runs this on caller input).
 export const isHostname = (h: string): boolean =>
-  /^[A-Za-z0-9]([A-Za-z0-9-]{0,62}\.?)+$/.test(h) && h.length <= 253;
+  h.length >= 1 && h.length <= 253 && /^[A-Za-z0-9][A-Za-z0-9-]{0,62}(?:\.[A-Za-z0-9-]{1,63})*\.?$/.test(h);
 export const isIp = (s: string): boolean => {
   try { void new URL(`http://[${s}]`); return s.includes(':'); } catch { /* not ipv6 */ }
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(s) && s.split('.').every((o) => Number(o) <= 255);

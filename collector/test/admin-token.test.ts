@@ -8,6 +8,11 @@ import {
   writeAdminTokenFile,
   removeAdminTokenFile,
   readAdminTokenFile,
+  READER_TOKEN_FILE,
+  readerTokenPath,
+  writeReaderTokenFile,
+  removeReaderTokenFile,
+  readTokenFile,
 } from '../src/security/adminToken.js';
 
 // A throwaway state dir per test so nothing touches the operator's real
@@ -78,5 +83,38 @@ describe('admin-token file', () => {
     expect(fs.existsSync(adminTokenPath(dir))).toBe(false);
     // A second removal (or one that never ran) must not throw.
     expect(() => removeAdminTokenFile(dir)).not.toThrow();
+  });
+});
+
+describe('reader-token file (P3)', () => {
+  it('writes the token 0600 at <stateDir>/reader-token, beside the admin token', () => {
+    writeAdminTokenFile('admin-abc', dir);
+    writeReaderTokenFile('reader-abc', dir);
+    const p = readerTokenPath(dir);
+    expect(p).toBe(path.join(dir, READER_TOKEN_FILE));
+    expect(READER_TOKEN_FILE).toBe('reader-token');
+    expect(fs.readFileSync(p, 'utf8')).toBe('reader-abc');
+    if (process.platform !== 'win32') expect(fs.statSync(p).mode & 0o777).toBe(0o600);
+    // The two files are independent: neither write clobbers the other.
+    expect(readAdminTokenFile(dir)).toBe('admin-abc');
+    expect(readTokenFile(READER_TOKEN_FILE, dir)).toBe('reader-abc');
+  });
+
+  it('overwrites atomically with no temp left behind, and keeps 0600', () => {
+    writeReaderTokenFile('old', dir);
+    if (process.platform !== 'win32') fs.chmodSync(readerTokenPath(dir), 0o644);
+    writeReaderTokenFile('new', dir);
+    expect(readTokenFile(READER_TOKEN_FILE, dir)).toBe('new');
+    if (process.platform !== 'win32') expect(fs.statSync(readerTokenPath(dir)).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('removes only the reader file and is idempotent', () => {
+    writeAdminTokenFile('a', dir);
+    writeReaderTokenFile('r', dir);
+    removeReaderTokenFile(dir);
+    expect(fs.existsSync(readerTokenPath(dir))).toBe(false);
+    expect(fs.existsSync(adminTokenPath(dir))).toBe(true);
+    expect(() => removeReaderTokenFile(dir)).not.toThrow();
   });
 });

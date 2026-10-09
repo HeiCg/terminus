@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createUiAuth, SESSION_COOKIE } from '../src/security/uiAuth.js';
 
 const ADMIN = 'admin-token-abc';
+const READER = 'reader-token-xyz';
 const req = (headers: Record<string, string>) => ({ headers }) as unknown as IncomingMessage;
 
 function fakeRes() {
@@ -81,6 +82,30 @@ describe('createUiAuth', () => {
     const sid = auth.revokeSession(req({ cookie }));
     expect(sid).toBeTruthy();
     expect(auth.authorize(req({ cookie })).ok).toBe(false);
+  });
+
+  it('resolves a role: admin for the admin bearer and a session, reader for the reader bearer (P3)', () => {
+    const auth = createUiAuth({ adminToken: ADMIN, readerToken: READER });
+    expect(auth.authorize(req({ authorization: `Bearer ${ADMIN}` }))).toEqual({ ok: true, kind: 'bearer', role: 'admin' });
+    expect(auth.authorize(req({ authorization: `Bearer ${READER}` }))).toEqual({ ok: true, kind: 'bearer', role: 'reader' });
+    const cookie = login(auth);
+    expect(auth.authorize(req({ cookie }))).toMatchObject({ ok: true, kind: 'session', role: 'admin' });
+    expect(auth.authorize(req({ authorization: 'Bearer wrong' }))).toEqual({ ok: false, status: 401 });
+    expect(auth.authorize(req({}))).toEqual({ ok: false, status: 401 });
+  });
+
+  it('never mints a session from the reader bearer', () => {
+    const auth = createUiAuth({ adminToken: ADMIN, readerToken: READER });
+    const res = fakeRes();
+    auth.createSession(req({ authorization: `Bearer ${READER}` }), res);
+    expect(res.statusCode).toBe(401);
+    expect(res.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('without a reader token configured, no bearer resolves to reader', () => {
+    const auth = createUiAuth({ adminToken: ADMIN });
+    expect(auth.authorize(req({ authorization: 'Bearer ' }))).toEqual({ ok: false, status: 401 });
+    expect(auth.authorize(req({ authorization: `Bearer ${READER}` }))).toEqual({ ok: false, status: 401 });
   });
 
   it('caps the table at 16 sessions, evicting the least-recently-seen', () => {

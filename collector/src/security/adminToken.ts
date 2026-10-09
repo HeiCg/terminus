@@ -11,47 +11,63 @@ import { defaultStateDir } from './stateDir.js';
 // and removed on a clean shutdown so a stale file never outlives the process.
 export const ADMIN_TOKEN_FILE = 'admin-token';
 
-// The absolute path of the admin-token file. `defaultStateDir()` resolves
+// P3: the read-only reader bearer, for local automation. Same generation, storage
+// and lifecycle as the admin token (0600, atomic, per boot, removed on shutdown);
+// only the scope the HTTP gate grants it differs.
+export const READER_TOKEN_FILE = 'reader-token';
+
+export type TokenFile = typeof ADMIN_TOKEN_FILE | typeof READER_TOKEN_FILE;
+
+// The absolute path of a token file. `defaultStateDir()` resolves
 // TERMINUS_STATE_DIR (or the legacy NETCAPTURE_STATE_DIR) exactly as the collector
 // boot does, so the CLI and the collector always agree on the location.
-export function adminTokenPath(stateDir: string = defaultStateDir()): string {
-  return path.join(stateDir, ADMIN_TOKEN_FILE);
+export function tokenFilePath(file: TokenFile, stateDir: string = defaultStateDir()): string {
+  return path.join(stateDir, file);
 }
 
-// Write the admin token atomically at 0600: create the state dir if needed, write a
-// fresh 0600 temp file in the same dir, then rename over the target so a reader never
+// Write a token atomically at 0600: create the state dir if needed, write a fresh
+// 0600 temp file in the same dir, then rename over the target so a reader never
 // sees a half-written token. The temp name carries 8 random bytes and is opened with
 // the 'wx' flag (create-exclusive, fail if it exists), so a stale temp left by a
 // crashed run never gets silently reused or clobbered — the next call just picks
 // another name. The rename replaces any prior target, restoring 0600 even if an older
 // build left looser bits (rename moves the fresh inode, mode and all). The token
 // rotates each boot, so the overwrite is expected.
-export function writeAdminTokenFile(token: string, stateDir: string = defaultStateDir()): void {
+export function writeTokenFile(file: TokenFile, token: string, stateDir: string = defaultStateDir()): void {
   fs.mkdirSync(stateDir, { recursive: true });
-  const target = adminTokenPath(stateDir);
-  const tmp = path.join(stateDir, `.${ADMIN_TOKEN_FILE}.${randomBytes(8).toString('hex')}.tmp`);
+  const target = tokenFilePath(file, stateDir);
+  const tmp = path.join(stateDir, `.${file}.${randomBytes(8).toString('hex')}.tmp`);
   fs.writeFileSync(tmp, token, { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, target);
 }
 
-// Remove the admin-token file on shutdown. Best-effort and idempotent: a missing
-// file (never written, or already removed) is not an error.
-export function removeAdminTokenFile(stateDir: string = defaultStateDir()): void {
+// Remove a token file on shutdown. Best-effort and idempotent: a missing file
+// (never written, or already removed) is not an error.
+export function removeTokenFile(file: TokenFile, stateDir: string = defaultStateDir()): void {
   try {
-    fs.rmSync(adminTokenPath(stateDir));
+    fs.rmSync(tokenFilePath(file, stateDir));
   } catch {
     /* already gone — nothing to clean up */
   }
 }
 
-// Read the admin token a running collector wrote, or null when the file is absent
-// (no collector on this machine) or unreadable. Trailing whitespace is trimmed so a
+// Read a token a running collector wrote, or null when the file is absent (no
+// collector on this machine) or unreadable. Trailing whitespace is trimmed so a
 // token pasted or written with a newline still authenticates.
-export function readAdminTokenFile(stateDir: string = defaultStateDir()): string | null {
+export function readTokenFile(file: TokenFile, stateDir: string = defaultStateDir()): string | null {
   try {
-    const raw = fs.readFileSync(adminTokenPath(stateDir), 'utf8').trim();
+    const raw = fs.readFileSync(tokenFilePath(file, stateDir), 'utf8').trim();
     return raw.length > 0 ? raw : null;
   } catch {
     return null;
   }
 }
+
+export const adminTokenPath = (stateDir?: string): string => tokenFilePath(ADMIN_TOKEN_FILE, stateDir);
+export const writeAdminTokenFile = (token: string, stateDir?: string): void => writeTokenFile(ADMIN_TOKEN_FILE, token, stateDir);
+export const removeAdminTokenFile = (stateDir?: string): void => removeTokenFile(ADMIN_TOKEN_FILE, stateDir);
+export const readAdminTokenFile = (stateDir?: string): string | null => readTokenFile(ADMIN_TOKEN_FILE, stateDir);
+
+export const readerTokenPath = (stateDir?: string): string => tokenFilePath(READER_TOKEN_FILE, stateDir);
+export const writeReaderTokenFile = (token: string, stateDir?: string): void => writeTokenFile(READER_TOKEN_FILE, token, stateDir);
+export const removeReaderTokenFile = (stateDir?: string): void => removeTokenFile(READER_TOKEN_FILE, stateDir);

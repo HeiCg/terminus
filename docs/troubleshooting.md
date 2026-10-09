@@ -58,6 +58,59 @@ it.
   Mac and device on different subnets/VLANs). Put both on the same,
   non-isolated LAN.
 
+## Simulator, emulator, or Linux on the same machine
+
+**Symptom.** An iOS simulator or Android emulator running on the collector's own
+machine cannot connect with the normal pairing (the LAN IP is unreachable from the
+emulator, or the TLS check fails), or you want to run the collector on Linux, for
+example on a CI runner.
+
+An identity generated with the detected addresses (the default, and a rotation
+without `--ip`) has `localhost`, `127.0.0.1` and `::1` in its certificate SAN
+besides the host name and LAN IPs, so a target on the same machine can dial
+`127.0.0.1` without any change to the identity. A rotation with explicit `--ip`
+values covers those IPs plus `localhost`, `127.0.0.1` and `::1`, which are always
+kept. (Identities rotated with `--ip` before 0.2.0 lack the loopback IPs; rotate
+again if `GET /api/pairing?host=127.0.0.1` answers 400.)
+
+**iOS simulator.** The simulator shares the Mac's network, so `127.0.0.1` reaches
+the collector directly. Fetch a pairing blob that advertises it (admin token
+needed) and paste it into the app:
+
+```bash
+curl -s -H "Authorization: Bearer $(cat "$HOME/Library/Application Support/Terminus/admin-token")" \
+  "http://127.0.0.1:8787/api/pairing?host=127.0.0.1"
+```
+
+`host` overrides the advertised host for that response only; a host the certificate
+SAN does not cover is refused with `400`.
+
+**Android emulator.** Forward the capture ports from the emulator to the Mac with
+`adb reverse`, then pair with the same `?host=127.0.0.1` blob:
+
+```bash
+adb reverse tcp:10909 tcp:10909   # Atlantis TLS
+adb reverse tcp:8788 tcp:8788     # WSS ingest
+adb reverse tcp:8789 tcp:8789     # cert endpoint (QR pairing only)
+```
+
+Use your own values if you changed `TERMINUS_ATLANTIS_PORT`,
+`TERMINUS_INGEST_PORT` or `TERMINUS_CERT_PORT`. Add `-s <serial>` to target one
+emulator when several run. The forward lasts until the emulator or adb restarts.
+Do not use the emulator's host alias `10.0.2.2`: it is not in the certificate SAN,
+so the TLS check fails. Adding it means rotating the identity with `10.0.2.2` among
+the `--ip` values (which replace the detected LAN list, so name every other LAN IP
+too; loopback is always kept).
+Rotation issues a new certificate and device token, so **every** paired device must
+re-pair; `adb reverse` avoids that.
+
+**Linux.** The collector runs on Linux (CI covers Ubuntu). It needs Node.js 20+ and
+OpenSSL 3 on `PATH` (see [OpenSSL missing at startup](#openssl-missing-at-startup)).
+The state directory is `$XDG_STATE_HOME/terminus` (fallback
+`~/.local/state/terminus`). mDNS discovery may be unavailable where multicast is
+blocked, as on most CI runners; pair with the blob instead of relying on discovery.
+The launchd service scripts are macOS-only.
+
 ## Port already in use (`EADDRINUSE`)
 
 **Symptom.** The collector logs `port 8787 already in use; set PORT to another
@@ -95,23 +148,38 @@ crash no longer matches the running collector, so it authenticates nothing.
   URL (`http://127.0.0.1:8787/#token=<adminToken>`).
 
 The CLI resolves the token as `--token`, then `TERMINUS_TOKEN`, then the
-`admin-token` file.
+`admin-token` file. `TERMINUS_TOKEN` (or `--token`) may also hold the read-only
+reader token from `reader-token` in the same directory: `terminus status` and
+`terminus ls` work with it, and admin-only commands exit **2** with *"this command
+needs the admin token (reader token given)"*. The reader token rotates on restart
+like the admin token.
 
 ## OpenSSL missing at startup
 
 **Symptom.** The collector refuses to start with *"OpenSSL 3 not found on PATH.
-Install it (e.g. `brew install openssl@3`) …"* or *"OpenSSL 3 required, found: …"*.
+Install OpenSSL 3 and put it on PATH …"* or *"OpenSSL 3 required, found: …"*.
 
 OpenSSL 3+ is required once, to generate the collector's identity certificate; the
-check runs **before** any listener opens.
+check runs **before** any listener opens. Stock macOS ships LibreSSL as
+`/usr/bin/openssl`, which fails the version check.
 
-**Fix.** Install OpenSSL 3 and make it available on `PATH`:
+**Fix.** Install OpenSSL 3 and make it available on `PATH`.
+
+macOS (Homebrew's `openssl@3` is keg-only, so add it to `PATH` yourself):
 
 ```bash
 brew install openssl@3
+export PATH="$(brew --prefix openssl@3)/bin:$PATH"
 ```
 
-Then restart the collector.
+Linux (most current distributions already ship OpenSSL 3):
+
+```bash
+sudo apt install openssl     # Debian, Ubuntu
+sudo dnf install openssl     # Fedora, RHEL
+```
+
+Check with `openssl version`, then restart the collector.
 
 ## QR pairing fails on a hardened QA build (paste works)
 

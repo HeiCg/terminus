@@ -9,13 +9,19 @@ const SESSION_IDLE_MS = 30 * 60 * 1000;     // 30min
 const MAX_SESSIONS = 16;
 export const SESSION_COOKIE = 'nc_session';
 
+// P3: what an authenticated caller may do. A session (only ever minted from the
+// admin bearer) and the admin bearer are `admin`; the reader bearer is `reader`,
+// whose read-only scope the HTTP gate enforces.
+export type Role = 'admin' | 'reader';
+
 export type Authz =
-  | { ok: true; kind: 'session'; sid: string }
-  | { ok: true; kind: 'bearer' }
+  | { ok: true; kind: 'session'; sid: string; role: 'admin' }
+  | { ok: true; kind: 'bearer'; role: Role }
   | { ok: false; status: 401 };
 
 export interface UiAuth {
-  // Classify a request as an authenticated session, an admin bearer, or neither.
+  // Classify a request as an authenticated session, an admin or reader bearer, or
+  // neither.
   authorize(req: IncomingMessage): Authz;
   // Exchange a valid admin bearer for a session cookie (204 + Set-Cookie) or 401.
   createSession(req: IncomingMessage, res: ServerResponse): void;
@@ -53,7 +59,7 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export function createUiAuth(
-  { adminToken, now = Date.now }: { adminToken: string; now?: () => number },
+  { adminToken, readerToken, now = Date.now }: { adminToken: string; readerToken?: string; now?: () => number },
 ): UiAuth {
   const sessions = new Map<string, Session>();
 
@@ -72,16 +78,23 @@ export function createUiAuth(
     return sid;
   }
 
+  // Only the admin bearer verifies here: it alone may mint a session.
   function verifyBearer(req: IncomingMessage): boolean {
     const tok = bearerToken(req);
     return tok != null && safeEqual(tok, adminToken);
   }
 
+  function verifyReaderBearer(req: IncomingMessage): boolean {
+    const tok = bearerToken(req);
+    return tok != null && readerToken != null && readerToken !== '' && safeEqual(tok, readerToken);
+  }
+
   return {
     authorize(req) {
       const sid = touchSession(req);
-      if (sid) return { ok: true, kind: 'session', sid };
-      if (verifyBearer(req)) return { ok: true, kind: 'bearer' };
+      if (sid) return { ok: true, kind: 'session', sid, role: 'admin' };
+      if (verifyBearer(req)) return { ok: true, kind: 'bearer', role: 'admin' };
+      if (verifyReaderBearer(req)) return { ok: true, kind: 'bearer', role: 'reader' };
       return { ok: false, status: 401 };
     },
     createSession(req, res) {

@@ -3,7 +3,11 @@ export type Hello = { type: 'hello'; deviceId: string; platform: 'android' | 'io
   // Optional: the key the Atlantis SDK will present under, when the app knows it.
   // Lets the collector alias Atlantis traffic onto this hello's deviceId even when
   // the SDK is too old to be started with the app's own id.
-  atlantisDeviceKey?: string };
+  atlantisDeviceKey?: string;
+  // Optional app/device identity (P2), device-supplied. Not validated by
+  // isDeviceMessage: a wrong type or an oversized value is dropped by
+  // identityField() when the hello is applied, never a reason to refuse the hello.
+  bundleId?: string; deviceName?: string; model?: string; externalId?: string };
 export type RequestEvent = { type: 'request'; id: string; ts: number; method: string;
   url: string; headers: Record<string, string>; body: string | null;
   bodyOmitted?: 'size' | 'binary'; bodySize: number; source: 'xhr' };
@@ -70,6 +74,10 @@ export type Entry = {
   // and the names of the header/query credentials that were removed (`?name` marks
   // a stripped query param). Optional and additive; absent on every captured entry.
   replayOf?: { id: string; credentials?: 'strip' | 'keep'; stripped?: string[] };
+  // P5: which side had a value masked at ingest (request = URL query, request
+  // headers and body; response = response headers and body). Absent when nothing
+  // was masked; the summary DTO normalizes it to two booleans.
+  redacted?: { request: boolean; response: boolean };
 };
 
 // Ingest input for a captured exchange: everything of `Entry` except the text
@@ -90,6 +98,13 @@ export type WsKey = { deviceId: string; wsId: string };
 // `sequence` is the session-monotonic index assigned at append time; it survives
 // frame eviction (so gaps are visible) and is the cursor for paged frame reads.
 export type StoredFrame = { sequence: number; ts: number; direction: 'in' | 'out'; size: number; binary: boolean; body: BodyRef };
+
+// Server-sequence stamp of one stored HTTP exchange (P1), kept by the store beside
+// the record (not inside it, so the legacy DTO, exports and metadata accounting
+// are unchanged). `seq` is the store-wide counter value of the entry's latest
+// write, `firstSeq` the value at its creation; `receivedAt` is the collector's
+// clock (ms) when it was created. An upsert or patch moves `seq` only.
+export type EntrySeq = { seq: number; firstSeq: number; receivedAt: number };
 
 // A stored HTTP exchange, holding body references rather than text.
 export type StoredEntry = Omit<Entry, 'requestBody' | 'responseBody' |
@@ -135,7 +150,31 @@ export type Device = { deviceId: string; platform: string; appVersion: string;
   buildProfile: string; dropped: number; lastSeen: number;
   // Additive (protocol v3): present once a channel has been observed; absent on
   // legacy records so pre-channels snapshots and fixtures still type-check.
-  channels?: DeviceChannels };
+  channels?: DeviceChannels;
+  // App/device identity (P2), each present once some channel announced it: the
+  // Atlantis ConnectionPackage (`project.bundleIdentifier`, `project.name`,
+  // `device.name`, `device.model`, `device.externalId`) or the ingest hello. A
+  // later touch without a value never erases a known one.
+  bundleId?: string; appName?: string; deviceName?: string; model?: string; externalId?: string;
+  // Sticky flags (P2). `ambiguous`: two Atlantis connections open at the same time
+  // announced this device's envelope id, so its traffic may mix two apps/devices;
+  // reset by /api/clear. `startEvents`: this device has sent a request-START event
+  // (an Atlantis start packet or an XHR `request`), so `firstSeq` marks the start.
+  ambiguous?: boolean; startEvents?: boolean };
+
+// The identity strings a device record carries, in one place for the merge.
+export const DEVICE_IDENTITY_FIELDS = ['bundleId', 'appName', 'deviceName', 'model', 'externalId'] as const;
+export type DeviceIdentity = Partial<Record<(typeof DEVICE_IDENTITY_FIELDS)[number], string>>;
+
+// A device-supplied identity value, or undefined when it is not a usable string:
+// wrong type, blank, or longer than IDENTITY_MAX characters (dropped, not clipped,
+// so a filter never matches a truncated id).
+export const IDENTITY_MAX = 256;
+export function identityField(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t !== '' && t.length <= IDENTITY_MAX ? t : undefined;
+}
 
 // ---- Export snapshot (R5) -----------------------------------------------
 // An export names what to include: a whole device (or all devices when

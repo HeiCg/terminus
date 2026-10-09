@@ -6,6 +6,86 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-08
+
+### Added
+
+- Server sequence for HTTP entries: every entry write takes the next per-store
+  `seq`; summaries carry `seq`, `firstSeq` and `receivedAt` (collector clock).
+  `GET /api/entries?afterSeq=<n>` reads entries changed after a cursor in arrival
+  order, and `?last=<n>` (1 to 200) the most recent ones, both with `nextSeq`,
+  `lastSeq`, `epoch`, `now`, `gap` and `hasMore`. `newOnly=true` keeps only entries
+  created after the cursor. A per-boot `epoch` makes a cursor from another boot a
+  `409 stale_cursor`; `gap` reports records evicted or cleared past the cursor.
+  `GET /api/status` gains `epoch`, `lastSeq` and `now`.
+- Reader token: a second per-boot bearer written to `<stateDir>/reader-token`
+  (`0600`, removed on shutdown), limited by an explicit allowlist to `GET` reads of
+  `/health`, `/api/status`, `/api/devices`, `/api/entries/*` and `/api/ws/*`;
+  anything else answers `403 {"error":"forbidden_scope","required":"admin"}`.
+  `terminus status` and `ls` accept it in `TERMINUS_TOKEN`; admin-only commands
+  say so and exit 2.
+- Device and app identity: devices carry `bundleId`, `appName`, `deviceName`,
+  `model` and `externalId` from the Atlantis ConnectionPackage (including the
+  forks' new `device.externalId`) or from new optional `hello` fields, plus the
+  sticky flags `ambiguous` (two live Atlantis connections announcing one id) and
+  `startEvents` (the device sends request-start events). An Atlantis request-start
+  packet (the forks' `emitRequestStart`) that arrives after its exchange already
+  completed is dropped instead of overwriting the completed entry.
+- Device-scope filters `device=`, `externalId=` and `bundleId=` on
+  `GET /api/entries` (every mode), `GET /api/entries/wait` and `GET /api/devices`;
+  the seq reads echo the resolved set as `devices` when `externalId` or `bundleId`
+  is given.
+- `GET /api/pairing?host=<h>` overrides the advertised host for that response, for
+  a simulator or emulator pairing against `127.0.0.1`; a host outside the
+  certificate SAN is `400`.
+- Entry filters on the `afterSeq` and `last` reads: `method` (list), `urlContains`,
+  `status` (code, class or range), `source` and `completed`.
+- `GET /api/entries/wait`: a long-poll that answers as soon as an entry after
+  `afterSeq` matches the scope and filters, or after `timeoutMs` (default 10 s, at
+  most 30 s) with up to 5 `nearMisses`. At most 16 pending waits collector-wide
+  (`429` beyond); disconnect, clear and shutdown end a wait.
+- `apiVersion` (1) and `capabilities` (`seq`, `reader-token`, `device-identity`,
+  `filters`, `wait`, `redaction-marker`) on `GET /health` and `GET /api/status`,
+  for feature detection.
+- Redaction marker: every entry carries `redacted: { request, response }` in the
+  read API, the HAR export (`_terminus.redacted`) and the JSON export, and `--load`
+  restores it. `TERMINUS_REDACT_EXTRA` and `TERMINUS_REDACT_ALLOW` add or exempt
+  names (comma-separated, case-insensitive; `authorization`, `cookie`, `set-cookie`
+  and `proxy-authorization` cannot be exempted).
+- `docs/read-api.md`: the HTTP read contract for automation clients.
+
+### Changed
+
+- Redaction is wider by default. Names are matched by word against a shared list
+  (`password`, `secret`, `token`, `session`, `api` + `key`, `card` + `number`, and
+  more), JSON bodies are walked by key at any depth, and form bodies are masked by
+  parameter name. More values now show as `***` in the UI, the CLI, exports and
+  stored data, including pagination tokens such as `nextPageToken`; set
+  `TERMINUS_REDACT_ALLOW` to exempt a name. The replay credential strip uses the
+  same matcher, so a default replay drops more names, and a `credentials: 'keep'`
+  replay re-sends `***` for values masked at capture.
+- Query-parameter redaction is now case-insensitive.
+- `GET /api/devices?device=` now filters the list (it was ignored), and `device=`
+  on `GET /api/entries` resolves an Atlantis alias to its canonical device.
+- `terminus status` with a reader token reports from `GET /api/status` only (the
+  `/ui` socket is admin-only); `--json` carries `snapshot: null`.
+
+### Fixed
+
+- Replay results were stored without redaction; the stored replay entry (both
+  sides) now goes through the same redactor as captured traffic and carries the
+  `redacted` marker. The outgoing request is unchanged.
+- The HAR fixture drift test no longer breaks on every release (it ignores
+  `creator.version`).
+- The missing-OpenSSL startup error now gives a macOS and a Linux hint instead of
+  naming only Homebrew, and the version-too-old error gives the same hints.
+- `identity:rotate --ip ...` no longer drops `127.0.0.1` and `::1` from the
+  certificate SAN; the loopback anchors are always kept, like `localhost`, so
+  simulator and emulator pairing on loopback keeps working after a rotation.
+- WebSocket sessions captured by the proxy stored their URL unredacted (a token in
+  the query was served by `/api/ws` and exports); the URL now goes through the
+  same redaction as HTTP entries.
+
 ## 0.1.1 — 2026-09-14
 
 ### Added

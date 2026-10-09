@@ -1,4 +1,4 @@
-import type { Entry, EntryInput, StoredEntry, StoredFrame, BodyRef, BodyOmitted } from './types.js';
+import type { Entry, EntryInput, EntrySeq, StoredEntry, StoredFrame, BodyRef, BodyOmitted } from './types.js';
 import type { BodyStore } from './bodyStore.js';
 import type { EntrySummary, EntryDetail, FrameSummary } from './uiProtocol.js';
 
@@ -84,20 +84,23 @@ export function legacyEntryToInput(e: Entry): EntryInput {
 
 // `StoredEntry` -> `EntrySummary` for a metadata page: identity + BodyRefs, no
 // headers, no body bytes. The refs carry sha256/size/omission so the UI can key
-// a formatting cache and fetch the bytes on demand from `/body`.
-export function storedToEntrySummary(s: StoredEntry): EntrySummary {
+// a formatting cache and fetch the bytes on demand from `/body`. `q` is the
+// store's sequence stamp for the record (P1).
+export function storedToEntrySummary(s: StoredEntry, q: EntrySeq): EntrySummary {
   return {
     id: s.id, deviceId: s.deviceId, source: s.source, startedAt: s.startedAt,
     method: s.method, url: s.url, status: s.status, durationMs: s.durationMs, error: s.error,
     requestBody: s.requestBody, responseBody: s.responseBody,
+    seq: q.seq, firstSeq: q.firstSeq, receivedAt: q.receivedAt,
+    redacted: { request: s.redacted?.request === true, response: s.redacted?.response === true },
   };
 }
 
 // `StoredEntry` -> `EntryDetail`: the summary plus headers and statusText, still
 // with no body bytes materialized.
-export function storedToEntryDetail(s: StoredEntry): EntryDetail {
+export function storedToEntryDetail(s: StoredEntry, q: EntrySeq): EntryDetail {
   return {
-    ...storedToEntrySummary(s),
+    ...storedToEntrySummary(s, q),
     requestHeaders: s.requestHeaders, responseHeaders: s.responseHeaders, statusText: s.statusText,
   };
 }
