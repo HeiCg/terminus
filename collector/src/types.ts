@@ -78,6 +78,21 @@ export type Entry = {
   // headers and body; response = response headers and body). Absent when nothing
   // was masked; the summary DTO normalizes it to two booleans.
   redacted?: { request: boolean; response: boolean };
+  // U5: set only on a proxy `CONNECT` entry recording a TLS connection the proxy
+  // tunnelled WITHOUT interception (a pass-through host, or any host outside the
+  // intercept-only list). Nothing inside the tunnel is visible: the entry carries
+  // no headers or bodies, only this metadata. `host`/`port` are the tunnel's
+  // destination, `sni` the server name of the client's TLS hello. `bytesUp`/
+  // `bytesDown` are the bytes the client sent/received on its connection to the
+  // proxy (the CONNECT handshake included), set at close; null while open or when
+  // the proxy could not observe the connection. Epoch ms times, collector clock.
+  tunnel?: TunnelInfo;
+};
+
+export type TunnelInfo = {
+  host: string; port: number; sni: string | null;
+  bytesUp: number | null; bytesDown: number | null;
+  openedAt: number; closedAt: number | null;
 };
 
 // Ingest input for a captured exchange: everything of `Entry` except the text

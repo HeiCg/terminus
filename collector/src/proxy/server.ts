@@ -1,6 +1,7 @@
 import { getLocal, generateCACertificate, type Mockttp } from 'mockttp';
-import type { CompletedRequest, CompletedResponse, WebSocketMessage, WebSocketClose, TlsHandshakeFailure, AbortedRequest } from 'mockttp';
+import type { CompletedRequest, CompletedResponse, WebSocketMessage, WebSocketClose, TlsHandshakeFailure, AbortedRequest, TlsPassthroughEvent } from 'mockttp';
 import { randomUUID } from 'node:crypto';
+import type net from 'node:net';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { Store } from '../store.js';
@@ -8,6 +9,7 @@ import type { BodyStore } from '../bodyStore.js';
 import { buildEntryInput, normalizeWsFrame, epochOf, type ProxyIds } from './normalize.js';
 import { log } from '../log.js';
 import { redactUrl } from '../redactor.js';
+import type { EntryInput, TunnelInfo } from '../types.js';
 
 // A collector-internal endpoint the proxy must NOT inspect: its TLS is tunnelled
 // raw (so the device keeps seeing the collector's own pinned certificate, never a
@@ -34,6 +36,13 @@ export type ProxySourceOptions = {
   // real access boundary is `deviceAllowlist` (enforced per connection below).
   host?: string;
   minTlsVersion?: 'TLSv1.2' | 'TLSv1.3';
+  // U5 (see tlsMode.ts): mockttp hostname patterns (`api.example.com`,
+  // `*.example.com`), already validated. `tlsPassthrough` hosts are tunnelled raw
+  // in addition to the collector's own; `tlsInterceptOnly` makes ONLY those hosts
+  // intercepted (the collector's own hosts are then tunnelled because they are not
+  // listed). Mutually exclusive: setting both throws.
+  tlsPassthrough?: string[];
+  tlsInterceptOnly?: string[];
 };
 
 // The cloud metadata service address. A proxy that forwarded to it would let a
@@ -71,6 +80,21 @@ export async function loadOrCreateProxyCA(dir: string): Promise<ProxyCA> {
   return { key, cert, certPath };
 }
 
+// The store record for one raw TLS tunnel (U5): a body-less `CONNECT` entry. While
+// open it is in flight (status null); at close it gets status 200 (the tunnel was
+// established) and its duration, or the passthrough error.
+function tunnelEntry(ids: ProxyIds, url: string, info: TunnelInfo, error: string | null = null): EntryInput {
+  const closed = info.closedAt != null;
+  return {
+    ...buildEntryInput({
+      ids, startedAt: info.openedAt, method: 'CONNECT', url,
+      status: closed && error == null ? 200 : null, statusText: closed && error == null ? 'OK' : '',
+      durationMs: closed ? Math.max(0, info.closedAt! - info.openedAt) : null, error,
+    }),
+    tunnel: info,
+  };
+}
+
 // Normalize an IPv4-mapped IPv6 address (`::ffff:127.0.0.1`) down to its IPv4 form
 // so the allowlist compares apples to apples.
 export function normalizeIp(ip: string | undefined): string {
@@ -84,6 +108,11 @@ export function normalizeIp(ip: string | undefined): string {
 // source; Atlantis and the WSS ingest are wired elsewhere and are never gated by it.
 export function createProxySource(options: ProxySourceOptions): ProxySource {
   const { port, ca, store, excludedCollectorEndpoints, deviceAllowlist } = options;
+  const userPassthrough = options.tlsPassthrough ?? [];
+  const interceptOnly = options.tlsInterceptOnly ?? [];
+  if (userPassthrough.length && interceptOnly.length) throw new Error('proxy: tlsPassthrough and tlsInterceptOnly cannot both be set');
+  const userTlsMode = userPassthrough.length > 0 || interceptOnly.length > 0;
+  const collectorHosts = new Set(excludedCollectorEndpoints.map((e) => e.host));
   const sessionId = randomUUID();
   const allow = new Set(deviceAllowlist.map(normalizeIp));
   // One admission generation for the whole proxy source: freed on stop() so the
@@ -100,6 +129,13 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
   // guess at the real device/appVersion behind the IP.
   const httpIds = new Map<string, { ids: ProxyIds; req: CompletedRequest }>();
   const wsIds = new Map<string, ProxyIds>();
+  // Raw TLS tunnels being recorded, by mockttp's passthrough event id, and the
+  // live client TCP sockets by `ip:port` (filled from the listener's `connection`
+  // event) so a tunnel can be closed for a disallowed client and its byte counts
+  // read at close. mockttp exposes neither the socket nor tunnel byte counts.
+  const tunnels = new Map<string, { ids: ProxyIds; url: string; info: TunnelInfo; sock: net.Socket | null }>();
+  const clientSockets = new Map<string, net.Socket>();
+  const sockKey = (ip: string | undefined, p: number | undefined): string => `${normalizeIp(ip)}:${p ?? ''}`;
 
   const clientIdOf = (ip: string | undefined): string => normalizeIp(ip) || 'unknown';
   const deviceIdOf = (ip: string | undefined): string => `proxy:${sessionId}:${clientIdOf(ip)}`;
@@ -142,8 +178,11 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
 
   async function attach(s: Mockttp): Promise<void> {
     // ---- HTTP ------------------------------------------------------------
+    // Out of the capture scope (U5): still forwarded upstream by the rules below,
+    // just never recorded (admitScope counts the drop).
     await s.on('request', async (req: CompletedRequest) => {
       if (!shouldRecord(req)) return;
+      if (!store.admitScope(req.url)) return;
       const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(req.remoteIpAddress) };
       httpIds.set(req.id, { ids, req });
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
@@ -185,6 +224,7 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
     // ---- WebSocket -------------------------------------------------------
     await s.on('websocket-request', (req: CompletedRequest) => {
       if (!shouldRecord(req)) return;
+      if (!store.admitScope(req.url)) return;
       const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(req.remoteIpAddress) };
       wsIds.set(req.id, ids);
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
@@ -214,12 +254,54 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       if (!isAllowedClient(e.remoteIpAddress)) return;
       const dest = e.destination;
       const host = e.tlsMetadata?.sniHostname ?? dest?.hostname ?? 'unknown';
+      if (!store.admitScope(`https://${host}`)) return;
       const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(e.remoteIpAddress) };
       store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
       store.addEntryInput(buildEntryInput({
         ids, startedAt: Math.round(e.timingEvents.startTime), method: '', url: `https://${host}`,
         error: `tls_error ${e.failureCause}`,
       }));
+    });
+
+    // ---- Raw TLS tunnels (U5) --------------------------------------------
+    // A TLS connection mockttp passes through WITHOUT interception (a pass-through
+    // host, any host outside the intercept-only list, or a collector-internal host)
+    // never reaches the HTTP gate above, so the access boundary is applied here: a
+    // client outside the allowlist, or a tunnel to the metadata address, is closed
+    // as soon as mockttp reports it (before the upstream can answer), so a
+    // pass-through host is never an open relay. Collector-internal tunnels keep
+    // their pre-U5 behaviour: never refused here, never recorded.
+    // A recorded tunnel is a `CONNECT` entry (no headers/bodies; nothing inside the
+    // tunnel is visible) whose `tunnel` field carries host, port, SNI and, at close,
+    // the client connection's byte counts. It is in flight (status null) while open
+    // and gets status 200 and its duration when it closes.
+    await s.on('tls-passthrough-opened', (e: TlsPassthroughEvent) => {
+      const dest = e.destination;
+      if (collectorHosts.has(dest.hostname)) return;
+      const sock = clientSockets.get(sockKey(e.remoteIpAddress, e.remotePort)) ?? null;
+      if (dest.hostname === CLOUD_METADATA_IP || !isAllowedClient(e.remoteIpAddress)) {
+        log.warn('proxy: refused TLS tunnel', dest.hostname, normalizeIp(e.remoteIpAddress));
+        sock?.destroy();
+        return;
+      }
+      const host = dest.hostname;
+      const url = `https://${host.includes(':') ? `[${host}]` : host}:${dest.port}`;
+      if (!store.admitScope(url)) return;
+      const ids: ProxyIds = { id: newRecordId(), deviceId: deviceIdOf(e.remoteIpAddress) };
+      const openedAt = Math.round(e.timingEvents.startTime);
+      const info: TunnelInfo = { host, port: dest.port, sni: e.tlsMetadata?.sniHostname ?? null, bytesUp: null, bytesDown: null, openedAt, closedAt: null };
+      store.touchDevice({ deviceId: ids.deviceId, platform: 'proxy', appVersion: '', buildProfile: 'proxy', dropped: 0, lastSeen: Date.now() });
+      if (store.addEntryInput(tunnelEntry(ids, url, info))) tunnels.set(e.id, { ids, url, info, sock });
+    });
+    await s.on('tls-passthrough-closed', (e: TlsPassthroughEvent) => {
+      const t = tunnels.get(e.id);
+      if (!t) return;
+      tunnels.delete(e.id);
+      const te = e.timingEvents;
+      const closedAt = te.disconnectTimestamp != null ? Math.round(te.startTime + (te.disconnectTimestamp - te.connectTimestamp)) : Date.now();
+      const failure = e.tags.find((tag) => tag.startsWith('tls-passthrough-error:'));
+      const info: TunnelInfo = { ...t.info, closedAt, bytesUp: t.sock?.bytesRead ?? null, bytesDown: t.sock?.bytesWritten ?? null };
+      store.addEntryInput(tunnelEntry(t.ids, t.url, info, failure ? `tunnel_error ${failure.slice('tls-passthrough-error:'.length)}` : null));
     });
 
     // Passthrough rules. The gate rejects disallowed clients / metadata fetches
@@ -246,8 +328,11 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
         https: {
           key: ca.key, cert: ca.cert,
           // Collector-internal hosts are tunnelled raw: no MITM, so the device keeps
-          // pinning the collector's real certificate through the proxy.
-          tlsPassthrough: [...new Set(excludedCollectorEndpoints.map((e) => e.host))].map((hostname) => ({ hostname })),
+          // pinning the collector's real certificate through the proxy. In
+          // intercept-only mode they are simply not on the intercept list.
+          ...(interceptOnly.length
+            ? { tlsInterceptOnly: interceptOnly.map((hostname) => ({ hostname })) }
+            : { tlsPassthrough: [...new Set([...collectorHosts, ...userPassthrough])].map((hostname) => ({ hostname })) }),
           tlsServerOptions: { minVersion: options.minTlsVersion ?? 'TLSv1.2' },
         },
         // The proxy must never rewrite CORS on captured traffic.
@@ -256,12 +341,33 @@ export function createProxySource(options: ProxySourceOptions): ProxySource {
       });
       await server.start(port);
       actualPort = server.port;
+      // Observe the client TCP sockets (first sighting wins: mockttp re-emits
+      // `connection` for the same socket after a CONNECT). This reaches into
+      // mockttp's listener because it exposes no socket for a raw tunnel; when that
+      // is impossible and user TLS modes are on, refuse to start (fail closed:
+      // without it a pass-through host would be an open relay).
+      const raw = (server as unknown as { server?: { prependListener?: unknown } }).server;
+      if (raw && typeof raw.prependListener === 'function') {
+        (raw as unknown as net.Server).prependListener('connection', (sock: net.Socket) => {
+          const key = sockKey(sock.remoteAddress, sock.remotePort);
+          if (clientSockets.has(key)) return;
+          clientSockets.set(key, sock);
+          sock.once('close', () => { if (clientSockets.get(key) === sock) clientSockets.delete(key); });
+        });
+      } else if (userTlsMode) {
+        const s = server; server = null; await s.stop();
+        throw new Error('proxy: cannot observe client connections in this mockttp version; TLS pass-through modes are unavailable');
+      } else {
+        log.warn('proxy: cannot observe client connections; tunnel byte counts are unavailable');
+      }
       await attach(server);
       log.info(`proxy source listening on ${options.host ?? '0.0.0.0'}:${server.port} (session ${sessionId}); allowlist ${[...allow].join(',') || '(empty)'}`);
+      if (userPassthrough.length) log.info(`proxy: TLS pass-through (not intercepted): ${userPassthrough.join(', ')}`);
+      if (interceptOnly.length) log.info(`proxy: TLS intercept-only (every other host is tunnelled): ${interceptOnly.join(', ')}`);
     },
     async stop() {
       const s = server; server = null;
-      httpIds.clear(); wsIds.clear();
+      httpIds.clear(); wsIds.clear(); tunnels.clear(); clientSockets.clear();
       store.closeWsGeneration(generation);
       if (s) await s.stop();
     },

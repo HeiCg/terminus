@@ -48,6 +48,8 @@ type TerminusHttpExt = {
   replayOf?: Entry['replayOf'];
   // P5: present only when a value was masked at ingest on either side.
   redacted?: Entry['redacted'];
+  // U5: a proxy CONNECT entry's pass-through tunnel metadata.
+  tunnel?: Entry['tunnel'];
   sessions?: TerminusWsExt[];
 };
 
@@ -163,6 +165,7 @@ function httpExt(e: StoredEntry, linked: ExportSession[]): TerminusHttpExt {
     deviceId: e.deviceId, id: e.id, source: e.source,
     ...(e.replayOf ? { replayOf: e.replayOf } : {}),
     ...(e.redacted ? { redacted: e.redacted } : {}),
+    ...(e.tunnel ? { tunnel: e.tunnel } : {}),
     ...(linked.length ? { sessions: linked.map((s) => wsExt(s)) } : {}),
   };
 }

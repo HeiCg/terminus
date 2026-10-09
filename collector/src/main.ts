@@ -11,6 +11,7 @@ import { createCertServer } from './security/certServer.js';
 import { createDeviceServer, createIngestShared } from './deviceServer.js';
 import { startAtlantisServer, startLegacyLoopback } from './atlantis/server.js';
 import { createProxySource, loadOrCreateProxyCA, type ProxySource } from './proxy/server.js';
+import { resolveProxyTls } from './proxy/tlsMode.js';
 import { startDiscovery } from './discovery.js';
 import { VERSION } from './version.js';
 import { log } from './log.js';
@@ -245,11 +246,24 @@ async function boot() {
       const collectorHosts = [...new Set([host, 'localhost', ...lanAddresses()])];
       const internal = [INGEST_PORT, ATLANTIS_PORT, HTTP_PORT].flatMap((p) =>
         collectorHosts.map((h) => ({ host: h, port: p })));
+      // U5: optional TLS pass-through / intercept-only host lists. Both set, or an
+      // intercept-only list with no usable pattern, throws: the collector refuses
+      // to start (through the catch below) rather than guess.
+      const tlsMode = resolveProxyTls({ passthrough: env('PROXY_PASSTHROUGH'), interceptOnly: env('PROXY_INTERCEPT_ONLY') }, collectorHosts,
+        { passthrough: envName('PROXY_PASSTHROUGH'), interceptOnly: envName('PROXY_INTERCEPT_ONLY') });
       const ca = await loadOrCreateProxyCA(path.join(stateDir, 'proxy-ca'));
-      proxy = createProxySource({ port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow });
+      proxy = createProxySource({
+        port: proxyPort, ca, store, excludedCollectorEndpoints: internal, deviceAllowlist: allow,
+        ...(tlsMode.mode === 'passthrough' ? { tlsPassthrough: tlsMode.hosts } : {}),
+        ...(tlsMode.mode === 'intercept-only' ? { tlsInterceptOnly: tlsMode.hosts } : {}),
+      });
       await proxy.start();
       log.info(`proxy CA (copy to QA device, trust as user CA): ${ca.certPath}`);
       if (allow.length === 0) log.warn('proxy: TERMINUS_PROXY_ALLOW is empty; every client will be rejected. Set it to the QA device IP(s).');
+    } else {
+      for (const name of ['PROXY_PASSTHROUGH', 'PROXY_INTERCEPT_ONLY']) {
+        if (env(name) != null) log.warn(`${envName(name)} is set but the proxy is off (${envName('PROXY')} is not 1); ignoring it`);
+      }
     }
   } catch (e) {
     // A failure after the token was written must still clean it up and release the
