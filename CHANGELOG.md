@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+## 0.3.1 — 2026-10-09
+
+### Fixed
+
+- CLI and `terminus-mcp`: `--token <t>` always takes the next argument as the
+  token. Tokens are base64url and start with `-` about once in 64 collector boots;
+  such a value was read as a flag and the command failed with "flag --token needs
+  a value" (`--token=<t>` and `TERMINUS_TOKEN` were not affected).
+
 ## 0.3.0 — 2026-10-09
 
 ### Added
