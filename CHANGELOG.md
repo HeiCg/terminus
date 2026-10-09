@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## Unreleased
 
+### Added
+
+- `terminus-mcp` (new workspace `mcp/`, package `@terminus/mcp`): an MCP server on
+  stdio for Claude Code and Claude Desktop over the read API. Tools:
+  `terminus_status`, `terminus_devices`, `terminus_entries`, `terminus_entry`
+  (headers and optional bodies, size-capped, hex dump for binary),
+  `terminus_wait` (with `nearMisses` on timeout), `terminus_ws_sessions` and
+  `terminus_ws_frames`. Results are one compact line per record plus the JSON as
+  `structuredContent`; captured content is wrapped in delimited untrusted-data
+  blocks. Token order: `--token`, `TERMINUS_TOKEN`, then the `reader-token` file,
+  then `admin-token`. `terminus_replay` is registered only with the admin token
+  and `TERMINUS_MCP_ALLOW_REPLAY=1`. A collector without `apiVersion` 1 is
+  reported as too old.
+
 ## 0.2.0 — 2026-10-08
 
 ### Added

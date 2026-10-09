@@ -1,4 +1,4 @@
-import { readAdminTokenFile } from '../../collector/src/security/adminToken.js';
+import { readTokenFile, ADMIN_TOKEN_FILE, type TokenFile } from '../../collector/src/security/adminToken.js';
 import { flagString, type Flags } from './args.js';
 import { authError, generalError } from './errors.js';
 
@@ -23,7 +23,19 @@ export type ResolveDeps = {
   // In `tail`/`ls`, `--host` is the traffic filter, not the connection host, so the
   // connection host comes from TERMINUS_HOST or the loopback default instead.
   hostIsFilter?: boolean;
+  // The token files tried, in order, after --token and TERMINUS_TOKEN. The CLI keeps
+  // the default (admin-token only); the MCP server prefers the read-only
+  // reader-token and falls back to admin-token.
+  tokenFiles?: readonly TokenFile[];
 };
+
+// Where a resolved token came from: a flag, the environment, or one of the token
+// files a same-machine collector wrote.
+export type TokenSource = 'flag' | 'env' | TokenFile;
+export type ResolvedToken = { token: string; source: TokenSource };
+
+// The connection half of a Config (no credential), shared with the MCP server.
+export type Connection = Omit<Config, 'token'>;
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8787;
@@ -39,23 +51,31 @@ function resolvePort(flags: Flags, env: NodeJS.ProcessEnv): number {
 }
 
 // Resolve the token in the spec's precedence order: --token, then TERMINUS_TOKEN,
-// then the admin-token file a same-machine collector wrote, else a clear error.
-function resolveToken(deps: ResolveDeps): string {
+// then each token file a same-machine collector wrote (admin-token by default),
+// else a clear error.
+export function resolveToken(deps: ResolveDeps): ResolvedToken {
   const flagTok = flagString(deps.flags, 'token');
-  if (flagTok) return flagTok;
+  if (flagTok) return { token: flagTok, source: 'flag' };
   const envTok = deps.env.TERMINUS_TOKEN;
-  if (envTok && envTok !== '') return envTok;
-  const fileTok = readAdminTokenFile(deps.stateDir);
-  if (fileTok) return fileTok;
+  if (envTok && envTok !== '') return { token: envTok, source: 'env' };
+  for (const file of deps.tokenFiles ?? [ADMIN_TOKEN_FILE]) {
+    const fileTok = readTokenFile(file, deps.stateDir);
+    if (fileTok) return { token: fileTok, source: file };
+  }
   throw authError('no token: pass --token, set TERMINUS_TOKEN, or run the collector on this machine');
 }
 
-export function resolveConfig(deps: ResolveDeps): Config {
+export function resolveConnection(deps: ResolveDeps): Connection {
   const host = deps.hostIsFilter
     ? (deps.env.TERMINUS_HOST || DEFAULT_HOST)
     : (flagString(deps.flags, 'host') || deps.env.TERMINUS_HOST || DEFAULT_HOST);
   const port = resolvePort(deps.flags, deps.env);
-  const token = resolveToken(deps);
   const baseUrl = `http://${host}:${port}`;
-  return { host, port, token, baseUrl, origin: baseUrl };
+  return { host, port, baseUrl, origin: baseUrl };
+}
+
+export function resolveConfig(deps: ResolveDeps): Config {
+  const conn = resolveConnection(deps);
+  const { token } = resolveToken(deps);
+  return { host: conn.host, port: conn.port, token, baseUrl: conn.baseUrl, origin: conn.origin };
 }
