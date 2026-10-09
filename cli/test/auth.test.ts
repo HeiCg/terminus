@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveConfig } from '../src/config.js';
+import { resolveConfig, resolveToken } from '../src/config.js';
 import { CliError } from '../src/errors.js';
-import { writeAdminTokenFile } from '../../collector/src/security/adminToken.js';
+import { writeAdminTokenFile, writeTokenFile } from '../../collector/src/security/adminToken.js';
 import { createCollectorHarness } from '../../collector/test/fixtures/harness.js';
 import { runCli } from './helpers.js';
 
@@ -29,6 +29,18 @@ describe('token resolution precedence', () => {
     writeAdminTokenFile('file-tok', dir);
     const cfg = resolveConfig({ flags: {}, env: {}, stateDir: dir });
     expect(cfg.token).toBe('file-tok');
+  });
+
+  it('keeps preferring the admin-token file even when a reader-token file exists', () => {
+    writeAdminTokenFile('admin-tok', dir);
+    writeTokenFile('reader-token', 'reader-tok', dir);
+    expect(resolveConfig({ flags: {}, env: {}, stateDir: dir }).token).toBe('admin-tok');
+    expect(resolveToken({ flags: {}, env: {}, stateDir: dir })).toEqual({ token: 'admin-tok', source: 'admin-token' });
+  });
+
+  it('ignores a lone reader-token file (the CLI needs admin)', () => {
+    writeTokenFile('reader-token', 'reader-tok', dir);
+    expect(() => resolveConfig({ flags: {}, env: {}, stateDir: dir })).toThrow(/no token/);
   });
 
   it('errors with exit code 2 and a clear message when no token anywhere', () => {
