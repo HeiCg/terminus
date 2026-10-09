@@ -546,13 +546,16 @@ HAR (no `_terminus`) lands on a `har:<basename>` device with `source: xhr`.
 ## Replay a captured request
 
 `POST /api/replay` (and `terminus replay <device>/<id>`) reconstructs a stored
-request, applies any overrides (`method`, `url`, `headers`, `body`), strips
+request, applies any overrides (`method`, `url`, `headers`, and `body` or
+`bodyBase64`), strips
 hop-by-hop and `host`/`content-length` headers, and re-sends it from the Mac with a
 30 s timeout and no redirect following. The response is stored as a **new** entry
 with `source: replay`, a fresh id, and a `replayOf: { id, credentials, stripped }`
-back-reference — the original is never modified. A request whose body was omitted at
-capture (size, budget, binary, or never captured) returns `422` unless an override
-body is given.
+back-reference — the original is never modified. A captured body is re-sent as
+stored, text or binary; a request whose body was not retained (size, budget, or
+never captured) returns `422` unless an override body is given. An override body is
+either a UTF-8 `body` or raw bytes as `bodyBase64` (not both: `400`), at most 1 MiB
+(`413`).
 
 **Credentials are removed by default.** The body's `credentials` field defaults to
 `'strip'`: the `authorization`, `cookie`, `proxy-authorization`, `x-api-key`,
@@ -562,7 +565,8 @@ credential-bearing query params (`token`, `access_token`, `api_key`, `apikey`,
 request leaves. The removed names come back as `stripped` (a `?name` marker flags a
 query param). Send `credentials: 'keep'` (`terminus replay --with-credentials`, or
 the UI's "Include captured credentials" toggle) to re-send them verbatim. Headers you
-pass explicitly in `overrides.headers` are never stripped.
+pass explicitly in `overrides.headers` are never stripped, unless the value repeats
+the captured one verbatim.
 
 > **Security.** A replay leaves your machine and is sent to the original host. Even
 > with credentials stripped it re-issues the request — a non-idempotent request
@@ -594,7 +598,7 @@ the `GET /api/entries/wait` long-poll, the reader token, `apiVersion` and
 | GET    | `/api/status`            | session   | Operational status: `{ version, uptimeMs, paused, devices, retention, bodies, ingest }` — aggregate counters only, no capture payload. `ingest` is the ingest scheduler's `WorkStats` (or `null`). |
 | POST   | `/api/clear?device=`     | session   | Clear one device (or all); needs Origin  |
 | POST   | `/api/pause`             | session   | Pause/resume the live `/ui` stream. Body `{ "paused": true\|false }` (≤1 KiB, else `413`; non-boolean/malformed → `400`) → `200 { "paused": bool }`. Cookie mutation needs Origin. While paused the store keeps recording; resume replays a fresh snapshot. |
-| POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, credentials?: 'strip'\|'keep', overrides?: { method?, url?, headers?, body? } }` → `201 { key, status, durationMs, error, stripped }`; `404` unknown entry, `422` when the request body was not captured and no override is given, `400` malformed. `credentials` defaults to `'strip'` (removes captured auth headers/cookies and token query params; `stripped` lists what went). Cookie mutation needs Origin (a bearer CLI does not). |
+| POST   | `/api/replay`            | session   | Re-send a captured request from this machine and store the result as a new `replay` entry. Body `{ deviceId, id, credentials?: 'strip'\|'keep', overrides?: { method?, url?, headers?, body? \| bodyBase64? } }` → `201 { key, status, durationMs, error, stripped }`; `404` unknown entry, `422` when the request body was not retained and no override is given, `413` override body over 1 MiB, `400` malformed (or both body fields). `credentials` defaults to `'strip'` (removes captured auth headers/cookies and token query params; `stripped` lists what went). Cookie mutation needs Origin (a bearer CLI does not). |
 | GET    | `/api/pairing?host=`     | session   | `PairingImport` + `certPort` for the QA screen / QR (no-store). `host` overrides the advertised host for this response (for a simulator or emulator on `127.0.0.1`); a host the certificate SAN does not cover is `400`. |
 | GET    | `/export.har?device=`    | session   | HAR 1.2 download                         |
 | GET    | `/export.json?device=`   | session   | Raw JSON download                        |
