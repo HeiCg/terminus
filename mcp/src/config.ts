@@ -37,7 +37,7 @@ export type SettingsDeps = {
 };
 
 export function parseFlags(argv: string[]): Flags {
-  return parseArgs(argv, { valueFlags: ['host', 'port', 'token'] }).flags;
+  return parseArgs(argv, { valueFlags: ['host', 'port'], opaqueValueFlags: ['token'] }).flags;
 }
 
 // Throws (a CliError) only for an invalid port; a missing token is reported per

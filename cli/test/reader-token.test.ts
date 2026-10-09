@@ -38,10 +38,10 @@ describe('reader token in the CLI (P3)', () => {
     try {
       h.store.addEntry(makeEntry({ id: 'r1', url: 'https://api.example.com/reader-visible' }));
       const env = await runCli(['ls'], asReader(h));
-      expect(env.code).toBe(0);
+      expect(env.code, env.stderr).toBe(0);
       expect(env.stdout).toContain('/reader-visible');
       const flag = await runCli(['ls', '--token', h.readerToken], { harness: h, noToken: true });
-      expect(flag.code).toBe(0);
+      expect(flag.code, flag.stderr).toBe(0);
       expect(flag.stdout).toContain('/reader-visible');
     } finally { await h.close(); }
   });

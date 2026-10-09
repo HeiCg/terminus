@@ -198,7 +198,7 @@ export type MainDeps = {
 };
 
 export async function main(argv: string[], deps: MainDeps): Promise<number> {
-  const parsed = parseArgs(argv, { valueFlags: VALUE_FLAGS });
+  const parsed = parseArgs(argv, { valueFlags: VALUE_FLAGS, opaqueValueFlags: ['token'] });
 
   // `--version`/`-V` wins anywhere, before any command dispatch or help.
   if (parsed.flags.version === true || parsed.flags.V === true) { deps.stdout.write(`${VERSION}\n`); return 0; }

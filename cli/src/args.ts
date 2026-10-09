@@ -22,6 +22,10 @@ export type ParseOptions = {
   // Long or short flag names (without dashes) that consume the next token as their
   // value when it is not itself a flag. Everything else is a boolean flag.
   valueFlags?: string[];
+  // Value flags whose value is opaque and always consumed, even when it starts with
+  // '-': a base64url token begins with '-' about once in 64 boots, and reading it
+  // as a flag made `--token <t>` fail with "needs a value".
+  opaqueValueFlags?: string[];
 };
 
 // A flag token starts with '-' and is not a negative number: `-h`/`--last` are
@@ -29,7 +33,10 @@ export type ParseOptions = {
 const isFlagToken = (t: string): boolean => t.length > 1 && t.startsWith('-') && !/^-\d/.test(t);
 
 export function parseArgs(argv: string[], opts: ParseOptions = {}): ParsedArgs {
-  const valueFlags = new Set(opts.valueFlags ?? []);
+  const opaque = new Set(opts.opaqueValueFlags ?? []);
+  const valueFlags = new Set([...(opts.valueFlags ?? []), ...opaque]);
+  const takesNext = (name: string, i: number): boolean =>
+    valueFlags.has(name) && i + 1 < argv.length && (opaque.has(name) || !isFlagToken(argv[i + 1]));
   const flags: Flags = {};
   const positionals: string[] = [];
   let rest = false; // everything after a bare `--` is positional
@@ -52,7 +59,7 @@ export function parseArgs(argv: string[], opts: ParseOptions = {}): ParsedArgs {
       const body = tok.slice(2);
       const eq = body.indexOf('=');
       if (eq >= 0) { put(body.slice(0, eq), body.slice(eq + 1)); continue; }
-      if (valueFlags.has(body) && i + 1 < argv.length && !isFlagToken(argv[i + 1])) {
+      if (takesNext(body, i)) {
         put(body, argv[++i]);
       } else {
         put(body, true);
@@ -62,7 +69,7 @@ export function parseArgs(argv: string[], opts: ParseOptions = {}): ParsedArgs {
 
     if (isFlagToken(tok)) {
       const name = tok.slice(1);
-      if (valueFlags.has(name) && i + 1 < argv.length && !isFlagToken(argv[i + 1])) {
+      if (takesNext(name, i)) {
         put(name, argv[++i]);
       } else {
         put(name, true);

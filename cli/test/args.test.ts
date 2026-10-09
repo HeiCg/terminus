@@ -59,6 +59,21 @@ describe('parseArgs', () => {
   });
 });
 
+describe('opaque value flags', () => {
+  it('always consume the next token, even one starting with a dash (a token can)', () => {
+    const p = parseArgs(['ls', '--token', '-AbC_9', '--json'], { valueFlags: ['limit'], opaqueValueFlags: ['token'] });
+    expect(p.flags.token).toBe('-AbC_9');
+    expect(p.flags.json).toBe(true);
+    expect(p.command).toBe('ls');
+  });
+
+  it('a non-opaque value flag still treats a dash token as the next flag', () => {
+    const p = parseArgs(['ls', '--limit', '--json'], { valueFlags: ['limit'], opaqueValueFlags: ['token'] });
+    expect(p.flags.limit).toBe(true);
+    expect(p.flags.json).toBe(true);
+  });
+});
+
 describe('flag readers', () => {
   it('flagString returns the first present alias', () => {
     expect(flagString({ o: 'x.har' }, 'output', 'o')).toBe('x.har');
