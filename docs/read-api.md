@@ -97,7 +97,7 @@ restart.
 
 ```json
 {"status":"ok","version":"0.2.0","apiVersion":1,
- "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes","tls-passthrough","scope"]}
+ "capabilities":["seq","reader-token","device-identity","filters","wait","redaction-marker","query","replay-bytes","tls-passthrough","scope","raw-streams"]}
 ```
 
 ```bash
@@ -120,6 +120,7 @@ two fields also appear on `GET /api/status`.
 | `replay-bytes` | Binary-safe [replay](#post-apireplay-admin): `overrides.bodyBase64`, a captured binary request body re-sent without an override, binary responses stored as bytes, and the `413` override-body cap. |
 | `tls-passthrough` | `TERMINUS_PROXY_PASSTHROUGH` / `TERMINUS_PROXY_INTERCEPT_ONLY` on the proxy, and the [`tunnel`](#tunnel-entries) field on the `CONNECT` entries that record raw TLS tunnels. |
 | `scope` | The capture scope: `scope` on `GET /api/status` and the admin-only [`GET`/`PUT /api/scope`](#get-and-put-apiscope-admin). |
+| `raw-streams` | [Raw TCP/TLS stream sessions](#raw-tcp-and-tls-streams) from the proxy (`kind` `tcp`/`tls` and the `stream` field on `GET /api/ws`, the `kind=` filter), `TERMINUS_PROXY_SOCKS`, and the admin-only [`POST /api/replay/stream`](#post-apireplaystream-admin). |
 
 To feature-detect, call `GET /health` once at startup. A collector older than
 0.2.0 answers without `apiVersion` and `capabilities` and has none of the features
@@ -490,12 +491,14 @@ WebSocket and server-sent-event sessions are stored apart from HTTP entries and 
 handshake of a WebSocket is also stored as an HTTP entry, which does get a `seq`;
 its frames do not.) The routes keep the legacy paging:
 
-- `GET /api/ws?device=&cursor=&limit=`: `{ items: [WsSummary...], nextCursor }`,
+- `GET /api/ws?device=&kind=&cursor=&limit=`: `{ items: [WsSummary...], nextCursor }`,
   ordered by `openedAt`. `device` is a raw device id here (no alias resolution, no
-  `externalId`/`bundleId`). A `WsSummary` carries `wsId`, `deviceId`, `source`,
-  `url`, `openedAt`, `kind` (`websocket` or `sse`), `httpEntryKey`, `partial`,
-  `resumed`, `closedAt`, `closeCode`, `closeReason` and the frame counts
-  `retainedFrames`, `totalFrames`, `droppedFrames`.
+  `externalId`/`bundleId`). `kind` keeps one session kind (`websocket`, `sse`,
+  `tcp` or `tls`; anything else is a `400`). A `WsSummary` carries `wsId`,
+  `deviceId`, `source`, `url`, `openedAt`, `kind` (`websocket`, `sse`, or `tcp` /
+  `tls` for a [raw stream](#raw-tcp-and-tls-streams)), `httpEntryKey`, `partial`,
+  `resumed`, `closedAt`, `closeCode`, `closeReason`, the frame counts
+  `retainedFrames`, `totalFrames`, `droppedFrames`, and `stream` on a raw stream.
 - `GET /api/ws/<deviceId>/<wsId>/frames?after=&limit=`: `{ items: [FrameSummary...],
   nextCursor }`, where a `FrameSummary` is `{ sequence, ts, direction, binary, body }`
   and `after` is the last `sequence` you saw.
@@ -504,6 +507,100 @@ its frames do not.) The routes keep the legacy paging:
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8787/api/ws?device=com.acme.app-Pixel"
+```
+
+### Raw TCP and TLS streams
+
+With the proxy on, a connection inside a `CONNECT` (or, with `TERMINUS_PROXY_SOCKS=1`,
+a SOCKS v4/v5) tunnel that is not HTTP, HTTP/2, WebSocket or TLS-wrapped HTTP is
+relayed to its destination and recorded as a **stream session** on the same routes
+as WebSocket sessions. WebSocket and SSE sessions keep their shape; a stream
+session differs in:
+
+- `kind`: `tcp` for plain TCP, `tls` for TLS. `url` is `tcp://host:port` or
+  `tls://host:port` (the destination the client asked the proxy for); the capture
+  scope matches on its host.
+- `stream`: `{ host, port, sni, plaintext, replayOf? }`. `sni` is the server name
+  of the client's TLS hello (`null` for plain TCP or when none was sent).
+  `plaintext` is `true` for plain TCP and for TLS the proxy terminated (MITM, its
+  CA trusted on the device): the frames are the decrypted bytes. It is `false` for
+  a TLS pass-through tunnel (`TERMINUS_PROXY_PASSTHROUGH`, or any host outside
+  `TERMINUS_PROXY_INTERCEPT_ONLY`): the bytes are ciphertext, so the session
+  records metadata only and has **no frames** (its `CONNECT` tunnel entry is still
+  recorded as before). `replayOf: { wsId }` marks a [stream replay](#post-apireplaystream-admin).
+- Frames: each chunk the proxy relayed is one frame, `out` client to server and
+  `in` server to client, with the collector-clock time it was relayed. Chunk
+  boundaries are TCP segment boundaries as the proxy read them, not protocol
+  messages. Same per-frame cap (256 KiB) and retention as WebSocket frames. A chunk
+  with a NUL byte or invalid UTF-8 is `binary` and kept verbatim (not redacted);
+  any other chunk is text and goes through the redactor.
+- `closeCode` is `null`; `closeReason` is `closed`, or `error <code>` when the
+  relay failed (for example `error ECONNREFUSED`, or a certificate error when the
+  proxy re-dialled a MITM'd TLS stream: it verifies the upstream certificate).
+- The HAR export leaves stream sessions out (HAR has no shape for them); the JSON
+  export includes them.
+
+A client outside `TERMINUS_PROXY_ALLOW`, or a stream to the cloud metadata address
+`169.254.169.254`, is closed before the proxy dials anything.
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8787/api/ws?kind=tcp"
+```
+
+## `POST /api/replay/stream` (admin)
+
+Opens a fresh TCP (or TLS) connection from the collector's machine to a captured
+stream's destination, sends its client-to-server frames in order, records what
+the server sends back until it closes, the timeout fires or the read cap is hit,
+and stores the whole exchange as a NEW stream session (`source: replay`,
+`stream.replayOf` pointing to the original). Admin token only (the reader gets
+`403 forbidden_scope`); a cookie-driven call needs an exact `Origin`, like every
+mutation. It leaves the machine: read the
+[replay section of security.md](security.md#replay-re-sends-captured-requests).
+
+```json
+{"deviceId":"proxy:4f2c…:192.168.1.23","wsId":"proxy:4f2c…:9b1e…",
+ "tls":true,"sni":"redis.acme.test","frames":[0,2],
+ "overrides":{"framesBase64":["KjEN","UElORw0K"]},"timeoutMs":5000,"readBytes":65536}
+```
+
+- `deviceId`, `wsId` (required): the captured `tcp`/`tls` session.
+- `tls` (default: as captured, `true` for a `tls` session), `sni` (default: the
+  captured SNI, else the host when it is a name), `host`, `port` (default: the
+  captured destination).
+- `frames`: `"client"` (default: every retained client-to-server frame, in order)
+  or an array of frame `sequence`s, sent in the order given; each must be a
+  retained `out` frame (`400` otherwise).
+- `overrides.framesBase64`: one standard-base64 payload per selected frame,
+  replacing it (a frame whose bytes were not retained can be sent this way). Its
+  length must match the selection (`400`); one over 1 MiB is a `413`.
+- `timeoutMs`: how long the whole replay may take, `1..30000` (default `10000`).
+  The collector does not half-close after sending, so a server that keeps the
+  connection open ends the replay at the timeout.
+- `readBytes`: how many bytes to read back at most, `1..16777216` (default 1 MiB).
+- The payloads sent are the STORED frame bytes: a text chunk the redactor masked
+  at capture is re-sent masked. Use `framesBase64` to send other bytes.
+- Upstream TLS is verified (`rejectUnauthorized`), as for an HTTP replay; there is
+  no insecure mode.
+- `201` returns `{ key: {deviceId, wsId}, bytesSent, bytesReceived, durationMs,
+  closedBy, error, stored }`. `closedBy` is `server`, `timeout`, `cap` or `error`
+  (then `error` names it, for example `ECONNREFUSED` or a certificate code, and the
+  new session records it as `closeReason`). `stored` is `false` when the capture
+  scope keeps the result out (the bytes were still sent).
+- `404`: unknown session. `422`: not a `tcp`/`tls` session; a TLS pass-through
+  tunnel (no plaintext was captured); a STARTTLS-like capture (a client frame is a
+  TLS handshake record, so the stream switched to TLS mid-stream and its later
+  frames are ciphertext bound to that connection's keys: they cannot be re-sent on
+  a new connection, and the collector does not implement STARTTLS); frames evicted
+  by retention under the default selection; a selected frame whose bytes were not
+  retained without an override; a destination that is, or resolves to, the
+  link-local range `169.254.0.0/16` or `fd00:ec2::254` (the cloud metadata
+  service).
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H 'content-type: application/json' \
+  -d '{"deviceId":"proxy:…:192.168.1.23","wsId":"proxy:…","frames":[0],"timeoutMs":2000}' \
+  http://127.0.0.1:8787/api/replay/stream
 ```
 
 ## `POST /api/replay` (admin)
@@ -837,6 +934,10 @@ side was masked. What is masked, and how to tune it, is in
   traffic stays mixed under one device; the collector cannot split it.
 - **Redaction is name-based.** See the honest limits in
   [security.md](security.md#what-redaction-does-not-cover).
+- **Raw streams are TCP only, and only through the proxy.** UDP, DTLS and QUIC are
+  not captured; a non-HTTP client must be pointed at the proxy (`CONNECT` or SOCKS,
+  see [troubleshooting](troubleshooting.md#capturing-a-non-http-tcp-client-through-the-proxy)).
+  STARTTLS streams are captured but not replayable.
 - **No QUIC, HTTP/3, UDP or DTLS.** Terminus does not intercept or replay them.
   HTTP/3 never goes through the proxy, and a QUIC-speaking client stack bypasses the
   SDK capture layers; see [troubleshooting](troubleshooting.md#an-app-works-but-the-proxy-shows-nothing-for-a-host-http3--quic).

@@ -287,3 +287,49 @@ without interception: the app sees the real certificate, and the capture shows a
 `CONNECT` entry per connection (host, port, SNI, bytes up/down, open/close time)
 instead of the requests inside it. The app-side capture (Atlantis/XHR) still records
 the exchanges themselves.
+
+## Capturing a non-HTTP TCP client through the proxy
+
+**Symptom.** The app talks a non-HTTP protocol over TCP (MQTT, Redis, a database
+driver, a game or IoT protocol, raw TLS sockets) and nothing shows up in the
+Sockets view, although the proxy is on.
+
+**Cause.** A system HTTP proxy setting only applies to the HTTP stacks that honour
+it; a raw socket client connects straight to its server and never reaches the
+proxy. The proxy only sees a raw stream when the client sends it through a
+`CONNECT` tunnel or SOCKS.
+
+**Fix.** Point the client at the proxy explicitly:
+
+- **SOCKS (most clients).** Start the collector with `TERMINUS_PROXY=1
+  TERMINUS_PROXY_SOCKS=1` (plus `TERMINUS_PROXY_ALLOW=<device IP>`); SOCKS v4/v5 is
+  then accepted on the proxy port (`TERMINUS_PROXY_PORT`, default 8080), no
+  authentication. Configure the client's SOCKS proxy to `<collector LAN IP>:8080`:
+  for example a JVM/Android client with `-DsocksProxyHost=… -DsocksProxyPort=8080`
+  or an explicit `java.net.Proxy(Proxy.Type.SOCKS, …)`, OkHttp's `.proxy(...)`, a
+  client library's `socks5://` proxy option, or a system-wide SOCKS tool on a test
+  network. Prefer SOCKS5 with a hostname (`socks5h`) so the destination name reaches
+  the collector (it then appears in the session URL and the capture scope matches
+  it).
+- **HTTP CONNECT.** A client with an HTTP-proxy option that tunnels arbitrary TCP
+  (`CONNECT host:port`) works without the SOCKS flag.
+- **TLS.** If the client wraps the stream in TLS, the proxy intercepts it like
+  HTTPS: the device must trust the proxy CA and the client must not pin, otherwise
+  the handshake fails (`tls_error`) or the host belongs in
+  `TERMINUS_PROXY_PASSTHROUGH`, where only metadata is recorded. The proxy dials the
+  real server with Node's default trust, so a server with a private or self-signed
+  certificate fails on the collector side (the session closes with `error
+  <certificate code>`).
+
+**Limits.**
+
+- UDP, DTLS and QUIC are not captured (SOCKS UDP ASSOCIATE is not supported); see
+  the HTTP/3 entry above.
+- A stream that switches to TLS mid-connection (STARTTLS in SMTP, IMAP, XMPP,
+  PostgreSQL and similar) is captured, but after the switch the frames are TLS
+  records the proxy cannot read, and `POST /api/replay/stream` refuses it (`422`):
+  that ciphertext is bound to the original connection's keys and cannot be re-sent
+  on a new one, and the collector does not implement STARTTLS. Disable STARTTLS on
+  a test server, or use the protocol's implicit-TLS port so the proxy terminates
+  TLS up front.
+- Frames are the TCP chunks as the proxy read them, not protocol messages.
